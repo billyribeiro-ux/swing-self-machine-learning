@@ -1,0 +1,41 @@
+project:
+  name: RSI Swing Reversal Self-Learner
+  timezone: America/New_York
+  random_seed: 42
+
+data:
+  provider: csv
+  interval: 1d
+  start: '2010-01-01'
+  auto_adjust: false
+  raw_directory: data/raw
+  processed_directory: data/processed
+
+research:
+  holding_periods: [3, 5, 10, 20, 30]
+  rsi_lengths:
+    min: 2
+    max: 50
+  lower_trigger:
+    min: 5
+    max: 60
+  upper_trigger:
+    min: 40
+    max: 95
+  slope_windows: [1, 2, 3, 5, 10]
+  control:
+    rsi_length: 14
+    oversold: 30
+    overbought: 70
+
+backtest:
+  signal_time: close
+  entry: next_open
+  round_trip_cost_bps: 5.0
+  overlap_policy: one_open_trade_per_ticker
+  minimum_trades: 30
+
+validation:
+  method: expanding_walk_forward
+  splits: 5
+  gap_bars: 1

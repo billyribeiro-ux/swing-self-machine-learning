@@ -1,0 +1,15 @@
+research_universe:
+  - SPY
+  - QQQ
+  - AAPL
+  - MSFT
+  - NVDA
+  - TSLA
+  - AMD
+  - META
+  - AMZN
+  - GOOGL
+
+benchmarks:
+  - SPY
+  - QQQ
