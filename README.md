@@ -50,6 +50,14 @@ python -m swing_rsi.cli demo
 
 Synthetic data proves that the software runs. It does **not** prove trading performance.
 
+Open the local research dashboard:
+
+```bash
+./scripts/run_dashboard.sh
+```
+
+The dashboard is a temporary local Streamlit presentation layer over the typed Python research modules. It is not a production trading application. The long-term UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary.
+
 ## Download real daily data from FMP
 
 ```bash

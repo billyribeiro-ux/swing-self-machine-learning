@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from swing_rsi.application.datasets import download_daily_to_raw
+from swing_rsi.application.research_service import run_research
 from swing_rsi.backtest.engine import backtest_fixed_horizon
 from swing_rsi.config import ProjectPaths
-from swing_rsi.data.loader import download_daily, load_ohlcv_csv, save_ohlcv_csv
+from swing_rsi.data.loader import load_ohlcv_csv, save_ohlcv_csv
 from swing_rsi.data.providers.fmp import download_fmp_daily
 from swing_rsi.features.labels import add_swing_labels
 from swing_rsi.features.price import build_price_features
@@ -17,7 +19,6 @@ from swing_rsi.features.rsi import wilder_rsi
 from swing_rsi.reports.writer import atomic_write_csv
 from swing_rsi.research.grid_search import (
     compact_demo_grid,
-    default_research_grid,
     rule_from_result,
     run_grid_search,
 )
@@ -119,34 +120,44 @@ def command_fmp_check(args: argparse.Namespace) -> int:
 
 
 def command_download(args: argparse.Namespace) -> int:
-    paths = _project_paths()
-    frame = download_daily(
+    result = download_daily_to_raw(
+        Path.cwd(),
         args.ticker,
         start=args.start,
         end=args.end,
         provider=args.provider,
     )
-    output = Path(args.output) if args.output else paths.raw_data / f"{args.ticker.upper()}.csv"
-    save_ohlcv_csv(frame, output)
-    print(f"Saved {len(frame):,} validated daily rows from {args.provider} to {output}")
+    if args.output:
+        frame = load_ohlcv_csv(result.saved_path)
+        output = save_ohlcv_csv(frame, args.output)
+    else:
+        output = result.saved_path
+    print(
+        f"Updated {result.ticker}: downloaded {result.downloaded_rows:,} rows, "
+        f"started with {result.existing_rows:,}, replaced {result.replaced_dates:,} dates, "
+        f"inserted {result.inserted_dates:,}, final rows {result.final_rows:,} to {output}"
+    )
     print("Provider data still requires corporate-action and historical-universe audits.")
     return 0
 
 
 def command_research(args: argparse.Namespace) -> int:
     frame = load_ohlcv_csv(args.input)
-    results = run_grid_search(
+    run = run_research(
         frame,
-        default_research_grid(),
+        ticker=args.ticker,
+        start=None,
+        end=None,
         holding_period=args.holding_period,
         round_trip_cost_bps=args.cost_bps,
         minimum_trades=args.minimum_trades,
+        grid_preset="standard",
+        reports_dir=Path(args.output).parent,
+        report_path=Path(args.output),
     )
-    output = Path(args.output)
-    atomic_write_csv(results, output)
-    print(f"Saved {len(results):,} candidate evaluations to {output}")
-    if not results.empty:
-        print(results.head(10).to_string(index=False))
+    print(f"Saved {len(run.results):,} candidate evaluations to {run.report_path}")
+    if not run.results.empty:
+        print(run.results.head(10).to_string(index=False))
     return 0
 
 

@@ -48,8 +48,10 @@ src/swing_rsi/
   scanner/                  latest-bar evidence output
   forward/                  immutable signal and outcome journals
   reports/                  atomic report writers
+  application/              shared CLI/dashboard orchestration services
   sample_data.py            deterministic plumbing-only demo data
   cli.py                    user-facing commands
+dashboard/                  local Streamlit presentation layer
 ```
 
 ## Provider boundary
@@ -72,6 +74,12 @@ Version 1 signals are known only after a daily bar closes. The default simulated
 - Reports live under `reports/` and are ignored by Git.
 - Forward signals and outcomes are separate append-only files.
 - Methodology and decisions live under `docs/` and are the permanent source of truth.
+
+## Local dashboard boundary
+
+The Streamlit dashboard is a local-only presentation layer. It calls reusable Python services under `src/swing_rsi/application/` and does not duplicate market-data, RSI, signal, backtest, research, or walk-forward logic inside dashboard pages.
+
+Streamlit is temporary local presentation infrastructure. The long-term UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary, but no separate API or deployment layer exists in this milestone.
 
 ## Extension path
 

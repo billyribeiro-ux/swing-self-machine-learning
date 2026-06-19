@@ -21,7 +21,7 @@ PY
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[all,dev]"
+python -m pip install -e ".[all,dev,dashboard]"
 pytest
 ruff check .
 ruff format --check .
@@ -32,3 +32,4 @@ echo "Setup complete."
 echo "Activate later with: source .venv/bin/activate"
 echo "Configure FMP securely with: ./scripts/configure_fmp.sh"
 echo "Run the plumbing demo with: python -m swing_rsi.cli demo"
+echo "Open the local dashboard with: ./scripts/run_dashboard.sh"

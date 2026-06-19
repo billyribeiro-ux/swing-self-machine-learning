@@ -43,3 +43,15 @@ Reason: The user already has FMP access, and one explicit primary provider reduc
 Decision: Read `FMP_API_KEY` from a local `.env` file created by a hidden-input setup script. Never print, hardcode, commit, or place the key in request URLs.
 
 Reason: This keeps credentials separate from research code and repository history while remaining straightforward to configure on a Mac.
+
+## 2026-06-19 — Streamlit for the first local research dashboard
+
+Decision: Build Dashboard V0.1 with Streamlit as a local-only presentation layer over reusable Python application services.
+
+Reason: Streamlit provides the fastest path to inspect data quality, RSI candidates, in-sample research, and walk-forward folds without adding a separate API, JavaScript frontend, database, authentication, or deployment layer. The long-term commercial UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary.
+
+## 2026-06-19 — Dashboard data updates merge by date
+
+Decision: Treat dashboard and CLI FMP downloads as non-destructive updates. Existing ticker CSVs are loaded, newly downloaded rows replace matching dates, new dates are inserted, the merged OHLCV frame is validated, and the final file is saved atomically.
+
+Reason: A narrow refresh window must not silently truncate broader local history. Destructive replacement remains out of scope for Dashboard V0.1 unless it is later added as an explicit confirmed action.

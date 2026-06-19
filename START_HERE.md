@@ -22,7 +22,15 @@ source .venv/bin/activate
 python -m swing_rsi.cli demo
 ```
 
-6. Download the first real dataset:
+6. Open the local research dashboard:
+
+```bash
+./scripts/run_dashboard.sh
+```
+
+The dashboard is local research tooling only. It is not a production trading application.
+
+7. Download the first real dataset:
 
 ```bash
 python -m swing_rsi.cli download --provider fmp --ticker AAPL --start 2020-01-01
