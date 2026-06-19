@@ -4,7 +4,7 @@ project:
   random_seed: 42
 
 data:
-  provider: csv
+  provider: fmp
   interval: 1d
   start: '2010-01-01'
   auto_adjust: false

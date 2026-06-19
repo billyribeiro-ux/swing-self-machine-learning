@@ -37,7 +37,7 @@ def scan_latest(
     frame: pd.DataFrame,
     ticker: str,
     rule: RSIReversalRule,
-    model_version: str = "0.1.0",
+    model_version: str = "0.1.1",
     historical_stats: dict[str, object] | None = None,
 ) -> ScannerResult | None:
     features = build_price_features(frame)

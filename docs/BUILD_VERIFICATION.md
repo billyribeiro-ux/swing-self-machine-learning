@@ -7,8 +7,8 @@ Verified on 2026-06-19 before delivery.
 ```text
 Ruff lint: passed
 Ruff formatting: passed
-Mypy strict type checking: passed across 27 source files
-Pytest: 12 tests passed
+Mypy strict type checking: passed across 30 source files
+Pytest: 18 tests passed
 ```
 
 ## Behaviors covered by tests
@@ -23,6 +23,12 @@ Pytest: 12 tests passed
 - One open trade per ticker and overlap prevention
 - Expanding walk-forward folds are chronological and gapped
 - Forward signals and outcomes are separate append-only records
+- FMP header authentication without putting the key in query parameters
+- Current FMP list responses and legacy historical wrappers
+- FMP field normalization including `adjClose`
+- FMP error messages do not expose the configured key
+- Invalid FMP date ranges are rejected before a request
+- Local `.env` loading and missing-key behavior
 
 ## End-to-end demo
 
@@ -35,4 +41,14 @@ The deterministic synthetic demo successfully:
 - Generated future outcome labels
 - Produced scanner output files
 
-Synthetic results were used only to verify software plumbing. They are not evidence of market performance.
+Synthetic results validate software plumbing only. They are not evidence of market performance.
+
+## FMP verification
+
+The adapter is fully covered with deterministic mocked HTTP tests. A live connection check is available through:
+
+```bash
+python -m swing_rsi.cli fmp-check
+```
+
+Live access is tested after the user's local `.env` is configured because the key is not embedded in the repository.

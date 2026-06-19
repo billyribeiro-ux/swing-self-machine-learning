@@ -13,6 +13,8 @@ python3 - <<'PY'
 import sys
 if sys.version_info < (3, 12):
     raise SystemExit(f"Python 3.12+ is required; found {sys.version.split()[0]}")
+if sys.version_info >= (3, 15):
+    raise SystemExit(f"Python below 3.15 is required; found {sys.version.split()[0]}")
 print(f"Using Python {sys.version.split()[0]}")
 PY
 
@@ -21,8 +23,12 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[all,dev]"
 pytest
+ruff check .
+ruff format --check .
+mypy src
 
 echo
 echo "Setup complete."
 echo "Activate later with: source .venv/bin/activate"
-echo "Run the demo with: python -m swing_rsi.cli demo"
+echo "Configure FMP securely with: ./scripts/configure_fmp.sh"
+echo "Run the plumbing demo with: python -m swing_rsi.cli demo"

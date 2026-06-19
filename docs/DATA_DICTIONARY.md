@@ -45,3 +45,7 @@ All future-looking fields begin with `label_`. Examples:
 - `label_hit_3pct_within_10d`
 
 No `label_` column may be used by the scanner or model feature matrix.
+
+## Provider metadata
+
+Validated frames currently carry in-memory attributes for `provider` and `symbol`. Milestone M1 will add persistent provenance including retrieval time, endpoint, requested date range, provider response fingerprint, adjustment policy, and quality-report version.

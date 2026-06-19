@@ -8,7 +8,8 @@ The engine will use historical daily price and volume data to discover RSI behav
 
 ## Included
 
-- Daily OHLCV for stocks and ETFs
+- Daily OHLCV for stocks and ETFs, with FMP as the primary Version 1 provider
+- Secure local secret handling through a Git-ignored `.env` file
 - Corporate-action-aware data handling policy
 - RSI lengths from 2 through 50
 - Learned lower and upper regions
@@ -41,7 +42,7 @@ The engine will use historical daily price and volume data to discover RSI behav
 
 Version 1 is done only when the complete loop works:
 
-1. Daily data ingests and validates correctly.
+1. FMP daily data ingests, preserves provenance, and validates correctly.
 2. Features use only information known by signal time.
 3. Labels are isolated and future-looking by explicit design.
 4. Signals occur at the close and default entries occur no earlier than the next open.

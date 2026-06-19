@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1 — 2026-06-19
+
+- Selected FMP as the initial primary daily-data provider.
+- Added stable FMP end-of-day OHLCV adapter with header authentication.
+- Added secure `.env` loading and a hidden-input Mac configuration script.
+- Added `doctor`, `fmp-check`, and provider-selectable `download` commands.
+- Added mocked FMP response, authentication, date, schema, and secret-exposure tests.
+- Kept yfinance isolated as an optional fallback/comparison source.
+- Updated Mac setup, milestones, Codex assignment, decisions, and provider documentation.
+
 ## 0.1.0 — 2026-06-19
 
 - Created the canonical Version 1 repository.

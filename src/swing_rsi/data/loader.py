@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from swing_rsi.data.providers.fmp import download_fmp_daily
 from swing_rsi.data.validation import normalize_ohlcv_columns, validate_ohlcv
 
 
@@ -29,17 +30,34 @@ def save_ohlcv_csv(frame: pd.DataFrame, path: str | Path) -> Path:
     return output
 
 
+def download_daily(
+    ticker: str,
+    start: str | None = None,
+    end: str | None = None,
+    *,
+    provider: str = "fmp",
+) -> pd.DataFrame:
+    normalized_provider = provider.strip().lower()
+    if normalized_provider == "fmp":
+        return download_fmp_daily(ticker, start=start, end=end)
+    if normalized_provider == "yfinance":
+        if start is None:
+            raise ValueError("yfinance bootstrap downloads require a start date")
+        return download_yfinance_daily(ticker, start=start, end=end)
+    raise ValueError(f"Unsupported daily data provider: {provider}")
+
+
 def download_yfinance_daily(
     ticker: str,
     start: str,
     end: str | None = None,
 ) -> pd.DataFrame:
-    """Bootstrap adapter only; production data quality must be audited separately."""
+    """Optional fallback adapter; production data quality must be audited separately."""
     try:
         import yfinance as yf
     except ImportError as exc:  # pragma: no cover - depends on optional install
         raise RuntimeError(
-            'Install the market-data extra first: pip install -e ".[market-data]"'
+            'Install the fallback provider first: pip install -e ".[fallback-data]"'
         ) from exc
 
     data = yf.download(
@@ -55,4 +73,7 @@ def download_yfinance_daily(
     if data.empty:
         raise ValueError(f"No daily data returned for {ticker}")
     data = normalize_ohlcv_columns(data)
-    return validate_ohlcv(data)
+    validated = validate_ohlcv(data)
+    validated.attrs["provider"] = "yfinance"
+    validated.attrs["symbol"] = ticker.upper()
+    return validated

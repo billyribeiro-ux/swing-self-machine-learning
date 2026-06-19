@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from swing_rsi.backtest.engine import backtest_fixed_horizon
 from swing_rsi.config import ProjectPaths
-from swing_rsi.data.loader import download_yfinance_daily, load_ohlcv_csv, save_ohlcv_csv
+from swing_rsi.data.loader import download_daily, load_ohlcv_csv, save_ohlcv_csv
+from swing_rsi.data.providers.fmp import download_fmp_daily
 from swing_rsi.features.labels import add_swing_labels
 from swing_rsi.features.price import build_price_features
 from swing_rsi.features.rsi import wilder_rsi
@@ -21,6 +23,7 @@ from swing_rsi.research.grid_search import (
 )
 from swing_rsi.sample_data import generate_sample_ohlcv
 from swing_rsi.scanner.service import scan_latest
+from swing_rsi.settings import get_fmp_api_key, get_fmp_base_url, load_project_environment
 from swing_rsi.signals.rsi_reversal import generate_rsi_reversal_signal
 
 
@@ -82,13 +85,51 @@ def command_demo(_: argparse.Namespace) -> int:
     return 0
 
 
+def command_doctor(_: argparse.Namespace) -> int:
+    env_path = load_project_environment()
+    print(f"Project root: {Path.cwd()}")
+    print(f"Python: {sys.version.split()[0]}")
+    print(f"Local .env found: {'yes' if env_path is not None else 'no'}")
+    try:
+        get_fmp_api_key()
+    except RuntimeError:
+        configured = "no"
+    else:
+        configured = "yes"
+    print(f"FMP API key configured: {configured}")
+    print(f"FMP base URL: {get_fmp_base_url()}")
+    print("The API key value is never printed.")
+    return 0
+
+
+def command_fmp_check(args: argparse.Namespace) -> int:
+    end_date = date.today()
+    start_date = end_date - timedelta(days=args.lookback_days)
+    frame = download_fmp_daily(
+        args.ticker,
+        start=start_date.isoformat(),
+        end=end_date.isoformat(),
+    )
+    first = frame.index.min().date().isoformat()
+    last = frame.index.max().date().isoformat()
+    print(f"FMP connection successful for {args.ticker.upper()}.")
+    print(f"Received {len(frame):,} validated daily rows from {first} through {last}.")
+    print("The key itself was not displayed or written to source code.")
+    return 0
+
+
 def command_download(args: argparse.Namespace) -> int:
     paths = _project_paths()
-    frame = download_yfinance_daily(args.ticker, start=args.start, end=args.end)
+    frame = download_daily(
+        args.ticker,
+        start=args.start,
+        end=args.end,
+        provider=args.provider,
+    )
     output = Path(args.output) if args.output else paths.raw_data / f"{args.ticker.upper()}.csv"
     save_ohlcv_csv(frame, output)
-    print(f"Saved {len(frame):,} daily rows to {output}")
-    print("This bootstrap data source still requires a production data-quality audit.")
+    print(f"Saved {len(frame):,} validated daily rows from {args.provider} to {output}")
+    print("Provider data still requires corporate-action and historical-universe audits.")
     return 0
 
 
@@ -119,8 +160,17 @@ def build_parser() -> argparse.ArgumentParser:
     demo = subparsers.add_parser("demo", help="Run the deterministic synthetic plumbing demo")
     demo.set_defaults(handler=command_demo)
 
-    download = subparsers.add_parser("download", help="Download bootstrap daily data with yfinance")
+    doctor = subparsers.add_parser("doctor", help="Check local project and FMP configuration")
+    doctor.set_defaults(handler=command_doctor)
+
+    fmp_check = subparsers.add_parser("fmp-check", help="Test FMP with a small daily-data request")
+    fmp_check.add_argument("--ticker", default="AAPL")
+    fmp_check.add_argument("--lookback-days", type=int, default=45)
+    fmp_check.set_defaults(handler=command_fmp_check)
+
+    download = subparsers.add_parser("download", help="Download validated daily OHLCV")
     download.add_argument("--ticker", required=True)
+    download.add_argument("--provider", choices=("fmp", "yfinance"), default="fmp")
     download.add_argument("--start", default="2010-01-01")
     download.add_argument("--end", default=None)
     download.add_argument("--output", default=None)

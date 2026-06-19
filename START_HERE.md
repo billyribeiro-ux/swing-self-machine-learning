@@ -1,29 +1,35 @@
 # Start Here
 
-The Version 1 project is already created. Do not edit individual files yet.
+The Version 1 repository is already created and tested.
 
-## Your first three actions on your Mac
+## Do these actions in order on your Mac
 
 1. Download and unzip `swing-rsi-self-learner.zip`.
-2. Move the unzipped folder to `Documents/Trading-Projects/`.
-3. Open `docs/GETTING_STARTED_MAC.md` and follow it one line at a time.
+2. Move the folder to `Documents/Trading-Projects/`.
+3. Open Terminal inside the folder.
+4. Run:
 
-## When opening the project in Codex
-
-Open the entire `swing-rsi-self-learner` folder. Codex must read `AGENTS.md` first.
-
-The exact first Codex assignment is saved in:
-
-```text
-docs/CODEX_FIRST_PROMPT.md
+```bash
+chmod +x scripts/bootstrap_mac.sh scripts/configure_fmp.sh
+./scripts/bootstrap_mac.sh
+./scripts/configure_fmp.sh
 ```
 
-## Permanent records
+5. Run the demo:
 
-- Full long-term vision: `docs/VISION.md`
-- Binding Version 1 scope: `docs/V1_SCOPE.md`
-- Decisions: `docs/DECISIONS.md`
-- Unproven assumptions: `docs/ASSUMPTIONS.md`
-- Questions we must resolve: `docs/OPEN_QUESTIONS.md`
-- Project changes: `docs/CHANGELOG.md`
-- Original discussion summary: `docs/reference/`
+```bash
+source .venv/bin/activate
+python -m swing_rsi.cli demo
+```
+
+6. Download the first real dataset:
+
+```bash
+python -m swing_rsi.cli download --provider fmp --ticker AAPL --start 2020-01-01
+```
+
+Do not begin tuning RSI from real data until the FMP ingestion audit milestone is complete.
+
+## Codex
+
+When opening the project in Codex, open the entire `swing-rsi-self-learner` folder. The exact first assignment is saved in `docs/CODEX_FIRST_PROMPT.md`.

@@ -3,9 +3,11 @@
 ## Dependency flow
 
 ```text
-Raw OHLCV
+FMP / CSV / optional comparison provider
    ↓
-Normalization and validation
+Raw-response provenance and provider adapter
+   ↓
+Normalization and OHLCV validation
    ↓
 Trailing feature factory
    ↓
@@ -32,8 +34,13 @@ Separate append-only outcome log
 
 ```text
 src/swing_rsi/
+  settings.py               local environment and FMP configuration
   config.py                 YAML configuration and project paths
-  data/                     ingestion, validation, and storage
+  data/
+    providers/              FMP and future provider adapters
+    loader.py               provider selection and CSV loading
+    validation.py           OHLCV schema and market-data invariants
+    storage.py              data persistence helpers
   features/                 trailing price features, RSI, and future labels
   signals/                  explicit candidate signal definitions
   backtest/                 execution timing, trades, and metrics
@@ -44,6 +51,12 @@ src/swing_rsi/
   sample_data.py            deterministic plumbing-only demo data
   cli.py                    user-facing commands
 ```
+
+## Provider boundary
+
+FMP is the primary Version 1 daily-data source, but research logic does not call FMP directly. Provider-specific responses are normalized at the ingestion boundary. This allows later comparison with another source without rewriting RSI, labeling, backtesting, or scanning logic.
+
+API keys are loaded from `.env`, sent through request headers, and never printed or committed.
 
 ## Data separation
 

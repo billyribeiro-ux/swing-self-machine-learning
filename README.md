@@ -4,10 +4,11 @@ A research-first Python project for discovering, validating, scanning, and forwa
 
 ## Version 1 boundary
 
-Version 1 deliberately includes:
+Version 1 includes:
 
 - Daily stock and ETF OHLCV data
-- RSI lengths and trigger zones discovered from historical data
+- FMP as the primary initial data provider
+- RSI lengths and trigger regions discovered from historical data
 - Trailing price, volume, trend, and volatility confirmation features
 - Honest next-session entries
 - Fixed-horizon backtesting
@@ -15,7 +16,7 @@ Version 1 deliberately includes:
 - Current-signal scanning
 - Append-only forward-test signal and outcome records
 
-Version 1 deliberately excludes options, gamma, implied volatility, intraday data, market internals, NLP/news attribution, live brokerage execution, deep learning, and reinforcement learning.
+Version 1 excludes options, gamma, implied volatility, intraday data, market internals, NLP/news attribution, live brokerage execution, deep learning, and reinforcement learning.
 
 ## Scientific rule
 
@@ -23,52 +24,50 @@ The engine is not allowed to call a historical result an edge merely because it 
 
 `RSI(14)` with `70/30` levels remains a control group and a possible crowd-behavior feature. It is not treated as truth or as the default strategy.
 
-## Fastest Mac setup
+## First Mac setup
 
-Open Terminal in this folder, then run:
+Open Terminal in this folder and run:
 
 ```bash
-chmod +x scripts/bootstrap_mac.sh
+chmod +x scripts/bootstrap_mac.sh scripts/configure_fmp.sh
 ./scripts/bootstrap_mac.sh
+./scripts/configure_fmp.sh
+```
+
+The second script asks for the FMP key without displaying it, writes it only to a local `.env` file, and tests a small AAPL daily-data request. `.env` is excluded from Git.
+
+Activate the project when returning later:
+
+```bash
 source .venv/bin/activate
+```
+
+Run the deterministic plumbing demo:
+
+```bash
 python -m swing_rsi.cli demo
 ```
 
-The demo uses deterministic synthetic data only to prove that the plumbing works. It does **not** prove trading performance.
+Synthetic data proves that the software runs. It does **not** prove trading performance.
 
-Expected demo outputs:
+## Download real daily data from FMP
+
+```bash
+python -m swing_rsi.cli download \
+  --provider fmp \
+  --ticker AAPL \
+  --start 2020-01-01
+```
+
+The file is saved to:
 
 ```text
-data/raw/DEMO.csv
-reports/demo_grid_search.csv
-reports/demo_best_trades.csv
-reports/demo_features_and_labels.csv
-reports/demo_scanner_results.csv
+data/raw/AAPL.csv
 ```
 
-Run tests at any time:
+The available historical range depends on the user's FMP subscription. FMP data remains subject to corporate-action, missing-session, delisting, and survivorship-bias audits before research results are trusted.
 
-```bash
-pytest
-```
-
-Run quality checks:
-
-```bash
-ruff check .
-ruff format --check .
-mypy src
-```
-
-## Download real daily data for research
-
-After installation with the market-data extra:
-
-```bash
-python -m swing_rsi.cli download --ticker AAPL --start 2010-01-01
-```
-
-Then research it:
+## Run starter RSI research
 
 ```bash
 python -m swing_rsi.cli research \
@@ -78,21 +77,30 @@ python -m swing_rsi.cli research \
   --output reports/AAPL_grid_search.csv
 ```
 
+## Checks
+
+```bash
+pytest
+ruff check .
+ruff format --check .
+mypy src
+```
+
 ## Canonical project records
 
-Read these in order before changing architecture:
+Read these before changing architecture:
 
 1. `AGENTS.md`
 2. `docs/VISION.md`
 3. `docs/V1_SCOPE.md`
 4. `docs/ARCHITECTURE.md`
-5. `docs/RSI_RESEARCH_SPEC.md`
-6. `docs/BACKTESTING_STANDARD.md`
-7. `docs/MODEL_VALIDATION_STANDARD.md`
-8. `docs/FORWARD_TESTING_STANDARD.md`
-9. `docs/DECISIONS.md`
-10. `docs/OPEN_QUESTIONS.md`
+5. `docs/FMP_SETUP.md`
+6. `docs/FMP_DATA_SOURCE.md`
+7. `docs/RSI_RESEARCH_SPEC.md`
+8. `docs/BACKTESTING_STANDARD.md`
+9. `docs/MODEL_VALIDATION_STANDARD.md`
+10. `docs/FORWARD_TESTING_STANDARD.md`
+11. `docs/DECISIONS.md`
+12. `docs/OPEN_QUESTIONS.md`
 
-## Important
-
-This project is an experimental research system, not financial advice and not a live trading system. Real market research must account for data quality, corporate actions, delistings, survivorship bias, transaction costs, liquidity, execution assumptions, multiple testing, and regime changes.
+This is an experimental research system, not financial advice and not a live trading system.

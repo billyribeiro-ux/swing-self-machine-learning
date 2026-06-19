@@ -13,14 +13,19 @@
 - Scanner scaffold
 - Append-only forward records
 - Deterministic demo and tests
+- FMP adapter, secure local configuration, and connection checker
 
-## M1 — Real-data ingestion audit
+## M1 — FMP real-data ingestion audit
 
-- Select data source
-- Corporate-action consistency tests
-- Missing-session and duplicate handling
-- SPY, QQQ, and first ten-symbol universe
-- Cached raw and processed datasets
+- Confirm subscription history range and endpoint access
+- Preserve raw provider responses or reproducible snapshots
+- Generate per-symbol data-quality reports
+- Test split and dividend consistency
+- Compare adjusted and unadjusted semantics
+- Detect missing sessions, duplicates, stale rows, and impossible OHLCV
+- Audit SPY, QQQ, and the initial ten-symbol universe
+- Establish provider-neutral raw and processed caches
+- Document whether a second provider is required for delisted names and point-in-time universes
 
 ## M2 — RSI baseline research
 

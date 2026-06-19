@@ -9,13 +9,15 @@ Read, in order:
 1. `docs/VISION.md`
 2. `docs/V1_SCOPE.md`
 3. `docs/ARCHITECTURE.md`
-4. `docs/RSI_RESEARCH_SPEC.md`
-5. `docs/BACKTESTING_STANDARD.md`
-6. `docs/MODEL_VALIDATION_STANDARD.md`
-7. `docs/FORWARD_TESTING_STANDARD.md`
-8. `docs/DECISIONS.md`
-9. `docs/ASSUMPTIONS.md`
-10. `docs/OPEN_QUESTIONS.md`
+4. `docs/FMP_SETUP.md`
+5. `docs/FMP_DATA_SOURCE.md`
+6. `docs/RSI_RESEARCH_SPEC.md`
+7. `docs/BACKTESTING_STANDARD.md`
+8. `docs/MODEL_VALIDATION_STANDARD.md`
+9. `docs/FORWARD_TESTING_STANDARD.md`
+10. `docs/DECISIONS.md`
+11. `docs/ASSUMPTIONS.md`
+12. `docs/OPEN_QUESTIONS.md`
 
 ## Non-negotiable Version 1 boundaries
 
@@ -41,6 +43,8 @@ Do not add options, Greeks, implied volatility, gamma, dealer positioning, intra
 - Use the `src/` package layout.
 - Keep modules small, typed, and testable.
 - Prefer transparent implementations over opaque abstractions.
+- FMP is the primary Version 1 daily-data provider; keep provider logic isolated.
+- Treat provider quality as testable, not assumed.
 - Validate all OHLCV data at ingestion.
 - Use UTC or explicit `America/New_York` semantics when timestamps are introduced.
 - Do not commit secrets, API keys, virtual environments, raw licensed data, or generated caches.

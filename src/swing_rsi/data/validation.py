@@ -21,6 +21,7 @@ def normalize_ohlcv_columns(frame: pd.DataFrame) -> pd.DataFrame:
         "close": "Close",
         "adj close": "Adj Close",
         "adj_close": "Adj Close",
+        "adjclose": "Adj Close",
         "adjusted close": "Adj Close",
         "volume": "Volume",
         "date": "Date",

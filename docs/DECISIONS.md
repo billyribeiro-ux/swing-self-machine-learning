@@ -31,3 +31,15 @@ Reason: This prevents impossible same-close fills and look-ahead execution.
 Decision: Store forward signal records separately from later outcome records.
 
 Reason: This preserves what the engine actually knew at signal time and prevents retrospective rewriting.
+
+## 2026-06-19 — FMP is the primary Version 1 data provider
+
+Decision: Use Financial Modeling Prep's stable full end-of-day price endpoint for the first real daily OHLCV pipeline. Keep yfinance isolated as an optional fallback and comparison adapter only.
+
+Reason: The user already has FMP access, and one explicit primary provider reduces ambiguity during ingestion, corporate-action, and data-quality auditing. Provider quality, adjustment semantics, delisted coverage, and point-in-time universe handling must still be tested rather than assumed.
+
+## 2026-06-19 — API keys remain local and outside Git
+
+Decision: Read `FMP_API_KEY` from a local `.env` file created by a hidden-input setup script. Never print, hardcode, commit, or place the key in request URLs.
+
+Reason: This keeps credentials separate from research code and repository history while remaining straightforward to configure on a Mac.
