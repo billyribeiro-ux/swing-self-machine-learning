@@ -14,8 +14,9 @@ from dashboard.ui.formatting import display_frame, whole
 from swing_rsi.application.datasets import DatasetSummary, discover_raw_datasets, slice_date_window
 from swing_rsi.application.research_service import candidate_rule_count, grid_for_preset
 from swing_rsi.application.validation_service import (
+    WalkForwardConfigurationPreview,
+    preview_walk_forward_configuration,
     run_walk_forward_validation,
-    validate_walk_forward_configuration,
 )
 
 
@@ -96,6 +97,50 @@ def _test_columns(folds: pd.DataFrame) -> pd.DataFrame:
     return folds[[column for column in columns if column in folds.columns]]
 
 
+def _preview_table(preview: WalkForwardConfigurationPreview) -> pd.DataFrame:
+    rows = [
+        ("Requested start date", preview.requested_start),
+        ("Requested end date", preview.requested_end),
+        ("Effective first trading session", preview.effective_first_session),
+        ("Effective last trading session", preview.effective_last_session),
+        ("Available sessions", whole(preview.available_sessions)),
+        (
+            "Initial training sessions",
+            whole(preview.initial_training_sessions)
+            if preview.initial_training_sessions is not None
+            else "n/a",
+        ),
+        (
+            "Sessions per test fold",
+            whole(preview.sessions_per_test_fold)
+            if preview.sessions_per_test_fold is not None
+            else "n/a",
+        ),
+        ("Gap sessions", whole(preview.gap_sessions)),
+        ("Number of folds", whole(preview.n_splits)),
+        (
+            "Total required sessions",
+            whole(preview.total_required_sessions)
+            if preview.total_required_sessions is not None
+            else "n/a",
+        ),
+        ("Configuration status", preview.status),
+    ]
+    return pd.DataFrame(rows, columns=["Metric", "Value"])
+
+
+def _render_configuration_preview(preview: WalkForwardConfigurationPreview) -> None:
+    streamlit = st()
+    streamlit.subheader("Split Configuration")
+    streamlit.dataframe(_preview_table(preview), width="stretch", hide_index=True)
+    if preview.status == "Valid":
+        streamlit.success("Configuration status: Valid")
+    else:
+        streamlit.error("Configuration status: Invalid")
+        if preview.message:
+            streamlit.caption(preview.message)
+
+
 def render_page() -> None:
     streamlit = st()
     root = repository_root()
@@ -166,7 +211,54 @@ def render_page() -> None:
         preset = _preset_value(str(preset_label))
         candidates = candidate_rule_count(grid_for_preset(preset))  # type: ignore[arg-type]
         streamlit.write(f"Candidate rules per training fold: {whole(candidates)}")
-        submitted = streamlit.form_submit_button("Run walk-forward")
+        preview: WalkForwardConfigurationPreview | None = None
+        if start > end:
+            preview = WalkForwardConfigurationPreview(
+                requested_start=start.isoformat(),
+                requested_end=end.isoformat(),
+                effective_first_session=None,
+                effective_last_session=None,
+                available_sessions=0,
+                initial_training_sessions=None,
+                sessions_per_test_fold=None,
+                gap_sessions=int(gap),
+                n_splits=int(folds),
+                total_required_sessions=None,
+                status="Invalid",
+                message="Research start must be on or before research end.",
+                split_plan=None,
+            )
+        else:
+            try:
+                preview_frame = load_dataset_cached(selected.path)
+                preview = preview_walk_forward_configuration(
+                    preview_frame,
+                    start=start,
+                    end=end,
+                    n_splits=int(folds),
+                    gap=int(gap),
+                )
+            except (FileNotFoundError, RuntimeError, ValueError) as exc:
+                preview = WalkForwardConfigurationPreview(
+                    requested_start=start.isoformat(),
+                    requested_end=end.isoformat(),
+                    effective_first_session=None,
+                    effective_last_session=None,
+                    available_sessions=0,
+                    initial_training_sessions=None,
+                    sessions_per_test_fold=None,
+                    gap_sessions=int(gap),
+                    n_splits=int(folds),
+                    total_required_sessions=None,
+                    status="Invalid",
+                    message=str(exc),
+                    split_plan=None,
+                )
+        _render_configuration_preview(preview)
+        submitted = streamlit.form_submit_button(
+            "Run walk-forward",
+            disabled=preview.status != "Valid",
+        )
 
     current_config = _config(
         ticker=selected.ticker,
@@ -181,15 +273,21 @@ def render_page() -> None:
         preset=preset,
     )
 
-    if start > end:
-        streamlit.error("Research start must be on or before research end.")
-        return
-
     if submitted:
         try:
             frame = load_dataset_cached(selected.path)
             window = slice_date_window(frame, start=start, end=end)
-            validate_walk_forward_configuration(len(window), n_splits=int(folds), gap=int(gap))
+            execution_preview = preview_walk_forward_configuration(
+                frame,
+                start=start,
+                end=end,
+                n_splits=int(folds),
+                gap=int(gap),
+            )
+            if execution_preview.status != "Valid":
+                raise ValueError(execution_preview.message or "Invalid split configuration")
+            if execution_preview.available_sessions != len(window):
+                raise ValueError("Walk-forward preview no longer matches the selected window")
             with streamlit.spinner("Running walk-forward validation..."):
                 run = run_walk_forward_validation(
                     frame,

@@ -100,6 +100,8 @@ The dashboard may cache deterministic local CSV reads by file path and modificat
 
 Expected dashboard errors are handled with concise user-facing messages. Unexpected dashboard errors are logged to ignored local files under `logs/`.
 
+Walk-forward split arithmetic is centralized in `swing_rsi.research.walk_forward.plan_expanding_splits`. Dashboard preflight validation and actual walk-forward execution share the resulting split plan so a configuration cannot pass one path and fail the other. Automatically sized test folds reserve the configured gap before sizing test windows.
+
 Streamlit is temporary local presentation infrastructure. The long-term UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary, but no separate API or deployment layer exists in this milestone.
 
 ## Extension path

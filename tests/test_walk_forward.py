@@ -3,11 +3,31 @@ from __future__ import annotations
 from itertools import pairwise
 
 import pandas as pd
+import pytest
 
 from swing_rsi.application.validation_service import run_walk_forward_validation
 from swing_rsi.backtest.engine import backtest_fixed_horizon
-from swing_rsi.research.walk_forward import expanding_splits
+from swing_rsi.research.walk_forward import expanding_splits, plan_expanding_splits
 from swing_rsi.sample_data import generate_sample_ohlcv
+
+
+def test_gap_aware_default_split_plan_matches_confirmed_aapl_window() -> None:
+    plan = plan_expanding_splits(2_514, n_splits=5, gap=10)
+
+    assert len(plan.splits) == 5
+    assert plan.available_after_gap == 2_504
+    assert plan.test_size == 417
+    assert plan.first_test_start == 429
+    assert plan.actual_initial_train_size == 419
+    assert plan.required_samples == 2_512
+    assert plan.splits[-1].test_end == 2_513
+
+    previous_test_end = -1
+    for split in plan.splits:
+        assert split.test_start - split.train_end - 1 == 10
+        assert split.test_start > previous_test_end
+        assert split.test_end < plan.sample_count
+        previous_test_end = split.test_end
 
 
 def test_expanding_splits_are_chronological_and_gapped() -> None:
@@ -17,6 +37,39 @@ def test_expanding_splits_are_chronological_and_gapped() -> None:
         assert split.train_end < split.test_start
         assert split.test_start - split.train_end - 1 == 2
     assert all(current.train_end < following.train_end for current, following in pairwise(splits))
+
+
+def test_explicit_impossible_split_reports_required_and_available_sessions() -> None:
+    with pytest.raises(ValueError, match="Available sessions=100; required sessions=180"):
+        plan_expanding_splits(
+            100,
+            n_splits=5,
+            test_size=30,
+            gap=10,
+            minimum_train_size=20,
+        )
+
+
+def test_exact_aapl_walk_forward_configuration_does_not_raise_generic_split_failure() -> None:
+    frame = generate_sample_ohlcv(rows=2_514)
+
+    result = run_walk_forward_validation(
+        frame,
+        start=None,
+        end=None,
+        holding_period=10,
+        round_trip_cost_bps=5.0,
+        minimum_training_trades=20,
+        n_splits=5,
+        gap=10,
+        grid_preset="quick",
+    )
+
+    assert result.split_plan.test_size == 417
+    assert result.split_plan.actual_initial_train_size == 419
+    assert len(result.split_plan.splits) == 5
+    assert len(result.folds) == 5
+    assert set(result.folds["status"]).issubset({"evaluated", "no_eligible_training_rule"})
 
 
 def test_future_test_window_price_changes_do_not_change_prior_training_selection() -> None:

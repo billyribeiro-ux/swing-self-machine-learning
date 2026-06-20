@@ -69,3 +69,9 @@ Reason: A selected 10-year window must not show older raw-file rows or largest m
 Decision: Ticker symbols are normalized through one application-level function before provider calls or storage naming.
 
 Reason: A filename such as `AAPL.csv` is not a provider ticker. Normalization prevents accidental filename submission to FMP while preserving valid symbols such as `BRK.B` and `BRK-B`.
+
+## 2026-06-20 — Walk-forward split planning reserves the configured gap
+
+Decision: Automatically sized expanding walk-forward splits calculate test size from `sample_count - gap` before dividing by `n_splits + 1`, and the resulting canonical split plan is shared by dashboard preflight validation and actual execution.
+
+Reason: The previous default calculation sized test folds from all samples and then subtracted the gap, which could reject valid configurations. The split plan must preserve the requested gap, keep chronological non-overlapping test folds, and end the final test fold at the final available sample without silently changing user-selected dates or fold settings.

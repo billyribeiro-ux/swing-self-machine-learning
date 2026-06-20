@@ -60,6 +60,8 @@ Dashboard V0.2 keeps the same local Streamlit boundary but corrects the first im
 - Every selected-window table and metric is computed from the sliced dataframe only.
 - The full raw-file tab keeps complete raw coverage visible without implying it is the selected research window.
 - Local CSV reads may be cached only by file path and modification time. API keys, FMP requests, writes, research runs, and walk-forward runs are not cached.
+- Walk-forward validation displays the canonical split plan before execution, including effective available sessions, gap sessions, sessions per test fold, initial training sessions, total required sessions, and validity status.
+- The dashboard and execution path use the same gap-aware split plan; invalid configurations are blocked before execution with arithmetic details instead of a generic runtime failure.
 - Expected dashboard errors are shown as concise user-facing messages. Unexpected dashboard errors are logged locally under ignored `logs/`.
 - The local Streamlit toolbar is configured in minimal mode by `scripts/run_dashboard.sh`.
 
@@ -81,6 +83,7 @@ Dashboard V0.2 keeps the same local Streamlit boundary but corrects the first im
 | RSI Explorer interaction with DEMO data | COMPLETE | `tests/test_dashboard_interactions.py` |
 | Quick Research submission and candidate selection | COMPLETE | `tests/test_dashboard_interactions.py` |
 | Walk-forward submission with DEMO data | COMPLETE | `tests/test_dashboard_interactions.py` |
+| Gap-aware walk-forward split preview and execution identity | COMPLETE | `plan_expanding_splits`, `preview_walk_forward_configuration`, walk-forward tests |
 | Future test-window mutation does not change prior training selection | COMPLETE | `tests/test_walk_forward.py` |
 | Incomplete training trades cannot use test-period prices | COMPLETE | `tests/test_walk_forward.py` |
 | Corporate-action and historical-universe warnings | COMPLETE | `dashboard/ui/components.py` |

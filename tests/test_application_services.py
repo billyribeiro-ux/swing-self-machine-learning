@@ -25,7 +25,11 @@ from swing_rsi.application.research_service import (
     retail_control_rule,
     save_research_report,
 )
-from swing_rsi.application.validation_service import aggregate_walk_forward_results
+from swing_rsi.application.validation_service import (
+    aggregate_walk_forward_results,
+    preview_walk_forward_configuration,
+    run_walk_forward_validation,
+)
 from swing_rsi.data.loader import load_ohlcv_csv, save_ohlcv_csv
 
 
@@ -400,6 +404,48 @@ def test_walk_forward_aggregation_uses_test_metrics_only() -> None:
     assert aggregate.weighted_unseen_mean_return == pytest.approx(0.025)
     assert aggregate.median_fold_return == pytest.approx(0.02)
     assert aggregate.fraction_positive_test_folds == pytest.approx(1.0)
+
+
+def test_walk_forward_preview_and_execution_share_identical_split_plan() -> None:
+    frame = _synthetic_ohlcv(rows=905)
+
+    preview = preview_walk_forward_configuration(
+        frame,
+        start=None,
+        end=None,
+        n_splits=3,
+        gap=10,
+    )
+    run = run_walk_forward_validation(
+        frame,
+        start=None,
+        end=None,
+        holding_period=10,
+        round_trip_cost_bps=5.0,
+        minimum_training_trades=5,
+        n_splits=3,
+        gap=10,
+        grid_preset="quick",
+    )
+
+    assert preview.status == "Valid"
+    assert preview.split_plan == run.split_plan
+
+
+def test_walk_forward_preview_resolves_weekend_start_to_first_available_session() -> None:
+    frame = _synthetic_ohlcv(start="2016-06-20", rows=300)
+
+    preview = preview_walk_forward_configuration(
+        frame,
+        start="2016-06-18",
+        end="2017-01-31",
+        n_splits=2,
+        gap=1,
+    )
+
+    assert preview.status == "Valid"
+    assert preview.requested_start == "2016-06-18"
+    assert preview.effective_first_session == "2016-06-20"
 
 
 def test_date_window_selection_does_not_modify_raw_csv(

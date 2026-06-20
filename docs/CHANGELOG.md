@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed walk-forward split planning so automatically calculated test folds reserve the configured gap before sizing test windows.
+- Added a canonical split-plan object shared by dashboard preflight validation and actual walk-forward execution.
+- Added dashboard split-plan details for requested dates, effective trading sessions, available sessions, initial training sessions, sessions per test fold, gap, folds, total required sessions, and validity status.
+- Added regression tests for the confirmed 2,514-session, 5-fold, 10-gap AAPL configuration and for preview/execution split-plan identity.
+
 ## 0.1.2-dashboard-v0.2 — 2026-06-19
 
 - Replaced Streamlit filename-derived multipage navigation with explicit `st.navigation` / `st.Page` registration.
