@@ -322,12 +322,15 @@ Docs:
 
 ## Git
 
-Planned local audit commits:
+Local audit commits:
 
-1. `fix: separate prediction and portfolio model evaluation`
-2. `feat: persist canonical model quality gates`
-3. `feat: add model gate and calibration audit views`
-4. `test: validate autonomous model evaluation integrity`
-5. `docs: document model evaluation and promotion audit`
+1. `1318873` — `fix: separate prediction and portfolio model evaluation`
+2. `af65ec9` — `feat: persist canonical model quality gates`
+3. `b4280c7` — `feat: add model gate and calibration audit views`
+4. `cb68c16` — `test: validate autonomous model evaluation integrity`
+5. `657dbac` — `docs: document model evaluation and promotion audit`
+
+This final hash-recording documentation update is reported in the Codex
+conversation because a commit cannot contain its own resulting hash.
 
 Do not push.
