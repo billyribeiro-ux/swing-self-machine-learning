@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- Tightened scanner dashboard lifecycle evidence display: direct AppTest execution now runs every primary scanner section, Candidate Attribution displays recent price context, parsed historical analogs, and model/snapshot details, and Portfolio Backtests renders equity, drawdown, trade ledger, candidate audit, and return breakdowns from actionable scanner snapshots.
+- Completed the remaining autonomous scanner audit gaps: added a formal model plugin registry, temporal-fold and exceptional-period quality gates, expanded drift checks for relationship/regime, realized-performance, and calibration shifts, target-before-stop outcomes in analog payloads, portfolio candidate-audit rows, and symbol-level return output.
+- Changed scanner candidate fallback so `--include-challengers` uses only the newest candidate generation for the active feature manifest when no champion exists, preventing stale artifacts from mixing into current scanner evidence.
+- Added explicit `scan --update-data` and `scan --universe` controls so universe updates can be part of the scanner workflow without making external provider calls on ordinary scans.
+- Verified the latest local scanner snapshot `9ff465a229a0d4cd9e4e6b36` contains 50 review rows, 25 bullish and 25 bearish, 0 unknown attribution categories, and target-before-stop analog outcomes in every row.
+- Completed the autonomous scanner evidence pass against the current feature manifest: every generated feature column is mapped to a registry family, relationship mutual-information and expanding unsupervised regime features are generated, model discovery uses bounded mutual-information screening, scanner models are filtered by current feature-manifest hash, and scanner attribution no longer emits an `unknown` category.
+- Added separate target-before-stop probability modeling and scanner output, persisted compact historical analogs and signal close context in scanner snapshots, and verified the latest scanner artifact contains 25 bullish and 25 bearish review rows.
+- Expanded paper-forward lifecycle events with frozen stop/target policy prices after next-open paper fill, while preserving append-only/idempotent event insertion.
+- Expanded portfolio scanner backtesting with daily equity, exposure, yearly/sector/regime/model-version return tables, trailing-stop support, and corrected open-position capacity release after prior exits.
+- Added deterministic daily-cycle JSON report output under ignored `reports/` and verified same-date reruns return `already_completed`.
+- Added the Self-Learning Swing Trading Engine vertical slice with configurable universe, raw-data manifests, autonomous feature registry, bullish/bearish labels, chronological model discovery, model registry, scanner snapshots, attribution, portfolio scanner backtesting, append-only paper-forward events, and daily-cycle orchestration.
+- Added primary Streamlit dashboard sections for Data and Universe, Discovery Lab, Live Scanner, Candidate Attribution, Portfolio Backtests, Paper Forward Test, Model Registry, and Baselines and Legacy RSI.
+- Added CLI commands for `universe-update`, `build-features`, `discover-models`, `model-registry`, `promote-model`, `scan`, `forward-update`, and `daily-cycle`.
+- Added `configs/universe/core.yaml` seed universe for large stocks, broad ETFs, sector ETFs, inverse ETFs, and leveraged ETFs.
+- Added scikit-learn, joblib, and pyarrow dependencies for local model discovery and parquet artifacts.
+- Added autonomous-engine regression tests for backward-looking features, label isolation, purged splits, registry immutability, scanner idempotency, scanner-candidate persistence, append-only forward events, and next-open portfolio entries.
+- Added a naive historical base-rate classifier as an explicit model-discovery baseline.
+- Added holdout permutation-importance and feature-stability diagnostics to registered model metrics.
+- Added drift reporting for feature, relationship/regime, prediction, realized-performance, and calibration distributions; drift can alert and train challengers later, but it does not mutate or promote models.
+- Completed the paper-forward vertical slice from latest scanner events through pending entries, next-session paper fills, position marks, and time exits with idempotent append-only events.
+- Fixed `scripts/run_daily_cycle.sh` executable permissions and verified the wrapper returns idempotent daily-cycle status.
+- Fixed walk-forward split planning so automatically calculated test folds reserve the configured gap before sizing test windows.
+- Added a canonical split-plan object shared by dashboard preflight validation and actual walk-forward execution.
+- Added dashboard split-plan details for requested dates, effective trading sessions, available sessions, initial training sessions, sessions per test fold, gap, folds, total required sessions, and validity status.
+- Added regression tests for the confirmed 2,514-session, 5-fold, 10-gap AAPL configuration and for preview/execution split-plan identity.
+
 ## 0.1.2-dashboard-v0.2 — 2026-06-19
 
 - Replaced Streamlit filename-derived multipage navigation with explicit `st.navigation` / `st.Page` registration.

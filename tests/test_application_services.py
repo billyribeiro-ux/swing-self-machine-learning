@@ -17,6 +17,7 @@ from swing_rsi.application.datasets import (
     structural_audit_csv,
     structural_audit_frame,
 )
+from swing_rsi.application.engine_service import _scanner_models
 from swing_rsi.application.project_status import collect_project_status
 from swing_rsi.application.research_service import (
     candidate_rule_count,
@@ -25,8 +26,14 @@ from swing_rsi.application.research_service import (
     retail_control_rule,
     save_research_report,
 )
-from swing_rsi.application.validation_service import aggregate_walk_forward_results
+from swing_rsi.application.validation_service import (
+    aggregate_walk_forward_results,
+    preview_walk_forward_configuration,
+    run_walk_forward_validation,
+)
+from swing_rsi.config import ProjectPaths
 from swing_rsi.data.loader import load_ohlcv_csv, save_ohlcv_csv
+from swing_rsi.engine.registry import RegisteredModel, register_model
 
 
 def _synthetic_ohlcv(start: str = "2014-01-02", rows: int = 2_520) -> pd.DataFrame:
@@ -58,6 +65,39 @@ def _fixed_downloader(frame: pd.DataFrame):
         return frame.copy()
 
     return download
+
+
+def _registered_model(
+    model_id: str,
+    *,
+    created_at_utc: str,
+    feature_manifest_hash: str = "feature-a",
+    state: str = "CANDIDATE",
+) -> RegisteredModel:
+    return RegisteredModel(
+        model_id=model_id,
+        task="probability_positive",
+        horizon=10,
+        direction="Bullish",
+        family="naive_base_rate",
+        state=state,  # type: ignore[arg-type]
+        training_start="2020-01-01",
+        training_end="2021-01-01",
+        validation_start="2021-01-04",
+        validation_end="2021-06-30",
+        holdout_start="2021-07-01",
+        holdout_end="2022-01-01",
+        universe_snapshot_id="universe-a",
+        feature_manifest_hash=feature_manifest_hash,
+        raw_manifest_hashes=("raw-a",),
+        hyperparameters={},
+        metrics={},
+        calibration_metrics={},
+        quality_gates={"comparison_controls_available": True},
+        artifact_path="/tmp/model.joblib",
+        code_commit_hash="test",
+        created_at_utc=created_at_utc,
+    )
 
 
 @pytest.mark.parametrize(
@@ -402,6 +442,48 @@ def test_walk_forward_aggregation_uses_test_metrics_only() -> None:
     assert aggregate.fraction_positive_test_folds == pytest.approx(1.0)
 
 
+def test_walk_forward_preview_and_execution_share_identical_split_plan() -> None:
+    frame = _synthetic_ohlcv(rows=905)
+
+    preview = preview_walk_forward_configuration(
+        frame,
+        start=None,
+        end=None,
+        n_splits=3,
+        gap=10,
+    )
+    run = run_walk_forward_validation(
+        frame,
+        start=None,
+        end=None,
+        holding_period=10,
+        round_trip_cost_bps=5.0,
+        minimum_training_trades=5,
+        n_splits=3,
+        gap=10,
+        grid_preset="quick",
+    )
+
+    assert preview.status == "Valid"
+    assert preview.split_plan == run.split_plan
+
+
+def test_walk_forward_preview_resolves_weekend_start_to_first_available_session() -> None:
+    frame = _synthetic_ohlcv(start="2016-06-20", rows=300)
+
+    preview = preview_walk_forward_configuration(
+        frame,
+        start="2016-06-18",
+        end="2017-01-31",
+        n_splits=2,
+        gap=1,
+    )
+
+    assert preview.status == "Valid"
+    assert preview.requested_start == "2016-06-18"
+    assert preview.effective_first_session == "2016-06-20"
+
+
 def test_date_window_selection_does_not_modify_raw_csv(
     tmp_path: Path,
     simple_ohlcv: pd.DataFrame,
@@ -414,3 +496,36 @@ def test_date_window_selection_does_not_modify_raw_csv(
     _ = slice_date_window(frame, start="2020-03-01", end="2020-04-01")
 
     assert path.read_bytes() == before
+
+
+def test_scanner_candidate_fallback_uses_latest_generation(tmp_path: Path) -> None:
+    paths = ProjectPaths(tmp_path)
+    paths.ensure()
+    register_model(
+        paths.engine_db,
+        _registered_model("old-a", created_at_utc="2026-06-20T10:00:00+00:00"),
+    )
+    register_model(
+        paths.engine_db,
+        _registered_model("new-a", created_at_utc="2026-06-20T11:00:00+00:00"),
+    )
+    register_model(
+        paths.engine_db,
+        _registered_model("new-b", created_at_utc="2026-06-20T11:00:00+00:00"),
+    )
+    register_model(
+        paths.engine_db,
+        _registered_model(
+            "other-feature",
+            created_at_utc="2026-06-20T12:00:00+00:00",
+            feature_manifest_hash="feature-b",
+        ),
+    )
+
+    selected = _scanner_models(
+        tmp_path,
+        include_challengers=True,
+        feature_manifest_hash="feature-a",
+    )
+
+    assert {model.model_id for model in selected} == {"new-a", "new-b"}

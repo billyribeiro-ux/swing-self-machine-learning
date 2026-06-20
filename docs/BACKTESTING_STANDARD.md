@@ -13,7 +13,9 @@ Every report must state round-trip transaction cost and slippage assumptions. Ze
 
 ## Overlap
 
-The starter engine permits only one open trade per ticker. Signals occurring while a trade is open are ignored. Portfolio-level capital and cross-ticker overlap are future work.
+The legacy starter RSI engine permits only one open trade per ticker. Signals occurring while a trade is open are ignored in that legacy path.
+
+The autonomous scanner vertical slice adds a portfolio-level scanner-output backtester with cross-ticker overlap, maximum concurrent positions, per-symbol limits, sector concentration limits, gross/net exposure limits, costs, slippage, long/short handling, conservative target/stop ambiguity, equity, drawdown, turnover, exposure, trade ledger output, symbol-level return output, and a candidate audit table that retains rejected or skipped scanner rows with the reason. This does not change the legacy starter RSI backtester behavior.
 
 ## Price adjustments
 
@@ -30,6 +32,9 @@ Research must decide explicitly between raw OHLC with corporate-action events an
 - MFE
 - MAE
 - Rule identifier
+- Model ID when the candidate came from the autonomous scanner
+- Direction
+- Sector when available
 
 ## Required metrics
 
@@ -43,6 +48,9 @@ Research must decide explicitly between raw OHLC with corporate-action events an
 - Average MFE and MAE
 - Positive-year fraction
 - Lower confidence bound on mean return
+- Exposure and turnover for portfolio scanner backtests
+- Returns by model version, sector, year, and regime when enough data is available
+- Candidate audit counts for rejected/skipped scanner candidates
 
 ## Bias controls
 
@@ -63,6 +71,7 @@ The production research universe must eventually address:
 Each candidate must be compared with:
 
 - RSI(14) control logic
+- Naive base-rate model for autonomous discovery
 - Buy-and-hold over comparable periods
 - A simple price-only baseline
 - The same rule before and after estimated costs

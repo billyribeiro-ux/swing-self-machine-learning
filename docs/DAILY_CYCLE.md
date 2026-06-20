@@ -1,0 +1,41 @@
+# Daily Cycle
+
+The daily cycle command is:
+
+```bash
+python -m swing_rsi.cli daily-cycle --include-challengers
+```
+
+The wrapper script is:
+
+```bash
+./scripts/run_daily_cycle.sh
+```
+
+## Steps
+
+1. Acquire a local lock under `state/daily_cycle.lock`.
+2. Optionally update local universe data through the existing provider abstraction.
+3. Rebuild autonomous features and labels.
+4. Run discovery only if no champion, challenger, or retained candidate exists.
+5. Advance existing paper-forward entries and open positions using newly available bars.
+6. Run the live scanner.
+7. Run drift checks for the scanned model set.
+8. Append forward-test events from the scanner snapshot.
+9. Write an ignored local JSON report under `reports/daily_cycle_<market-date>.json`.
+10. Mark the market date as completed in SQLite.
+11. Release the lock.
+
+## Idempotency
+
+The same market-date cycle returns `already_completed` after the first completed run.
+
+Scanner snapshots are keyed by as-of date, model IDs, universe snapshot, and feature snapshot hash.
+
+Forward events use unique event keys and `INSERT OR IGNORE`, so reruns do not duplicate event rows.
+
+The ignored JSON report is deterministic by market date. If it already exists, the cycle reports the existing path rather than overwriting it.
+
+## Secrets
+
+The daily cycle uses the configured provider abstraction and never prints `.env`, API keys, authenticated URLs, or request headers.

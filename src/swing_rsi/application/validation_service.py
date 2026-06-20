@@ -7,7 +7,11 @@ import pandas as pd
 
 from swing_rsi.application.datasets import DateLike, slice_date_window
 from swing_rsi.application.research_service import GridPreset, candidate_rule_count, grid_for_preset
-from swing_rsi.research.walk_forward import expanding_splits, run_walk_forward
+from swing_rsi.research.walk_forward import (
+    ExpandingSplitPlan,
+    plan_expanding_splits,
+    run_walk_forward,
+)
 
 
 @dataclass(frozen=True)
@@ -27,12 +31,110 @@ class WalkForwardRun:
     folds: pd.DataFrame
     aggregate: WalkForwardAggregate
     candidate_count: int
+    split_plan: ExpandingSplitPlan
 
 
-def validate_walk_forward_configuration(sample_count: int, n_splits: int, gap: int) -> None:
+@dataclass(frozen=True)
+class WalkForwardConfigurationPreview:
+    requested_start: str | None
+    requested_end: str | None
+    effective_first_session: str | None
+    effective_last_session: str | None
+    available_sessions: int
+    initial_training_sessions: int | None
+    sessions_per_test_fold: int | None
+    gap_sessions: int
+    n_splits: int
+    total_required_sessions: int | None
+    status: str
+    message: str | None
+    split_plan: ExpandingSplitPlan | None
+
+
+def _iso(value: DateLike | None) -> str | None:
+    if value is None:
+        return None
+    return pd.Timestamp(value).date().isoformat()
+
+
+def _window_bound(value: pd.Timestamp | None) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    return value.date().isoformat()
+
+
+def validate_walk_forward_configuration(
+    sample_count: int,
+    n_splits: int,
+    gap: int,
+    test_size: int | None = None,
+    minimum_train_size: int | None = None,
+) -> ExpandingSplitPlan:
     if sample_count <= 0:
         raise ValueError("Selected walk-forward window contains no rows")
-    expanding_splits(sample_count, n_splits=n_splits, gap=gap)
+    return plan_expanding_splits(
+        sample_count,
+        n_splits=n_splits,
+        test_size=test_size,
+        gap=gap,
+        minimum_train_size=minimum_train_size,
+    )
+
+
+def preview_walk_forward_configuration(
+    frame: pd.DataFrame,
+    *,
+    start: DateLike | None,
+    end: DateLike | None,
+    n_splits: int,
+    gap: int,
+    test_size: int | None = None,
+    minimum_train_size: int | None = None,
+) -> WalkForwardConfigurationPreview:
+    window = slice_date_window(frame, start=start, end=end)
+    effective_first = _window_bound(window.index.min()) if not window.empty else None
+    effective_last = _window_bound(window.index.max()) if not window.empty else None
+
+    try:
+        plan = validate_walk_forward_configuration(
+            len(window),
+            n_splits=n_splits,
+            gap=gap,
+            test_size=test_size,
+            minimum_train_size=minimum_train_size,
+        )
+    except ValueError as exc:
+        return WalkForwardConfigurationPreview(
+            requested_start=_iso(start),
+            requested_end=_iso(end),
+            effective_first_session=effective_first,
+            effective_last_session=effective_last,
+            available_sessions=len(window),
+            initial_training_sessions=None,
+            sessions_per_test_fold=test_size,
+            gap_sessions=gap,
+            n_splits=n_splits,
+            total_required_sessions=None,
+            status="Invalid",
+            message=str(exc),
+            split_plan=None,
+        )
+
+    return WalkForwardConfigurationPreview(
+        requested_start=_iso(start),
+        requested_end=_iso(end),
+        effective_first_session=effective_first,
+        effective_last_session=effective_last,
+        available_sessions=len(window),
+        initial_training_sessions=plan.actual_initial_train_size,
+        sessions_per_test_fold=plan.test_size,
+        gap_sessions=gap,
+        n_splits=n_splits,
+        total_required_sessions=plan.required_samples,
+        status="Valid",
+        message=None,
+        split_plan=plan,
+    )
 
 
 def _empty_parameter_stability() -> pd.DataFrame:
@@ -141,7 +243,7 @@ def run_walk_forward_validation(
     grid_preset: GridPreset,
 ) -> WalkForwardRun:
     window = slice_date_window(frame, start=start, end=end)
-    validate_walk_forward_configuration(len(window), n_splits=n_splits, gap=gap)
+    split_plan = validate_walk_forward_configuration(len(window), n_splits=n_splits, gap=gap)
     grid = grid_for_preset(grid_preset)
     folds = run_walk_forward(
         window,
@@ -151,9 +253,11 @@ def run_walk_forward_validation(
         gap=gap,
         round_trip_cost_bps=round_trip_cost_bps,
         minimum_trades=minimum_training_trades,
+        split_plan=split_plan,
     )
     return WalkForwardRun(
         folds=folds,
         aggregate=aggregate_walk_forward_results(folds),
         candidate_count=candidate_rule_count(grid),
+        split_plan=split_plan,
     )

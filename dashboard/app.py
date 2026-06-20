@@ -5,7 +5,7 @@ from dashboard.ui.navigation import streamlit_pages
 
 
 def main() -> None:
-    configure_page("Swing RSI Dashboard")
+    configure_page("Self-Learning Swing Trading Engine")
     import streamlit as st
 
     page = st.navigation(streamlit_pages(st), position="sidebar")

@@ -12,5 +12,7 @@
 10. How should signal clustering across highly correlated stocks be treated?
 11. Which exact transaction-cost and slippage model is appropriate for daily swing entries?
 12. What final untouched date range will be reserved before forward testing?
-13. Which SPY, QQQ, sector ETF, leveraged ETF, and inverse ETF relationships enter Version 1.5?
-14. What criteria promote a model from research to forward testing and later paper approval?
+13. Which provider or dataset will supply point-in-time historical universe membership for survivorship-bias control?
+14. What criteria promote a model from candidate/challenger to champion after paper-forward evidence accumulates?
+15. Which scanner quality gates should become mandatory before any champion is deployed without `--include-challengers`?
+16. What minimum paper-forward observation count is required before comparing champion and challenger models?

@@ -15,9 +15,17 @@ Read, in order:
 7. `docs/BACKTESTING_STANDARD.md`
 8. `docs/MODEL_VALIDATION_STANDARD.md`
 9. `docs/FORWARD_TESTING_STANDARD.md`
-10. `docs/DECISIONS.md`
-11. `docs/ASSUMPTIONS.md`
-12. `docs/OPEN_QUESTIONS.md`
+10. `docs/AUTONOMOUS_DISCOVERY_ENGINE.md`
+11. `docs/FEATURE_REGISTRY.md`
+12. `docs/RELATIONSHIP_GRAPH.md`
+13. `docs/MODEL_GOVERNANCE.md`
+14. `docs/MARKET_ATTRIBUTION.md`
+15. `docs/SCANNER_SPEC.md`
+16. `docs/PAPER_FORWARD_TESTER.md`
+17. `docs/DAILY_CYCLE.md`
+18. `docs/DECISIONS.md`
+19. `docs/ASSUMPTIONS.md`
+20. `docs/OPEN_QUESTIONS.md`
 
 ## Non-negotiable Version 1 boundaries
 
@@ -34,7 +42,7 @@ Do not add options, Greeks, implied volatility, gamma, dealer positioning, intra
 - Preserve `RSI(14)` and `70/30` as a baseline/control, not as a privileged rule.
 - Treat claims about institutional use of retail defaults as hypotheses to test, not established causal facts.
 - Never silently alter signal timestamps, entries, exits, costs, or failed trades.
-- Forward signals and outcomes are append-only records.
+- Paper-forward events are append-only records.
 - Synthetic demo data validates software plumbing only, never strategy performance.
 
 ## Engineering rules

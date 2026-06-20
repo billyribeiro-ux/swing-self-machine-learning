@@ -23,6 +23,8 @@ Each future head will use different labels, holding periods, execution assumptio
 
 ## Current deliberate reduction
 
-The first implementation is intentionally much smaller: one complete daily swing-trading research loop centered on RSI self-discovery. The goal is to perfect the methodology and software pattern before expanding the data universe.
+The current implementation is still deliberately daily-only, but it now implements a broader self-learning swing scanner vertical slice. RSI remains available as a baseline feature family, while the engine studies price, volume, market, sector, breadth, inverse/leveraged ETF, relationship, volatility, and regime behavior.
+
+The system produces probabilistic attribution from measured features and reports residual/unexplained influence instead of inventing causes.
 
 See `docs/V1_SCOPE.md` for the binding current boundary.
