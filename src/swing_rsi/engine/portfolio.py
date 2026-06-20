@@ -202,6 +202,11 @@ def _daily_equity(ledger: pd.DataFrame, frames: dict[str, pd.DataFrame]) -> pd.D
     daily["gross_exposure"] = 0.0
     daily["net_exposure"] = 0.0
     for _, trade in ledger.iterrows():
+        ticker = str(trade["ticker"])
+        frame = frames.get(ticker)
+        if frame is None:
+            continue
+        data = validate_ohlcv(frame)
         entry_date = pd.Timestamp(str(trade["entry_date"]))
         exit_date = pd.Timestamp(str(trade["exit_date"]))
         weight = float(trade.get("position_weight", 0.0))
@@ -209,8 +214,23 @@ def _daily_equity(ledger: pd.DataFrame, frames: dict[str, pd.DataFrame]) -> pd.D
         open_mask = (daily["Date"] >= entry_date) & (daily["Date"] <= exit_date)
         daily.loc[open_mask, "gross_exposure"] += abs(weight)
         daily.loc[open_mask, "net_exposure"] += direction_sign * weight
-        exit_mask = daily["Date"] == exit_date
-        daily.loc[exit_mask, "daily_return"] += float(trade["weighted_net_return"])
+        sessions = [pd.Timestamp(value) for value in daily.loc[open_mask, "Date"]]
+        previous_price = float(trade["entry_price"])
+        total_cost = float(trade["gross_return"]) - float(trade["net_return"])
+        for session in sessions:
+            if session == exit_date:
+                mark_price = float(trade["exit_price"])
+            elif session in data.index:
+                mark_price = float(cast(float, data.at[session, "Close"]))
+            else:
+                continue
+            if previous_price <= 0:
+                continue
+            period_return = direction_sign * ((mark_price / previous_price) - 1.0)
+            if session == exit_date:
+                period_return -= total_cost
+            daily.loc[daily["Date"] == session, "daily_return"] += weight * period_return
+            previous_price = mark_price
     daily["equity"] = (1.0 + daily["daily_return"]).cumprod()
     daily["drawdown"] = (daily["equity"] / daily["equity"].cummax()) - 1.0
     daily["Date"] = daily["Date"].dt.date.astype(str)

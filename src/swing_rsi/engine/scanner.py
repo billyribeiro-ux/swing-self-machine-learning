@@ -203,8 +203,29 @@ def run_scanner(
                 "signal_close": float(item.get("Close", float("nan"))),
                 "calibrated_probability": probability,
                 "expected_return": expected_return,
+                "expected_return_raw": float(item.get("expected_return_raw", expected_return)),
+                "expected_return_transformed": float(
+                    item.get("expected_return_transformed", expected_return)
+                ),
+                "expected_return_out_of_distribution": bool(
+                    item.get("expected_return_out_of_distribution", False)
+                ),
                 "expected_mfe": float(item["expected_mfe"]),
+                "expected_mfe_raw": float(item.get("expected_mfe_raw", item["expected_mfe"])),
+                "expected_mfe_transformed": float(
+                    item.get("expected_mfe_transformed", item["expected_mfe"])
+                ),
+                "expected_mfe_out_of_distribution": bool(
+                    item.get("expected_mfe_out_of_distribution", False)
+                ),
                 "expected_mae": float(item["expected_mae"]),
+                "expected_mae_raw": float(item.get("expected_mae_raw", item["expected_mae"])),
+                "expected_mae_transformed": float(
+                    item.get("expected_mae_transformed", item["expected_mae"])
+                ),
+                "expected_mae_out_of_distribution": bool(
+                    item.get("expected_mae_out_of_distribution", False)
+                ),
                 "target_before_stop_probability": target_before_stop_probability,
                 "composite_utility_score": utility,
                 "liquidity_score": dollar_volume,

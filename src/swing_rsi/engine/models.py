@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -21,12 +22,21 @@ from sklearn.feature_selection import mutual_info_classif
 from sklearn.impute import SimpleImputer
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.metrics import brier_score_loss, mean_absolute_error, mean_squared_error
+from sklearn.metrics import brier_score_loss, log_loss, mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from swing_rsi.engine.features import numeric_feature_columns, reject_label_columns
+from swing_rsi.engine.gates import (
+    GateResult,
+    GateStatus,
+    configuration_hash,
+    make_gate,
+    promotion_eligibility,
+    quality_gate_bool_map,
+)
 from swing_rsi.engine.manifest import current_commit_hash
+from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import ModelState, RegisteredModel, make_model_id, register_model
 from swing_rsi.engine.splits import (
     ChronologicalSplit,
@@ -56,6 +66,18 @@ class ModelBundle:
     training_labels: pd.DataFrame
     metrics: dict[str, float | int | str | bool | None]
     calibration_metrics: dict[str, float | int | str | bool | None]
+    gate_results: tuple[GateResult, ...] = ()
+
+
+@dataclass(frozen=True)
+class SelectionPolicy:
+    probability_threshold: float = 0.55
+    expected_return_threshold: float | None = None
+    target_before_stop_threshold: float | None = None
+    top_n_limit: int | None = None
+    per_date_limit: int | None = None
+    liquidity_requirement: float | None = None
+    tie_breaking_rule: str = "composite_utility_score_desc_then_symbol"
 
 
 @dataclass(frozen=True)
@@ -68,9 +90,22 @@ class DiscoveryConfig:
     correlation_threshold: float = 0.97
     probability_threshold: float = 0.55
     round_trip_cost_bps: float = 5.0
+    slippage_bps: float = 2.0
     random_seed: int = 42
     permutation_feature_limit: int = 12
     mutual_information_top_k: int = 60
+    research_start: str | None = "2016-06-20"
+    research_end: str | None = None
+    max_concurrent_positions: int = 5
+    max_position_per_symbol: int = 1
+    max_sector_fraction: float = 0.5
+    max_gross_exposure: float = 1.0
+    max_net_exposure: float = 1.0
+    selection_rate_max: float | None = None
+
+
+def selection_policy_from_config(config: DiscoveryConfig) -> SelectionPolicy:
+    return SelectionPolicy(probability_threshold=config.probability_threshold)
 
 
 @dataclass(frozen=True)
@@ -282,6 +317,268 @@ def _max_drawdown(returns: pd.Series) -> float:
     return float(((equity / equity.cummax()) - 1.0).min())
 
 
+def _json_dumps(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _date_label(value: pd.Timestamp) -> str:
+    return pd.Timestamp(value).date().isoformat()
+
+
+def _research_end(frame: pd.DataFrame, config: DiscoveryConfig) -> str:
+    if config.research_end:
+        return config.research_end
+    return pd.Timestamp(frame["Date"].max()).date().isoformat()
+
+
+def eligible_modeling_frame(frame: pd.DataFrame, config: DiscoveryConfig) -> pd.DataFrame:
+    data = frame.copy()
+    date_values = pd.to_datetime(data["Date"])
+    if config.research_start is not None:
+        data = data.loc[date_values >= pd.Timestamp(config.research_start)].copy()
+        date_values = pd.to_datetime(data["Date"])
+    research_end = pd.Timestamp(_research_end(frame, config))
+    data = data.loc[date_values <= research_end].copy()
+    label_end_columns = [
+        column for column in data.columns if str(column).startswith("label_end_date_")
+    ]
+    for column in label_end_columns:
+        data = data.loc[pd.to_datetime(data[column]) <= research_end].copy()
+    return data.sort_values(["Date", "symbol"]).reset_index(drop=True)
+
+
+def _portfolio_frames_from_modeling(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    frames: dict[str, pd.DataFrame] = {}
+    for symbol, group in frame.groupby("symbol"):
+        data = group[["Date", *required]].copy()
+        data["Date"] = pd.to_datetime(data["Date"])
+        frames[str(symbol)] = data.set_index("Date").sort_index()
+    return frames
+
+
+def _calibration_table(
+    y_true: pd.Series,
+    probability: np.ndarray,
+    *,
+    bins: int = 10,
+) -> list[dict[str, float | int]]:
+    data = pd.DataFrame({"actual": y_true.astype(float), "probability": probability}).dropna()
+    if data.empty:
+        return []
+    data["decile"] = pd.qcut(
+        data["probability"].rank(method="first"),
+        q=min(bins, len(data)),
+        labels=False,
+        duplicates="drop",
+    )
+    grouped = data.groupby("decile", dropna=True)
+    return [
+        {
+            "decile": index,
+            "count": len(group),
+            "predicted_probability": float(group["probability"].mean()),
+            "realized_rate": float(group["actual"].mean()),
+            "absolute_error": abs(
+                float(group["probability"].mean()) - float(group["actual"].mean())
+            ),
+        }
+        for index, (_, group) in enumerate(grouped, start=1)
+    ]
+
+
+def _expected_calibration_error(table: list[dict[str, float | int]], total: int) -> float:
+    if total <= 0 or not table:
+        return math.nan
+    return float(sum((int(row["count"]) / total) * float(row["absolute_error"]) for row in table))
+
+
+def _calibration_intercept_slope(y_true: pd.Series, probability: np.ndarray) -> tuple[float, float]:
+    data = pd.DataFrame({"actual": y_true.astype(int), "probability": probability}).dropna()
+    if data.empty or data["actual"].nunique() < 2:
+        return math.nan, math.nan
+    clipped = np.clip(data["probability"].to_numpy(dtype=float), 1e-6, 1.0 - 1e-6)
+    logits = np.log(clipped / (1.0 - clipped))
+    model = LogisticRegression(C=1_000_000.0, solver="lbfgs")
+    model.fit(logits.reshape(-1, 1), data["actual"].to_numpy(dtype=int))
+    return float(model.intercept_[0]), float(model.coef_[0][0])
+
+
+def _prediction_deciles(
+    realized: pd.Series,
+    prediction: pd.Series,
+) -> list[dict[str, float | int]]:
+    data = pd.DataFrame({"realized": realized.astype(float), "prediction": prediction}).dropna()
+    if data.empty:
+        return []
+    data["decile"] = pd.qcut(
+        data["prediction"].rank(method="first"),
+        q=min(10, len(data)),
+        labels=False,
+        duplicates="drop",
+    )
+    return [
+        {
+            "decile": index,
+            "count": len(group),
+            "predicted_mean": float(group["prediction"].mean()),
+            "realized_mean": float(group["realized"].mean()),
+        }
+        for index, (_, group) in enumerate(data.groupby("decile", dropna=True), start=1)
+    ]
+
+
+def _quantile_metrics(prefix: str, values: pd.Series) -> dict[str, float]:
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return {
+            f"{prefix}_min": math.nan,
+            f"{prefix}_max": math.nan,
+            f"{prefix}_mean": math.nan,
+            f"{prefix}_median": math.nan,
+            f"{prefix}_std": math.nan,
+            f"{prefix}_q01": math.nan,
+            f"{prefix}_q05": math.nan,
+            f"{prefix}_q95": math.nan,
+            f"{prefix}_q99": math.nan,
+        }
+    return {
+        f"{prefix}_min": float(numeric.min()),
+        f"{prefix}_max": float(numeric.max()),
+        f"{prefix}_mean": float(numeric.mean()),
+        f"{prefix}_median": float(numeric.median()),
+        f"{prefix}_std": float(numeric.std(ddof=0)),
+        f"{prefix}_q01": float(numeric.quantile(0.01)),
+        f"{prefix}_q05": float(numeric.quantile(0.05)),
+        f"{prefix}_q95": float(numeric.quantile(0.95)),
+        f"{prefix}_q99": float(numeric.quantile(0.99)),
+    }
+
+
+def _prediction_sanity_metrics(
+    *,
+    name: str,
+    train_target: pd.Series,
+    holdout_target: pd.Series,
+    holdout_prediction: pd.Series,
+) -> dict[str, float | int | str | bool]:
+    metrics: dict[str, float | int | str | bool] = {}
+    metrics.update(_quantile_metrics(f"{name}_train_target", train_target))
+    metrics.update(_quantile_metrics(f"{name}_holdout_target", holdout_target))
+    metrics.update(_quantile_metrics(f"{name}_holdout_prediction_raw", holdout_prediction))
+    metrics.update(_quantile_metrics(f"{name}_holdout_prediction_transformed", holdout_prediction))
+    low = float(metrics[f"{name}_train_target_q01"])
+    high = float(metrics[f"{name}_train_target_q99"])
+    predictions = pd.to_numeric(holdout_prediction, errors="coerce").dropna()
+    ood_count = int(((predictions < low) | (predictions > high)).sum()) if predictions.size else 0
+    metrics[f"{name}_prediction_transform_method"] = "none"
+    metrics[f"{name}_prediction_bound_low_train_q01"] = low
+    metrics[f"{name}_prediction_bound_high_train_q99"] = high
+    metrics[f"{name}_prediction_ood_count"] = ood_count
+    metrics[f"{name}_prediction_ood_rate"] = (
+        float(ood_count / len(predictions)) if len(predictions) else math.nan
+    )
+    return metrics
+
+
+def _selection_diagnostics(
+    *,
+    holdout: pd.DataFrame,
+    selected: pd.DataFrame,
+    horizon: int,
+) -> dict[str, float | int | str]:
+    if selected.empty:
+        return {
+            "selected_observation_count": 0,
+            "selected_observation_rate": 0.0,
+            "selected_trading_dates": 0,
+            "average_candidates_per_date": 0.0,
+            "candidate_count_p50_per_date": 0.0,
+            "candidate_count_p90_per_date": 0.0,
+            "candidate_count_p99_per_date": 0.0,
+            "maximum_candidates_on_one_date": 0,
+            "percent_dates_with_candidate": 0.0,
+            "average_holding_overlap": 0.0,
+            "maximum_concurrent_candidate_count": 0,
+        }
+    counts = selected.groupby("Date")["symbol"].size()
+    all_dates = pd.to_datetime(holdout["Date"]).nunique()
+    date_counts = counts.astype(float)
+    event_rows: list[tuple[pd.Timestamp, int]] = []
+    for value in pd.to_datetime(selected["Date"]):
+        event_rows.append((pd.Timestamp(value), 1))
+        event_rows.append((pd.Timestamp(value) + pd.offsets.BDay(horizon), -1))
+    current = 0
+    max_overlap = 0
+    overlap_values: list[int] = []
+    for _, change in sorted(event_rows, key=lambda item: (item[0], -item[1])):
+        current += change
+        max_overlap = max(max_overlap, current)
+        overlap_values.append(current)
+    return {
+        "selected_observation_count": len(selected),
+        "selected_observation_rate": float(len(selected) / len(holdout))
+        if len(holdout)
+        else math.nan,
+        "selected_trading_dates": int(counts.size),
+        "average_candidates_per_date": float(date_counts.mean()),
+        "candidate_count_p50_per_date": float(date_counts.quantile(0.50)),
+        "candidate_count_p90_per_date": float(date_counts.quantile(0.90)),
+        "candidate_count_p99_per_date": float(date_counts.quantile(0.99)),
+        "maximum_candidates_on_one_date": int(counts.max()),
+        "percent_dates_with_candidate": float(counts.size / all_dates) if all_dates else math.nan,
+        "average_holding_overlap": float(np.mean(overlap_values)) if overlap_values else 0.0,
+        "maximum_concurrent_candidate_count": int(max_overlap),
+    }
+
+
+def _candidate_rows_for_portfolio(
+    *,
+    holdout: pd.DataFrame,
+    selected_mask: np.ndarray,
+    direction: str,
+    horizon: int,
+    model_id: str,
+    probability: np.ndarray,
+    expected_return: pd.Series,
+    target_before_stop_probability: np.ndarray,
+) -> pd.DataFrame:
+    rows = holdout[["Date", "symbol", "sector", "market_regime_label"]].copy()
+    rows["as_of_date"] = pd.to_datetime(rows["Date"]).dt.date.astype(str)
+    rows["ticker"] = rows["symbol"]
+    rows["direction"] = "Bullish" if direction == "bull" else "Bearish"
+    rows["horizon"] = horizon
+    rows["model_id"] = model_id
+    rows["calibrated_probability"] = probability
+    rows["expected_return"] = expected_return.to_numpy(dtype=float)
+    rows["target_before_stop_probability"] = target_before_stop_probability
+    rows["composite_utility_score"] = rows["calibrated_probability"] * rows["expected_return"]
+    rows["regime"] = rows["market_regime_label"]
+    rows["candidate_status"] = np.where(selected_mask, "ACTIONABLE_PAPER_CANDIDATE", "REJECTED")
+    rows["exclusion_reason"] = np.where(
+        selected_mask,
+        "",
+        "below_frozen_selection_policy",
+    )
+    return rows[
+        [
+            "as_of_date",
+            "ticker",
+            "direction",
+            "horizon",
+            "model_id",
+            "sector",
+            "regime",
+            "calibrated_probability",
+            "expected_return",
+            "target_before_stop_probability",
+            "composite_utility_score",
+            "candidate_status",
+            "exclusion_reason",
+        ]
+    ]
+
+
 def _permutation_importance_summary(
     *,
     classifier: Any,
@@ -411,16 +708,409 @@ def _period_concentration(frame: pd.DataFrame, returns: pd.Series) -> float:
     return float(yearly_abs.max() / total)
 
 
+def _status_from_bool(value: bool) -> GateStatus:
+    return "PASS" if value else "FAIL"
+
+
+def _float_metric(values: dict[str, float | int | str | bool | None], key: str) -> float:
+    value = values.get(key)
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def _build_gate_results(
+    *,
+    metrics: dict[str, float | int | str | bool | None],
+    calibration_metrics: dict[str, float | int | str | bool | None],
+    family: str,
+    config: DiscoveryConfig,
+    config_hash: str,
+) -> tuple[GateResult, ...]:
+    gates: list[GateResult] = []
+    now = datetime.now(UTC).isoformat()
+
+    def add(
+        gate_id: str,
+        name: str,
+        category: str,
+        scope: str,
+        metric_name: str,
+        threshold: str | float | int | bool | None,
+        comparator: str,
+        actual: str | float | int | bool | None,
+        status: GateStatus,
+        mandatory: bool,
+        reason: str,
+        evidence: str = "model_evaluation",
+    ) -> None:
+        gates.append(
+            make_gate(
+                gate_id=gate_id,
+                gate_name=name,
+                category=category,
+                scope=scope,
+                metric_name=metric_name,
+                threshold=threshold,
+                comparator=comparator,
+                actual_value=actual,
+                status=status,
+                mandatory=mandatory,
+                evidence_source=evidence,
+                reason=reason,
+                configuration_hash_value=config_hash,
+                evaluated_at_utc=now,
+            )
+        )
+
+    training_samples = int(metrics.get("training_samples") or 0)
+    holdout_samples = int(metrics.get("holdout_samples") or 0)
+    selected_count = int(metrics.get("selected_holdout_samples") or 0)
+    lcb = _float_metric(metrics, "holdout_mean_return_lcb_90")
+    brier_skill = _float_metric(calibration_metrics, "brier_skill_score")
+    holdout_brier = _float_metric(calibration_metrics, "holdout_brier")
+    profit_factor = _float_metric(metrics, "holdout_profit_factor")
+    portfolio_drawdown = _float_metric(metrics, "portfolio_max_drawdown")
+    feature_stability = _float_metric(metrics, "feature_stability_mean_abs_z")
+    symbol_concentration = _float_metric(metrics, "symbol_concentration_top")
+    sector_concentration = _float_metric(metrics, "sector_concentration_top")
+    double_cost_lcb = _float_metric(metrics, "holdout_double_cost_lcb_90")
+    turnover = _float_metric(metrics, "prediction_turnover")
+    temporal_fraction = _float_metric(metrics, "temporal_fold_positive_fraction")
+    period_concentration = _float_metric(metrics, "exceptional_period_concentration_top")
+    prediction_ood = int(metrics.get("prediction_sanity_ood_total") or 0)
+    selected_rate = float(metrics.get("selected_observation_rate") or 0.0)
+
+    add(
+        "minimum_training_samples",
+        "Minimum Training Samples",
+        "data sufficiency",
+        "prediction",
+        "training_samples",
+        config.minimum_training_samples,
+        ">=",
+        training_samples,
+        _status_from_bool(training_samples >= config.minimum_training_samples),
+        True,
+        "Training sample count meets configured minimum."
+        if training_samples >= config.minimum_training_samples
+        else "Training sample count is below configured minimum.",
+    )
+    add(
+        "minimum_unseen_observations",
+        "Minimum Unseen Holdout Observations",
+        "data sufficiency",
+        "prediction",
+        "holdout_samples",
+        config.minimum_holdout_samples,
+        ">=",
+        holdout_samples,
+        _status_from_bool(holdout_samples >= config.minimum_holdout_samples),
+        True,
+        "Holdout observation count meets configured minimum."
+        if holdout_samples >= config.minimum_holdout_samples
+        else "Holdout observation count is below configured minimum.",
+    )
+    add(
+        "brier_skill_vs_naive_positive",
+        "Brier Skill Versus Naive Control",
+        "predictive skill",
+        "prediction",
+        "brier_skill_score",
+        0.0,
+        ">",
+        brier_skill,
+        _status_from_bool(math.isfinite(brier_skill) and brier_skill > 0.0),
+        family != "naive_base_rate",
+        "Model Brier is better than matching direction/horizon naive control."
+        if math.isfinite(brier_skill) and brier_skill > 0.0
+        else "Model Brier is not better than the matching naive control.",
+    )
+    add(
+        "holdout_brier_max_035",
+        "Holdout Brier Maximum",
+        "calibration",
+        "prediction",
+        "holdout_brier",
+        0.35,
+        "<=",
+        holdout_brier,
+        _status_from_bool(math.isfinite(holdout_brier) and holdout_brier <= 0.35),
+        True,
+        "Holdout Brier is within configured maximum."
+        if math.isfinite(holdout_brier) and holdout_brier <= 0.35
+        else "Holdout Brier exceeds configured maximum.",
+    )
+    if family == "naive_base_rate" and selected_count == 0:
+        add(
+            "selected_candidate_quality_available",
+            "Selected Candidate Trading Metrics Available",
+            "selected-candidate quality",
+            "selected_candidates",
+            "selected_holdout_samples",
+            0,
+            "> 0",
+            selected_count,
+            "NOT_APPLICABLE",
+            False,
+            "Naive control selected zero rows; trading metrics are not comparable.",
+        )
+    else:
+        add(
+            "positive_expected_value_after_costs",
+            "Positive Expected Value After Costs",
+            "selected-candidate quality",
+            "selected_candidates",
+            "holdout_mean_return_lcb_90",
+            -(config.round_trip_cost_bps / 10_000.0),
+            ">",
+            lcb,
+            _status_from_bool(
+                math.isfinite(lcb) and lcb > -(config.round_trip_cost_bps / 10_000.0)
+            ),
+            True,
+            "Lower confidence bound is above negative round-trip cost."
+            if math.isfinite(lcb) and lcb > -(config.round_trip_cost_bps / 10_000.0)
+            else "Lower confidence bound is missing or below cost threshold.",
+        )
+        add(
+            "profit_factor_min_090",
+            "Profit Factor Minimum",
+            "selected-candidate quality",
+            "selected_candidates",
+            "holdout_profit_factor",
+            0.90,
+            ">=",
+            profit_factor,
+            _status_from_bool(math.isfinite(profit_factor) and profit_factor >= 0.90),
+            True,
+            "Selected-row profit factor meets configured minimum."
+            if math.isfinite(profit_factor) and profit_factor >= 0.90
+            else "Selected-row profit factor fails configured minimum.",
+        )
+    add(
+        "portfolio_drawdown_available",
+        "Portfolio Drawdown Available",
+        "portfolio performance",
+        "portfolio_holdout",
+        "portfolio_max_drawdown",
+        "finite",
+        "is finite",
+        portfolio_drawdown,
+        _status_from_bool(math.isfinite(portfolio_drawdown)),
+        family != "naive_base_rate",
+        "Portfolio drawdown was calculated from daily portfolio equity."
+        if math.isfinite(portfolio_drawdown)
+        else "Portfolio drawdown is missing.",
+    )
+    add(
+        "portfolio_drawdown_not_worse_than_50pct",
+        "Portfolio Drawdown Not Worse Than 50%",
+        "drawdown",
+        "portfolio_holdout",
+        "portfolio_max_drawdown",
+        -0.50,
+        ">",
+        portfolio_drawdown,
+        _status_from_bool(math.isfinite(portfolio_drawdown) and portfolio_drawdown > -0.50),
+        family != "naive_base_rate",
+        "Portfolio drawdown passes configured limit."
+        if math.isfinite(portfolio_drawdown) and portfolio_drawdown > -0.50
+        else "Portfolio drawdown is missing or worse than configured limit.",
+    )
+    add(
+        "feature_stability_mean_abs_z_max_250",
+        "Feature Stability Mean Abs Z Maximum",
+        "feature stability",
+        "prediction",
+        "feature_stability_mean_abs_z",
+        2.50,
+        "<=",
+        feature_stability,
+        _status_from_bool(math.isfinite(feature_stability) and feature_stability <= 2.50),
+        True,
+        "Holdout feature distribution shift is within configured cap."
+        if math.isfinite(feature_stability) and feature_stability <= 2.50
+        else "Holdout feature distribution shift exceeds configured cap.",
+    )
+    add(
+        "symbol_concentration_max_050",
+        "Symbol Concentration Maximum",
+        "symbol concentration",
+        "selected_candidates",
+        "symbol_concentration_top",
+        0.50,
+        "<=",
+        symbol_concentration,
+        _status_from_bool(not math.isfinite(symbol_concentration) or symbol_concentration <= 0.50),
+        True,
+        "Symbol concentration is within cap or not applicable due no selected rows.",
+    )
+    add(
+        "sector_concentration_max_080",
+        "Sector Concentration Maximum",
+        "sector stability",
+        "selected_candidates",
+        "sector_concentration_top",
+        0.80,
+        "<=",
+        sector_concentration,
+        _status_from_bool(not math.isfinite(sector_concentration) or sector_concentration <= 0.80),
+        True,
+        "Sector concentration is within cap or not applicable due no selected rows.",
+    )
+    add(
+        "transaction_cost_sensitivity_not_collapsed",
+        "Double-Cost Lower Bound Not Collapsed",
+        "cost sensitivity",
+        "selected_candidates",
+        "holdout_double_cost_lcb_90",
+        -((config.round_trip_cost_bps * 2.0) / 10_000.0),
+        ">",
+        double_cost_lcb,
+        _status_from_bool(
+            math.isfinite(double_cost_lcb)
+            and double_cost_lcb > -((config.round_trip_cost_bps * 2.0) / 10_000.0)
+        ),
+        family != "naive_base_rate",
+        "Double-cost lower confidence bound remains above configured collapse threshold."
+        if math.isfinite(double_cost_lcb)
+        and double_cost_lcb > -((config.round_trip_cost_bps * 2.0) / 10_000.0)
+        else "Double-cost lower confidence bound fails or is missing.",
+    )
+    add(
+        "prediction_turnover_max_050",
+        "Prediction Turnover Maximum",
+        "selection coverage",
+        "selected_candidates",
+        "prediction_turnover",
+        0.50,
+        "<=",
+        turnover,
+        _status_from_bool(math.isfinite(turnover) and turnover <= 0.50),
+        True,
+        "Selected observation rate is within configured turnover cap."
+        if math.isfinite(turnover) and turnover <= 0.50
+        else "Selected observation rate exceeds configured turnover cap.",
+    )
+    add(
+        "selection_rate_policy_configured",
+        "Selection-Rate Policy Configured",
+        "selection coverage",
+        "selected_candidates",
+        "selected_observation_rate",
+        config.selection_rate_max,
+        "<= configured max",
+        selected_rate,
+        "NOT_CONFIGURED"
+        if config.selection_rate_max is None
+        else _status_from_bool(selected_rate <= config.selection_rate_max),
+        True,
+        "No user-approved selection-rate maximum is configured."
+        if config.selection_rate_max is None
+        else "Selected rate evaluated against configured maximum.",
+    )
+    add(
+        "temporal_fold_stability_min_050",
+        "Temporal Fold Positive Fraction Minimum",
+        "temporal stability",
+        "selected_candidates",
+        "temporal_fold_positive_fraction",
+        0.50,
+        ">=",
+        temporal_fraction,
+        _status_from_bool(not math.isfinite(temporal_fraction) or temporal_fraction >= 0.50),
+        True,
+        "Temporal fold stability passes or is not applicable due insufficient selected rows.",
+    )
+    add(
+        "exceptional_period_concentration_max_060",
+        "Exceptional Period Concentration Maximum",
+        "temporal stability",
+        "selected_candidates",
+        "exceptional_period_concentration_top",
+        0.60,
+        "<=",
+        period_concentration,
+        _status_from_bool(not math.isfinite(period_concentration) or period_concentration <= 0.60),
+        True,
+        "No single year dominates selected absolute return contribution.",
+    )
+    add(
+        "comparison_controls_available",
+        "Comparison Controls Available",
+        "comparison control",
+        "prediction",
+        "rsi_control_columns_available",
+        True,
+        "is true",
+        bool(metrics.get("rsi_control_columns_available")),
+        _status_from_bool(bool(metrics.get("rsi_control_columns_available"))),
+        True,
+        "RSI baseline/control columns are present."
+        if bool(metrics.get("rsi_control_columns_available"))
+        else "RSI baseline/control columns are missing.",
+    )
+    add(
+        "not_naive_control",
+        "Model Is Not Naive Control",
+        "comparison control",
+        "model",
+        "naive_control_family",
+        False,
+        "is false",
+        family == "naive_base_rate",
+        _status_from_bool(family != "naive_base_rate"),
+        True,
+        "Naive controls are never promotion eligible."
+        if family == "naive_base_rate"
+        else "Model is not the naive control family.",
+    )
+    add(
+        "prediction_units_verified",
+        "Prediction Units Verified",
+        "prediction sanity",
+        "prediction",
+        "prediction_unit_contract",
+        "decimal_return",
+        "equals",
+        metrics.get("prediction_unit_contract"),
+        _status_from_bool(metrics.get("prediction_unit_contract") == "decimal_return"),
+        True,
+        "Returns, MFE, and MAE are decimal returns.",
+    )
+    add(
+        "prediction_out_of_distribution_absent",
+        "No Out-Of-Distribution Regression Predictions",
+        "prediction sanity",
+        "prediction",
+        "prediction_sanity_ood_total",
+        0,
+        "==",
+        prediction_ood,
+        _status_from_bool(prediction_ood == 0),
+        True,
+        "Regression predictions are within train-only robust target quantiles."
+        if prediction_ood == 0
+        else "At least one regression prediction exceeds train-only robust target quantiles.",
+    )
+    return tuple(gates)
+
+
 def _train_family(
     *,
+    model_id: str,
     family: str,
     classifier: Any,
     split: ChronologicalSplit,
+    full_frame: pd.DataFrame,
     feature_columns: list[str],
+    feature_family_by_column: dict[str, str],
     direction: str,
     horizon: int,
     config: DiscoveryConfig,
-) -> tuple[ModelBundle, dict[str, bool]]:
+) -> ModelBundle:
     target = f"label_{direction}_positive_return_{horizon}"
     returns = f"label_{direction}_forward_return_{horizon}"
     mfe = f"label_{direction}_mfe_{horizon}"
@@ -477,7 +1167,11 @@ def _train_family(
     mfe_model.fit(x_train, train[mfe])
     mae_model.fit(x_train, train[mae])
     expected_return = pd.Series(return_model.predict(holdout[feature_columns]), index=holdout.index)
-    selected = holdout.loc[holdout_probability >= config.probability_threshold].copy()
+    expected_mfe = pd.Series(mfe_model.predict(holdout[feature_columns]), index=holdout.index)
+    expected_mae = pd.Series(mae_model.predict(holdout[feature_columns]), index=holdout.index)
+    selection_policy = selection_policy_from_config(config)
+    selected_mask = holdout_probability >= selection_policy.probability_threshold
+    selected = holdout.loc[selected_mask].copy()
     selected_returns = selected[returns] - (config.round_trip_cost_bps / 10_000.0)
     if selected_returns.empty:
         selected_returns = holdout[returns].head(0)
@@ -486,6 +1180,27 @@ def _train_family(
         brier_score_loss(calibration[target].astype(int), calibration_probability)
     )
     holdout_brier = float(brier_score_loss(holdout[target].astype(int), holdout_probability))
+    naive_probability = np.full(len(holdout), float(train[target].astype(float).mean()))
+    naive_brier = (
+        holdout_brier
+        if family == "naive_base_rate"
+        else float(brier_score_loss(holdout[target].astype(int), naive_probability))
+    )
+    brier_improvement = naive_brier - holdout_brier
+    brier_skill_score = (
+        float(1.0 - (holdout_brier / naive_brier))
+        if math.isfinite(naive_brier) and naive_brier > 0
+        else math.nan
+    )
+    try:
+        holdout_log_loss = float(log_loss(holdout[target].astype(int), holdout_probability))
+    except ValueError:
+        holdout_log_loss = math.nan
+    calibration_table = _calibration_table(holdout[target].astype(int), holdout_probability)
+    calibration_intercept, calibration_slope = _calibration_intercept_slope(
+        holdout[target].astype(int), holdout_probability
+    )
+    prediction_deciles = _prediction_deciles(holdout[returns], expected_return)
     permutation_summary = _permutation_importance_summary(
         classifier=classifier,
         calibrator=calibrator,
@@ -512,7 +1227,7 @@ def _train_family(
             1.645 * float(selected_returns.std(ddof=1)) / math.sqrt(len(selected_returns))
         )
     holdout_profit_factor = _profit_factor(selected_returns)
-    holdout_max_drawdown = _max_drawdown(selected_returns)
+    selected_row_sequence_drawdown = _max_drawdown(selected_returns)
     double_cost_returns = selected[returns] - ((config.round_trip_cost_bps * 2.0) / 10_000.0)
     double_cost_lcb = (
         float(double_cost_returns.mean())
@@ -531,30 +1246,129 @@ def _train_family(
     prediction_turnover = len(selected_returns) / len(holdout) if len(holdout) else math.nan
     temporal_fold_positive_fraction = _temporal_fold_stability(selected, selected_returns)
     period_concentration = _period_concentration(selected, selected_returns)
+    selection_metrics = _selection_diagnostics(
+        holdout=holdout,
+        selected=selected,
+        horizon=horizon,
+    )
+    candidate_rows = _candidate_rows_for_portfolio(
+        holdout=holdout,
+        selected_mask=selected_mask,
+        direction=direction,
+        horizon=horizon,
+        model_id=model_id,
+        probability=holdout_probability,
+        expected_return=expected_return,
+        target_before_stop_probability=target_holdout_probability,
+    )
+    portfolio_config = PortfolioBacktestConfig(
+        horizon=horizon,
+        round_trip_cost_bps=config.round_trip_cost_bps,
+        slippage_bps=config.slippage_bps,
+        max_concurrent_positions=config.max_concurrent_positions,
+        max_position_per_symbol=config.max_position_per_symbol,
+        max_sector_fraction=config.max_sector_fraction,
+        max_gross_exposure=config.max_gross_exposure,
+        max_net_exposure=config.max_net_exposure,
+    )
+    portfolio = backtest_scanner_candidates(
+        _portfolio_frames_from_modeling(full_frame),
+        candidate_rows,
+        config=portfolio_config,
+    )
+    portfolio_metrics = {f"portfolio_{key}": value for key, value in portfolio.metrics.items()}
+    portfolio_max_drawdown = float(portfolio.metrics.get("max_drawdown", math.nan))
+    selected_mean_mfe = float(selected[mfe].mean()) if not selected.empty else math.nan
+    selected_mean_mae = float(selected[mae].mean()) if not selected.empty else math.nan
+    prediction_metrics: dict[str, float | int | str | bool] = {}
+    prediction_metrics.update(
+        _prediction_sanity_metrics(
+            name="return",
+            train_target=train[returns],
+            holdout_target=holdout[returns],
+            holdout_prediction=expected_return,
+        )
+    )
+    prediction_metrics.update(
+        _prediction_sanity_metrics(
+            name="mfe",
+            train_target=train[mfe],
+            holdout_target=holdout[mfe],
+            holdout_prediction=expected_mfe,
+        )
+    )
+    prediction_metrics.update(
+        _prediction_sanity_metrics(
+            name="mae",
+            train_target=train[mae],
+            holdout_target=holdout[mae],
+            holdout_prediction=expected_mae,
+        )
+    )
+    prediction_ood_total = int(
+        int(prediction_metrics.get("return_prediction_ood_count") or 0)
+        + int(prediction_metrics.get("mfe_prediction_ood_count") or 0)
+        + int(prediction_metrics.get("mae_prediction_ood_count") or 0)
+    )
+    selected_feature_family_counts: dict[str, int] = {}
+    for column in feature_columns:
+        family_name = feature_family_by_column.get(column, "unknown")
+        selected_feature_family_counts[family_name] = (
+            selected_feature_family_counts.get(family_name, 0) + 1
+        )
+    portfolio_policy_hash = configuration_hash(asdict(portfolio_config))
+    selection_policy_hash = configuration_hash(asdict(selection_policy))
+    config_hash = configuration_hash(
+        {
+            "discovery": asdict(config),
+            "selection_policy": asdict(selection_policy),
+            "portfolio_policy": asdict(portfolio_config),
+        }
+    )
     metrics: dict[str, float | int | str | bool | None] = {
         "training_samples": len(train),
         "calibration_samples": len(calibration),
         "holdout_samples": len(holdout),
         "selected_holdout_samples": len(selected_returns),
+        "raw_data_first_date": _date_label(pd.Timestamp(full_frame["Date"].min())),
+        "feature_warmup_first_date": _date_label(pd.Timestamp(full_frame["Date"].min())),
+        "model_eligible_first_date": _date_label(pd.Timestamp(split.train["Date"].min())),
+        "research_start": config.research_start,
+        "research_end": _research_end(full_frame, config),
         "holdout_win_rate": float((selected_returns > 0).mean())
         if not selected_returns.empty
         else math.nan,
         "holdout_mean_net_return": mean_selected_return,
+        "holdout_median_net_return": float(selected_returns.median())
+        if not selected_returns.empty
+        else math.nan,
         "holdout_mean_return_lcb_90": lower_bound,
         "holdout_profit_factor": holdout_profit_factor,
-        "holdout_max_drawdown": holdout_max_drawdown,
+        "selected_row_sequence_drawdown": selected_row_sequence_drawdown,
+        "holdout_max_drawdown": portfolio_max_drawdown,
+        "portfolio_max_drawdown": portfolio_max_drawdown,
         "holdout_mae_return_model": holdout_mae,
         "holdout_rmse_return_model": holdout_rmse,
         "holdout_expected_return_mean": float(expected_return.mean()),
+        "holdout_rank_correlation_predicted_realized_return": float(
+            pd.Series(expected_return).corr(holdout[returns], method="spearman")
+        ),
         "feature_stability_mean_abs_z": feature_stability_mean,
         "feature_stability_top": feature_stability_top,
         "permutation_importance_top": permutation_summary,
         "mutual_information_top": mutual_information_summary,
+        "selected_feature_family_counts_json": _json_dumps(selected_feature_family_counts),
+        "selection_policy_json": _json_dumps(asdict(selection_policy)),
+        "selection_policy_configuration_hash": selection_policy_hash,
+        "portfolio_policy_json": _json_dumps(asdict(portfolio_config)),
+        "portfolio_policy_configuration_hash": portfolio_policy_hash,
         "holdout_target_before_stop_brier": float(
             brier_score_loss(holdout[target_before_stop].astype(int), target_holdout_probability)
         ),
         "holdout_target_before_stop_probability_mean": float(np.mean(target_holdout_probability)),
         "holdout_double_cost_lcb_90": double_cost_lcb,
+        "selected_mean_mfe": selected_mean_mfe,
+        "selected_mean_mae": selected_mean_mae,
         "positive_year_fraction": year_fraction,
         "positive_regime_fraction": regime_fraction,
         "positive_sector_fraction": sector_fraction,
@@ -567,52 +1381,45 @@ def _train_family(
         "naive_control_family": family == "naive_base_rate",
         "model_plugin_name": plugin.name,
         "model_plugin_nonlinear_interactions": plugin.nonlinear_interactions,
+        "prediction_unit_contract": "decimal_return",
+        "prediction_sanity_ood_total": prediction_ood_total,
+        "calibration_table_json": _json_dumps(calibration_table),
+        "predicted_vs_realized_return_deciles_json": _json_dumps(prediction_deciles),
+        "portfolio_daily_equity_json": _json_dumps(portfolio.equity.to_dict(orient="records")),
+        "portfolio_trade_ledger_json": _json_dumps(portfolio.trades.to_dict(orient="records")),
+        "selected_candidate_ledger_json": _json_dumps(
+            candidate_rows.loc[selected_mask].to_dict(orient="records")
+        ),
+        "candidate_ledger_rows": len(portfolio.trades),
+        "candidate_audit_rows": len(portfolio.candidate_audit),
+        **selection_metrics,
+        **portfolio_metrics,
+        **prediction_metrics,
     }
     calibration_metrics: dict[str, float | int | str | bool | None] = {
         "calibration_brier": calibration_brier,
         "holdout_brier": holdout_brier,
+        "naive_brier": naive_brier,
+        "absolute_brier_improvement": brier_improvement,
+        "relative_brier_improvement": (brier_improvement / naive_brier)
+        if math.isfinite(naive_brier) and naive_brier > 0
+        else math.nan,
+        "brier_skill_score": brier_skill_score,
+        "holdout_log_loss": holdout_log_loss,
+        "calibration_intercept": calibration_intercept,
+        "calibration_slope": calibration_slope,
+        "expected_calibration_error": _expected_calibration_error(calibration_table, len(holdout)),
+        "classification_base_rate": float(holdout[target].astype(float).mean()),
         "calibration_probability_mean": float(np.mean(calibration_probability)),
         "holdout_probability_mean": float(np.mean(holdout_probability)),
     }
-    gates = {
-        "minimum_training_samples": len(train) >= config.minimum_training_samples,
-        "minimum_unseen_observations": len(holdout) >= config.minimum_holdout_samples,
-        "positive_expected_value_after_costs": bool(
-            math.isfinite(lower_bound) and lower_bound > -(config.round_trip_cost_bps / 10_000.0)
-        ),
-        "calibration_brier_max_035": holdout_brier <= 0.35,
-        "profit_factor_min_090": bool(
-            math.isfinite(holdout_profit_factor) and holdout_profit_factor >= 0.90
-        ),
-        "drawdown_not_worse_than_50pct": bool(
-            math.isfinite(holdout_max_drawdown) and holdout_max_drawdown > -0.50
-        ),
-        "confidence_lower_bound_finite": math.isfinite(lower_bound),
-        "feature_stability_mean_abs_z_max_250": bool(
-            math.isfinite(feature_stability_mean) and feature_stability_mean <= 2.50
-        ),
-        "symbol_concentration_max_050": bool(
-            not math.isfinite(symbol_concentration) or symbol_concentration <= 0.50
-        ),
-        "sector_concentration_max_080": bool(
-            not math.isfinite(sector_concentration) or sector_concentration <= 0.80
-        ),
-        "transaction_cost_sensitivity_not_collapsed": bool(
-            math.isfinite(double_cost_lcb)
-            and double_cost_lcb > -((config.round_trip_cost_bps * 2.0) / 10_000.0)
-        ),
-        "prediction_turnover_max_050": bool(
-            math.isfinite(prediction_turnover) and prediction_turnover <= 0.50
-        ),
-        "temporal_fold_stability_min_050": bool(
-            not math.isfinite(temporal_fold_positive_fraction)
-            or temporal_fold_positive_fraction >= 0.50
-        ),
-        "exceptional_period_concentration_max_060": bool(
-            not math.isfinite(period_concentration) or period_concentration <= 0.60
-        ),
-        "comparison_controls_available": bool("rsi_14" in train.columns),
-    }
+    gate_results = _build_gate_results(
+        metrics=metrics,
+        calibration_metrics=calibration_metrics,
+        family=family,
+        config=config,
+        config_hash=config_hash,
+    )
     medians = {column: float(x_train[column].median()) for column in feature_columns}
     means = {column: float(x_train[column].mean()) for column in feature_columns}
     stds = {
@@ -622,12 +1429,14 @@ def _train_family(
         for column in feature_columns
     }
     bundle = ModelBundle(
-        model_id="pending",
+        model_id=model_id,
         direction=direction,
         horizon=horizon,
         family=family,
         feature_columns=tuple(feature_columns),
-        feature_family_by_column={},
+        feature_family_by_column={
+            column: feature_family_by_column.get(column, "unknown") for column in feature_columns
+        },
         classifier=classifier,
         calibrator=calibrator,
         target_before_stop_model=target_classifier,
@@ -644,8 +1453,9 @@ def _train_family(
         ].reset_index(drop=True),
         metrics=metrics,
         calibration_metrics=calibration_metrics,
+        gate_results=gate_results,
     )
-    return bundle, gates
+    return bundle
 
 
 def load_model_bundle(path: str | Path) -> ModelBundle:
@@ -679,22 +1489,39 @@ def discover_models(
     config = config or DiscoveryConfig()
     registered: list[RegisteredModel] = []
     rejected: list[RegisteredModel] = []
+    eligible_frame = eligible_modeling_frame(frame, config)
+    if eligible_frame.empty:
+        raise ValueError("No eligible modeling rows remain after applying research date bounds")
+    research_end = pd.Timestamp(_research_end(frame, config))
+    warmup_frame = frame.loc[pd.to_datetime(frame["Date"]) <= research_end].copy()
     feature_columns = _clean_feature_columns(
-        frame,
+        eligible_frame,
         max_features=config.max_features,
         correlation_threshold=config.correlation_threshold,
     )
     created_at = datetime.now(UTC).isoformat()
     for horizon in config.horizons:
-        split = chronological_train_calibration_holdout_split(frame, horizon=horizon)
+        split = chronological_train_calibration_holdout_split(eligible_frame, horizon=horizon)
         for direction in config.directions:
             for family, classifier in _candidate_pipelines(config.random_seed).items():
+                model_id = make_model_id(
+                    task="swing_direction_probability",
+                    horizon=horizon,
+                    direction=direction,
+                    family=family,
+                    universe_snapshot_id=universe_snapshot_id,
+                    feature_manifest_hash=feature_manifest_hash,
+                    created_at_utc=f"{created_at}|{family}|{direction}|{horizon}",
+                )
                 try:
-                    bundle, gates = _train_family(
+                    bundle = _train_family(
+                        model_id=model_id,
                         family=family,
                         classifier=classifier,
                         split=split,
+                        full_frame=warmup_frame,
                         feature_columns=feature_columns,
+                        feature_family_by_column=feature_family_by_column,
                         direction=direction,
                         horizon=horizon,
                         config=config,
@@ -729,6 +1556,7 @@ def discover_models(
                         metrics={},
                         calibration_metrics={},
                         quality_gates={"trainable": False},
+                        gate_results=(),
                         artifact_path="",
                         code_commit_hash=current_commit_hash(code_root or Path.cwd()),
                         created_at_utc=created_at,
@@ -737,15 +1565,6 @@ def discover_models(
                     rejected.append(model)
                     continue
 
-                model_id = make_model_id(
-                    task="swing_direction_probability",
-                    horizon=horizon,
-                    direction=direction,
-                    family=family,
-                    universe_snapshot_id=universe_snapshot_id,
-                    feature_manifest_hash=feature_manifest_hash,
-                    created_at_utc=f"{created_at}|{family}|{direction}|{horizon}",
-                )
                 bundle = ModelBundle(
                     model_id=model_id,
                     direction=bundle.direction,
@@ -770,10 +1589,12 @@ def discover_models(
                     training_labels=bundle.training_labels,
                     metrics=bundle.metrics,
                     calibration_metrics=bundle.calibration_metrics,
+                    gate_results=bundle.gate_results,
                 )
                 artifact_path = Path(artifact_dir) / f"{model_id}.joblib"
                 save_model_bundle(bundle, artifact_path)
-                state: ModelState = "CHALLENGER" if all(gates.values()) else "CANDIDATE"
+                eligibility = promotion_eligibility(bundle.gate_results)
+                state: ModelState = "CHALLENGER" if eligibility.eligible else "CANDIDATE"
                 model = RegisteredModel(
                     model_id=model_id,
                     task="swing_direction_probability",
@@ -790,10 +1611,18 @@ def discover_models(
                     universe_snapshot_id=universe_snapshot_id,
                     feature_manifest_hash=feature_manifest_hash,
                     raw_manifest_hashes=raw_manifest_hashes,
-                    hyperparameters={"family": family, "max_features": config.max_features},
+                    hyperparameters={
+                        "family": family,
+                        "max_features": config.max_features,
+                        "research_start": config.research_start,
+                        "research_end": _research_end(frame, config),
+                        "selection_policy": asdict(selection_policy_from_config(config)),
+                        "portfolio_policy": bundle.metrics.get("portfolio_policy_json"),
+                    },
                     metrics=bundle.metrics,
                     calibration_metrics=bundle.calibration_metrics,
-                    quality_gates=gates,
+                    quality_gates=quality_gate_bool_map(bundle.gate_results),
+                    gate_results=bundle.gate_results,
                     artifact_path=str(artifact_path),
                     code_commit_hash=current_commit_hash(code_root or Path.cwd()),
                     created_at_utc=created_at,
@@ -831,7 +1660,32 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     output["target_before_stop_probability"] = np.asarray(
         bundle.target_before_stop_calibrator.predict(target_raw), dtype=float
     )
-    output["expected_return"] = bundle.return_model.predict(x)
-    output["expected_mfe"] = bundle.mfe_model.predict(x)
-    output["expected_mae"] = bundle.mae_model.predict(x)
+
+    def add_regression_prediction(
+        output_column: str,
+        metric_prefix: str,
+        values: np.ndarray,
+    ) -> None:
+        numeric = np.asarray(values, dtype=float)
+        output[output_column] = numeric
+        output[f"{output_column}_raw"] = numeric
+        output[f"{output_column}_transformed"] = numeric
+        output[f"{output_column}_transform_method"] = str(
+            bundle.metrics.get(f"{metric_prefix}_prediction_transform_method") or "none"
+        )
+        low_value = bundle.metrics.get(f"{metric_prefix}_prediction_bound_low_train_q01")
+        high_value = bundle.metrics.get(f"{metric_prefix}_prediction_bound_high_train_q99")
+        try:
+            if low_value is None or high_value is None:
+                raise ValueError
+            low = float(low_value)
+            high = float(high_value)
+        except (TypeError, ValueError):
+            output[f"{output_column}_out_of_distribution"] = False
+        else:
+            output[f"{output_column}_out_of_distribution"] = (numeric < low) | (numeric > high)
+
+    add_regression_prediction("expected_return", "return", bundle.return_model.predict(x))
+    add_regression_prediction("expected_mfe", "mfe", bundle.mfe_model.predict(x))
+    add_regression_prediction("expected_mae", "mae", bundle.mae_model.predict(x))
     return output
