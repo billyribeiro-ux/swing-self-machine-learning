@@ -1,5 +1,7 @@
 # Local Research Dashboard V0.1
 
+Supersession note: Dashboard V0.1 remains the historical scope for the local RSI research console. The current product dashboard has been expanded into the Self-Learning Swing Trading Engine sections documented in `docs/AUTONOMOUS_DISCOVERY_ENGINE.md`; RSI and historical walk-forward views now live under Baselines and Legacy RSI.
+
 ## Purpose
 
 The first dashboard is a local Streamlit interface for inspecting the Version 1 daily RSI research loop. It is a thin presentation layer over the typed Python modules in `src/swing_rsi/`.

@@ -1,0 +1,37 @@
+# Feature Registry
+
+`src/swing_rsi/engine/features.py` defines a declarative feature registry through `FeatureSpec`.
+
+Every feature records:
+
+- feature name;
+- feature family;
+- parameters;
+- required OHLCV columns;
+- lookback;
+- as-of timing;
+- cross-sectional requirement;
+- benchmark requirement;
+- feature version.
+
+## Implemented Families
+
+- `returns_momentum`: returns over 1, 2, 3, 5, 10, 20, 40, 63, 126, and 252 sessions, log returns, acceleration, streaks, momentum percentiles, distance from prior highs/lows.
+- `trend_structure`: moving-average distances and slopes, trend persistence proxies, breakout/breakdown distance, pullback/recovery and gap behavior.
+- `volatility_range`: true range, ATR, realized volatility, upside/downside volatility, range percentiles, compression/expansion, overnight and intraday range context.
+- `volume_participation`: relative volume, volume z-score, dollar volume, volume trend, up/down volume proxies, OBV-like transformations, price-volume agreement.
+- `candle_geometry`: body percentage, wick percentages, close position, inside/outside bars, expansion/rejection bars.
+- `rsi_family`: Wilder RSI lengths 2 through 50, slope, acceleration, rolling percentile, distance from historical RSI zones.
+- `technical_primitives`: ROC-like returns, stochastic location, MACD-style differences, Bollinger/Keltner normalized distance, CCI, MFI, z-scores, percentiles.
+- `market_relative`: SPY/QQQ/IWM/DIA relative returns, rolling beta, rolling correlation, residual return and benchmark divergence.
+- `sector_relative`: stock versus configured sector proxy return and trend relationships.
+- `inverse_leveraged`: benchmark versus inverse/leveraged ETF correlation, divergence, relationship breakdown, and volume context.
+- `breadth`: advance percentage, up-volume percentage, percentage above averages, rolling high/low participation, dispersion and skew.
+- `relationship_graph`: rolling pair correlations, anti-correlation, beta, residual divergence, lagged correlation, relationship stability, decoupling.
+- `regime`: unsupervised trend/volatility/breadth/correlation state labels.
+
+## Discovery Controls
+
+The discovery runner applies missingness filtering, zero-variance filtering, near-duplicate correlation pruning, bounded feature counts, chronological validation, and train-only preprocessing.
+
+No feature family is an automatic trading rule. Tree and linear model families discover relationships from the training slice, then the selected feature set and manifest hash are stored with each model.

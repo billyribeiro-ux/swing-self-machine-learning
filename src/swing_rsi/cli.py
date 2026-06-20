@@ -8,6 +8,17 @@ from pathlib import Path
 import pandas as pd
 
 from swing_rsi.application.datasets import download_daily_to_raw
+from swing_rsi.application.engine_service import (
+    build_autonomous_features,
+    forward_events,
+    list_registered_models,
+    promote_registered_model,
+    run_daily_cycle,
+    run_forward_update,
+    run_live_scanner,
+    run_model_discovery,
+    update_universe_data,
+)
 from swing_rsi.application.research_service import run_research
 from swing_rsi.backtest.engine import backtest_fixed_horizon
 from swing_rsi.config import ProjectPaths
@@ -161,10 +172,143 @@ def command_research(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_universe_update(args: argparse.Namespace) -> int:
+    result = update_universe_data(
+        Path.cwd(),
+        universe_path=args.universe,
+        start=args.start,
+        end=args.end,
+        lookback_years=args.lookback_years,
+    )
+    updated = [row for row in result.results if row.status == "updated"]
+    errors = [row for row in result.results if row.status == "error"]
+    print(f"Universe: {result.universe.name} ({result.universe.snapshot_id})")
+    print(f"Enabled symbols: {len(result.universe.enabled_symbols):,}")
+    print(f"Updated symbols: {len(updated):,}")
+    print(f"Symbols with errors: {len(errors):,}")
+    for row in errors:
+        print(f"- {row.symbol}: {row.message}")
+    print("FMP data remains unaudited for corporate-action and historical-universe semantics.")
+    return 0
+
+
+def command_build_features(args: argparse.Namespace) -> int:
+    result = build_autonomous_features(Path.cwd(), universe_path=args.universe)
+    print(f"Universe: {result.universe.name} ({result.universe.snapshot_id})")
+    print(f"Feature rows: {len(result.features.frame):,}")
+    print(f"Label rows: {len(result.labels):,}")
+    print(f"Modeling rows: {len(result.modeling_frame):,}")
+    print(f"Feature manifest hash: {result.features.manifest_hash}")
+    print(f"Features saved: {result.feature_path}")
+    print(f"Labels saved: {result.labels_path}")
+    print(f"Modeling frame saved: {result.modeling_path}")
+    return 0
+
+
+def command_discover_models(args: argparse.Namespace) -> int:
+    models = run_model_discovery(
+        Path.cwd(),
+        universe_path=args.universe,
+        minimum_training_samples=args.minimum_training_samples,
+        minimum_holdout_samples=args.minimum_holdout_samples,
+    )
+    challengers = [model for model in models if model.state == "CHALLENGER"]
+    candidates = [model for model in models if model.state == "CANDIDATE"]
+    rejected = [model for model in models if model.state == "REJECTED"]
+    print(f"Models registered this run: {len(models):,}")
+    print(f"Challengers: {len(challengers):,}")
+    print(f"Candidates needing review: {len(candidates):,}")
+    print(f"Rejected/experimental: {len(rejected):,}")
+    if challengers:
+        best = max(
+            challengers,
+            key=lambda model: float(
+                model.metrics.get("holdout_mean_return_lcb_90") or float("-inf")
+            ),
+        )
+        print(f"Best challenger: {best.model_id}")
+        print(f"Direction: {best.direction}; horizon: {best.horizon}; family: {best.family}")
+    elif candidates:
+        best = max(
+            candidates,
+            key=lambda model: float(
+                model.metrics.get("holdout_mean_return_lcb_90") or float("-inf")
+            ),
+        )
+        print(f"Best failed-gate candidate retained for inspection: {best.model_id}")
+        print("No candidate was promoted or silently deployed.")
+    else:
+        print("No challenger passed all quality gates. Gates were not weakened.")
+    return 0
+
+
+def command_model_registry(_: argparse.Namespace) -> int:
+    models = list_registered_models(Path.cwd())
+    if not models:
+        print("No models registered.")
+        return 0
+    rows = [
+        {
+            "model_id": model.model_id,
+            "state": model.state,
+            "direction": model.direction,
+            "horizon": model.horizon,
+            "family": model.family,
+            "holdout_mean_net_return": model.metrics.get("holdout_mean_net_return"),
+            "holdout_brier": model.calibration_metrics.get("holdout_brier"),
+        }
+        for model in models
+    ]
+    print(pd.DataFrame(rows).to_string(index=False))
+    return 0
+
+
+def command_promote_model(args: argparse.Namespace) -> int:
+    promoted = promote_registered_model(Path.cwd(), args.model_id)
+    print(f"Promoted champion model: {promoted.model_id}")
+    print(
+        f"Direction: {promoted.direction}; horizon: {promoted.horizon}; family: {promoted.family}"
+    )
+    return 0
+
+
+def command_scan(args: argparse.Namespace) -> int:
+    snapshot = run_live_scanner(Path.cwd(), include_challengers=args.include_challengers)
+    print(f"Scan ID: {snapshot.scan_id}")
+    print(f"As-of date: {snapshot.as_of_date}")
+    print(f"Rows: {len(snapshot.rows):,}")
+    print(f"CSV: {snapshot.csv_path}")
+    print(f"Parquet: {snapshot.parquet_path}")
+    if not snapshot.rows.empty:
+        print(snapshot.rows.head(20).to_string(index=False))
+    return 0
+
+
+def command_forward_update(_: argparse.Namespace) -> int:
+    count = run_forward_update(Path.cwd())
+    print(f"Forward events created from latest scanner snapshot: {count:,}")
+    events = forward_events(Path.cwd())
+    print(f"Total forward events: {len(events):,}")
+    return 0
+
+
+def command_daily_cycle(args: argparse.Namespace) -> int:
+    result = run_daily_cycle(
+        Path.cwd(),
+        universe_path=args.universe,
+        update_data=args.update_data,
+        include_challengers=args.include_challengers,
+    )
+    print(f"Daily cycle status: {result.status}")
+    print(f"Market date: {result.market_date}")
+    print(result.summary)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="swing-rsi",
-        description="Daily swing RSI discovery and validation research engine.",
+        description="Self-Learning Swing Trading Engine.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -195,6 +339,59 @@ def build_parser() -> argparse.ArgumentParser:
     research.add_argument("--minimum-trades", type=int, default=30)
     research.add_argument("--output", required=True)
     research.set_defaults(handler=command_research)
+
+    universe_update = subparsers.add_parser(
+        "universe-update",
+        help="Update enabled universe symbols through the configured provider",
+    )
+    universe_update.add_argument("--universe", default=None)
+    universe_update.add_argument("--start", default=None)
+    universe_update.add_argument("--end", default=None)
+    universe_update.add_argument("--lookback-years", type=int, default=10)
+    universe_update.set_defaults(handler=command_universe_update)
+
+    build_features = subparsers.add_parser(
+        "build-features",
+        help="Build autonomous feature, label, and modeling parquet files",
+    )
+    build_features.add_argument("--universe", default=None)
+    build_features.set_defaults(handler=command_build_features)
+
+    discover = subparsers.add_parser(
+        "discover-models",
+        help="Train and register autonomous candidate/challenger models",
+    )
+    discover.add_argument("--universe", default=None)
+    discover.add_argument("--minimum-training-samples", type=int, default=200)
+    discover.add_argument("--minimum-holdout-samples", type=int, default=80)
+    discover.set_defaults(handler=command_discover_models)
+
+    registry = subparsers.add_parser("model-registry", help="List registered models")
+    registry.set_defaults(handler=command_model_registry)
+
+    promote = subparsers.add_parser("promote-model", help="Promote a passed challenger model")
+    promote.add_argument("--model-id", required=True)
+    promote.set_defaults(handler=command_promote_model)
+
+    scan = subparsers.add_parser("scan", help="Run the latest-session autonomous scanner")
+    scan.add_argument(
+        "--include-challengers",
+        action="store_true",
+        help="Use challengers only when no champion exists; never a silent fallback",
+    )
+    scan.set_defaults(handler=command_scan)
+
+    forward_update = subparsers.add_parser(
+        "forward-update",
+        help="Append paper-forward events from the latest scanner snapshot",
+    )
+    forward_update.set_defaults(handler=command_forward_update)
+
+    daily = subparsers.add_parser("daily-cycle", help="Run the local daily scanner cycle")
+    daily.add_argument("--universe", default=None)
+    daily.add_argument("--update-data", action="store_true")
+    daily.add_argument("--include-challengers", action="store_true")
+    daily.set_defaults(handler=command_daily_cycle)
     return parser
 
 

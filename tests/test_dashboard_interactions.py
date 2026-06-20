@@ -17,6 +17,22 @@ def demo_dashboard_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     raw = tmp_path / "data" / "raw"
     raw.mkdir(parents=True)
     (tmp_path / "reports").mkdir()
+    config_dir = tmp_path / "configs" / "universe"
+    config_dir.mkdir(parents=True)
+    (config_dir / "core.yaml").write_text(
+        """
+name: demo
+provider: fmp
+default_start: "2018-01-02"
+symbols:
+  - symbol: DEMO
+    enabled: true
+    role: stock
+    sector: demo
+relationships: []
+""",
+        encoding="utf-8",
+    )
     save_ohlcv_csv(generate_sample_ohlcv(rows=1_205), raw / "DEMO.csv")
     monkeypatch.setattr("dashboard.ui.components.resolve_project_root", lambda _: tmp_path)
 
@@ -121,7 +137,7 @@ def test_dashboard_app_startup_smoke_no_network(demo_dashboard_root: Path) -> No
     app = AppTest.from_file("dashboard/app.py").run(timeout=30)
 
     _assert_no_streamlit_exceptions(app)
-    assert any(title.value == "Overview" for title in app.title)
+    assert any(title.value == "Self-Learning Swing Trading Engine" for title in app.title)
 
 
 def test_every_dashboard_section_renders_without_streamlit_exceptions(
@@ -129,6 +145,14 @@ def test_every_dashboard_section_renders_without_streamlit_exceptions(
 ) -> None:
     for path in (
         "dashboard/sections/overview.py",
+        "dashboard/sections/data_universe.py",
+        "dashboard/sections/discovery_lab.py",
+        "dashboard/sections/live_scanner.py",
+        "dashboard/sections/candidate_attribution.py",
+        "dashboard/sections/portfolio_backtests.py",
+        "dashboard/sections/paper_forward_test.py",
+        "dashboard/sections/model_registry.py",
+        "dashboard/sections/baselines_legacy.py",
         "dashboard/sections/data_audit.py",
         "dashboard/sections/rsi_explorer.py",
         "dashboard/sections/research_backtest.py",

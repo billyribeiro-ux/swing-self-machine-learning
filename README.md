@@ -1,6 +1,6 @@
-# Swing RSI Self-Learner
+# Self-Learning Swing Trading Engine
 
-A research-first Python project for discovering, validating, scanning, and forward-testing daily swing-trading setups centered on self-adjusting RSI behavior.
+A research-first Python project for autonomous daily swing-market discovery, attribution, scanner output, portfolio backtesting, and append-only paper forward testing.
 
 ## Version 1 boundary
 
@@ -8,13 +8,15 @@ Version 1 includes:
 
 - Daily stock and ETF OHLCV data
 - FMP as the primary initial data provider
-- RSI lengths and trigger regions discovered from historical data
-- Trailing price, volume, trend, and volatility confirmation features
+- A configurable stock, broad ETF, sector ETF, inverse ETF, and leveraged ETF universe
+- Declarative feature families for price, volume, trend, volatility, candle geometry, RSI, market-relative, sector-relative, inverse/leveraged ETF, breadth, relationship, and regime behavior
+- Multi-horizon bullish and bearish swing labels
+- Chronological model discovery with purging, calibration, quality gates, model registry, and immutable artifacts
+- Live scanner snapshots with probabilistic market attribution and historical analogs
+- Portfolio-level backtesting of scanner outputs
 - Honest next-session entries
-- Fixed-horizon backtesting
-- Chronological and walk-forward validation
-- Current-signal scanning
-- Append-only forward-test signal and outcome records
+- Append-only paper-forward signal and pending-entry records
+- Legacy RSI research and historical walk-forward tools under Baselines and Legacy RSI
 
 Version 1 excludes options, gamma, implied volatility, intraday data, market internals, NLP/news attribution, live brokerage execution, deep learning, and reinforcement learning.
 
@@ -22,7 +24,7 @@ Version 1 excludes options, gamma, implied volatility, intraday data, market int
 
 The engine is not allowed to call a historical result an edge merely because it has a high win rate. A candidate must have sufficient observations, positive expectancy after costs, acceptable drawdown, stability across time, out-of-sample performance, walk-forward performance, and forward-test confirmation.
 
-`RSI(14)` with `70/30` levels remains a control group and a possible crowd-behavior feature. It is not treated as truth or as the default strategy.
+`RSI(14)` with `70/30` levels remains a control group and a possible crowd-behavior feature. RSI is now one feature family among many, not the scanner strategy.
 
 ## First Mac setup
 
@@ -50,21 +52,25 @@ python -m swing_rsi.cli demo
 
 Synthetic data proves that the software runs. It does **not** prove trading performance.
 
-Open the local research dashboard:
+Open the local engine dashboard:
 
 ```bash
 ./scripts/run_dashboard.sh
 ```
 
-The dashboard is a temporary local Streamlit presentation layer over the typed Python research modules. It is not a production trading application. The long-term UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary.
+The dashboard is a temporary local Streamlit presentation layer over the typed Python engine modules. It is not a production trading application.
 
 Dashboard sections:
 
 1. Overview
-2. Data and Audit
-3. RSI Explorer
-4. Research and Backtest
-5. Walk-Forward Validation
+2. Data and Universe
+3. Discovery Lab
+4. Live Scanner
+5. Candidate Attribution
+6. Portfolio Backtests
+7. Paper Forward Test
+8. Model Registry
+9. Baselines and Legacy RSI
 
 Dataset updates in the dashboard are merge-safe: existing ticker history is preserved, overlapping dates are replaced by newly downloaded values, duplicates are removed, the merged OHLCV data is validated, and the CSV is written atomically. The dashboard displays ticker symbols such as `AAPL`, not filenames such as `AAPL.csv`, as provider symbols.
 
@@ -85,7 +91,25 @@ data/raw/AAPL.csv
 
 The available historical range depends on the user's FMP subscription. FMP data remains subject to corporate-action, missing-session, delisting, and survivorship-bias audits before research results are trusted.
 
-## Run starter RSI research
+## Run the autonomous scanner vertical slice
+
+```bash
+python -m swing_rsi.cli universe-update --start 2016-06-20
+python -m swing_rsi.cli build-features
+python -m swing_rsi.cli discover-models
+python -m swing_rsi.cli scan --include-challengers
+python -m swing_rsi.cli forward-update
+```
+
+Use `--include-challengers` only for inspection when no champion has passed promotion gates yet. Discovery never silently promotes a model.
+
+Run the idempotent daily cycle:
+
+```bash
+./scripts/run_daily_cycle.sh --include-challengers
+```
+
+## Run legacy RSI research
 
 ```bash
 python -m swing_rsi.cli research \
@@ -119,6 +143,11 @@ Read these before changing architecture:
 9. `docs/MODEL_VALIDATION_STANDARD.md`
 10. `docs/FORWARD_TESTING_STANDARD.md`
 11. `docs/DECISIONS.md`
-12. `docs/OPEN_QUESTIONS.md`
+12. `docs/AUTONOMOUS_DISCOVERY_ENGINE.md`
+13. `docs/FEATURE_REGISTRY.md`
+14. `docs/SCANNER_SPEC.md`
+15. `docs/PAPER_FORWARD_TESTER.md`
+16. `docs/DECISIONS.md`
+17. `docs/OPEN_QUESTIONS.md`
 
 This is an experimental research system, not financial advice and not a live trading system.

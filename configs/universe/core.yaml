@@ -1,0 +1,183 @@
+name: core
+provider: fmp
+default_start: "2016-06-20"
+description: Core daily swing research universe for the autonomous scanner vertical slice.
+
+symbols:
+  - symbol: SPY
+    enabled: true
+    role: broad_market_etf
+    benchmark: true
+    sector: broad_market
+  - symbol: QQQ
+    enabled: true
+    role: broad_market_etf
+    benchmark: true
+    sector: technology_growth
+  - symbol: IWM
+    enabled: true
+    role: broad_market_etf
+    benchmark: true
+    sector: small_caps
+  - symbol: DIA
+    enabled: true
+    role: broad_market_etf
+    benchmark: true
+    sector: industrials_large_cap
+
+  - symbol: XLK
+    enabled: true
+    role: sector_etf
+    sector: technology
+  - symbol: XLF
+    enabled: true
+    role: sector_etf
+    sector: financials
+  - symbol: XLE
+    enabled: true
+    role: sector_etf
+    sector: energy
+  - symbol: XLV
+    enabled: true
+    role: sector_etf
+    sector: health_care
+  - symbol: XLY
+    enabled: true
+    role: sector_etf
+    sector: consumer_discretionary
+  - symbol: XLP
+    enabled: true
+    role: sector_etf
+    sector: consumer_staples
+  - symbol: XLI
+    enabled: true
+    role: sector_etf
+    sector: industrials
+  - symbol: XLB
+    enabled: true
+    role: sector_etf
+    sector: materials
+  - symbol: XLU
+    enabled: true
+    role: sector_etf
+    sector: utilities
+  - symbol: XLRE
+    enabled: true
+    role: sector_etf
+    sector: real_estate
+  - symbol: XLC
+    enabled: true
+    role: sector_etf
+    sector: communication_services
+
+  - symbol: SH
+    enabled: true
+    role: inverse_etf
+    sector: inverse_market
+    relationship_group: spy_inverse
+  - symbol: SDS
+    enabled: true
+    role: leveraged_inverse_etf
+    sector: inverse_market
+    relationship_group: spy_inverse
+  - symbol: SPXU
+    enabled: true
+    role: leveraged_inverse_etf
+    sector: inverse_market
+    relationship_group: spy_inverse
+  - symbol: UPRO
+    enabled: true
+    role: leveraged_long_etf
+    sector: leveraged_market
+    relationship_group: spy_leveraged
+  - symbol: QID
+    enabled: true
+    role: leveraged_inverse_etf
+    sector: inverse_technology_growth
+    relationship_group: qqq_inverse
+  - symbol: SQQQ
+    enabled: true
+    role: leveraged_inverse_etf
+    sector: inverse_technology_growth
+    relationship_group: qqq_inverse
+  - symbol: TQQQ
+    enabled: true
+    role: leveraged_long_etf
+    sector: leveraged_technology_growth
+    relationship_group: qqq_leveraged
+  - symbol: RWM
+    enabled: true
+    role: inverse_etf
+    sector: inverse_small_caps
+    relationship_group: iwm_inverse
+  - symbol: TZA
+    enabled: true
+    role: leveraged_inverse_etf
+    sector: inverse_small_caps
+    relationship_group: iwm_inverse
+  - symbol: TNA
+    enabled: true
+    role: leveraged_long_etf
+    sector: leveraged_small_caps
+    relationship_group: iwm_leveraged
+  - symbol: SOXS
+    enabled: true
+    role: leveraged_inverse_etf
+    sector: inverse_semiconductors
+    relationship_group: semiconductor_inverse
+  - symbol: SOXL
+    enabled: true
+    role: leveraged_long_etf
+    sector: leveraged_semiconductors
+    relationship_group: semiconductor_leveraged
+
+  - symbol: AAPL
+    enabled: true
+    role: stock
+    sector: technology
+    sector_proxy: XLK
+  - symbol: MSFT
+    enabled: true
+    role: stock
+    sector: technology
+    sector_proxy: XLK
+  - symbol: NVDA
+    enabled: true
+    role: stock
+    sector: semiconductors
+    sector_proxy: XLK
+  - symbol: AMZN
+    enabled: true
+    role: stock
+    sector: consumer_discretionary
+    sector_proxy: XLY
+  - symbol: META
+    enabled: true
+    role: stock
+    sector: communication_services
+    sector_proxy: XLC
+  - symbol: GOOGL
+    enabled: true
+    role: stock
+    sector: communication_services
+    sector_proxy: XLC
+  - symbol: TSLA
+    enabled: true
+    role: stock
+    sector: consumer_discretionary
+    sector_proxy: XLY
+  - symbol: AMD
+    enabled: true
+    role: stock
+    sector: semiconductors
+    sector_proxy: XLK
+
+relationships:
+  - source: SPY
+    related: [SH, SDS, SPXU, UPRO]
+  - source: QQQ
+    related: [QID, SQQQ, TQQQ]
+  - source: IWM
+    related: [RWM, TZA, TNA]
+  - source: XLK
+    related: [SOXS, SOXL]

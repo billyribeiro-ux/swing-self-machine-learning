@@ -57,7 +57,7 @@ def collect_project_status(root: str | Path | None = None) -> ProjectStatus:
     datasets = discover_raw_datasets(project_root)
     reports = tuple(paths.reports.glob("*.csv")) if paths.reports.exists() else ()
     return ProjectStatus(
-        project_name="Swing RSI Self-Learner",
+        project_name="Self-Learning Swing Trading Engine",
         package_version=__version__,
         python_version=sys.version.split()[0],
         project_root=project_root,

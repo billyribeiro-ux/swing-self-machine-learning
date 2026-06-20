@@ -9,25 +9,25 @@ Raw-response provenance and provider adapter
    ↓
 Normalization and OHLCV validation
    ↓
-Trailing feature factory
+Universe snapshot and raw-data manifests
    ↓
-RSI candidate rules
+Declarative autonomous feature registry
    ↓
-Signal timestamp at daily close
+Separated bullish/bearish label engine
    ↓
-Next-session execution model
+Chronological train / calibration / holdout split with purging
    ↓
-Backtest trades and metrics
+Bounded model discovery and calibrated probabilities
    ↓
-Chronological parameter search
+Model registry and immutable artifacts
    ↓
-Walk-forward validation
+Latest-session scanner and attribution
    ↓
-Current scanner
+Portfolio scanner-output backtester
    ↓
-Immutable forward signal log
+Append-only paper-forward event log
    ↓
-Separate append-only outcome log
+Daily-cycle orchestration
 ```
 
 ## Package layout
@@ -47,13 +47,14 @@ src/swing_rsi/
   research/                 candidate grids and walk-forward selection
   scanner/                  latest-bar evidence output
   forward/                  immutable signal and outcome journals
+  engine/                   autonomous universe, features, labels, models, scanner, attribution, registry, paper forward testing
   reports/                  atomic report writers
   application/              shared CLI/dashboard orchestration services
   sample_data.py            deterministic plumbing-only demo data
   cli.py                    user-facing commands
 dashboard/                  local Streamlit presentation layer
   app.py                    explicit st.navigation entrypoint
-  sections/                 five page renderers
+  sections/                 primary engine pages and legacy RSI page renderers
   ui/                       local formatting, chart, cache, and error helpers
 ```
 
@@ -67,6 +68,8 @@ API keys are loaded from `.env`, sent through request headers, and never printed
 
 Feature columns contain only current and prior information. Future outcome columns must begin with `label_`. The scanner and signal generators must never accept `label_` columns as inputs.
 
+The autonomous engine stores raw licensed data, processed features, model artifacts, scanner snapshots, SQLite state, logs, and generated reports outside Git.
+
 ## Execution timing
 
 Version 1 signals are known only after a daily bar closes. The default simulated entry is the next session open. The fixed-horizon exit for an `H`-bar hold is the close of bar `t + H`, where `t` is the signal bar. No same-close fill is allowed.
@@ -78,17 +81,27 @@ Version 1 signals are known only after a daily bar closes. The default simulated
 - Forward signals and outcomes are separate append-only files.
 - Methodology and decisions live under `docs/` and are the permanent source of truth.
 
+## Autonomous engine boundary
+
+The autonomous engine is implemented in typed Python modules under `src/swing_rsi/engine/` and shared through `src/swing_rsi/application/engine_service.py`.
+
+Streamlit calls these services directly. It does not implement feature calculation, label creation, model training, scanner ranking, attribution, portfolio backtesting, or paper-forward event logic.
+
 ## Local dashboard boundary
 
 The Streamlit dashboard is a local-only presentation layer. It calls reusable Python services under `src/swing_rsi/application/` and does not duplicate market-data, RSI, signal, backtest, research, or walk-forward logic inside dashboard pages.
 
-Dashboard navigation is explicit. `dashboard/app.py` registers exactly five pages with `st.navigation` / `st.Page`:
+Dashboard navigation is explicit. `dashboard/app.py` registers the primary Self-Learning Swing Trading Engine sections with `st.navigation` / `st.Page`:
 
 1. Overview
-2. Data and Audit
-3. RSI Explorer
-4. Research and Backtest
-5. Walk-Forward Validation
+2. Data and Universe
+3. Discovery Lab
+4. Live Scanner
+5. Candidate Attribution
+6. Portfolio Backtests
+7. Paper Forward Test
+8. Model Registry
+9. Baselines and Legacy RSI
 
 Streamlit auto-discovered `dashboard/pages/*.py` page files are not used, because filename-derived labels caused confusing navigation.
 
@@ -100,7 +113,7 @@ The dashboard may cache deterministic local CSV reads by file path and modificat
 
 Expected dashboard errors are handled with concise user-facing messages. Unexpected dashboard errors are logged to ignored local files under `logs/`.
 
-Walk-forward split arithmetic is centralized in `swing_rsi.research.walk_forward.plan_expanding_splits`. Dashboard preflight validation and actual walk-forward execution share the resulting split plan so a configuration cannot pass one path and fail the other. Automatically sized test folds reserve the configured gap before sizing test windows.
+Walk-forward split arithmetic is centralized in `swing_rsi.research.walk_forward.plan_expanding_splits`. Dashboard preflight validation and actual walk-forward execution share the resulting split plan so a configuration cannot pass one path and fail the other. This remains legacy historical validation and is distinct from paper forward testing of frozen scanner models.
 
 Streamlit is temporary local presentation infrastructure. The long-term UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary, but no separate API or deployment layer exists in this milestone.
 

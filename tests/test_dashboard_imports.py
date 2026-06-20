@@ -31,6 +31,14 @@ def test_dashboard_imports_do_not_mutate_data_or_call_fmp(
     modules = (
         "dashboard.app",
         "dashboard.sections.overview",
+        "dashboard.sections.data_universe",
+        "dashboard.sections.discovery_lab",
+        "dashboard.sections.live_scanner",
+        "dashboard.sections.candidate_attribution",
+        "dashboard.sections.portfolio_backtests",
+        "dashboard.sections.paper_forward_test",
+        "dashboard.sections.model_registry",
+        "dashboard.sections.baselines_legacy",
         "dashboard.sections.data_audit",
         "dashboard.sections.rsi_explorer",
         "dashboard.sections.research_backtest",
@@ -42,22 +50,30 @@ def test_dashboard_imports_do_not_mutate_data_or_call_fmp(
     assert path.read_bytes() == before
 
 
-def test_dashboard_registers_exactly_five_user_facing_sections() -> None:
+def test_dashboard_registers_autonomous_engine_sections() -> None:
     assert section_titles() == (
         "Overview",
-        "Data and Audit",
-        "RSI Explorer",
-        "Research and Backtest",
-        "Walk-Forward Validation",
+        "Data and Universe",
+        "Discovery Lab",
+        "Live Scanner",
+        "Candidate Attribution",
+        "Portfolio Backtests",
+        "Paper Forward Test",
+        "Model Registry",
+        "Baselines and Legacy RSI",
     )
-    assert len(USER_FACING_SECTIONS) == 5
+    assert len(USER_FACING_SECTIONS) == 9
     assert "app" not in {title.lower() for title in section_titles()}
     assert [section.url_path for section in USER_FACING_SECTIONS] == [
         "overview",
-        "data-audit",
-        "rsi-explorer",
-        "research-backtest",
-        "walk-forward-validation",
+        "data-universe",
+        "discovery-lab",
+        "live-scanner",
+        "candidate-attribution",
+        "portfolio-backtests",
+        "paper-forward-test",
+        "model-registry",
+        "baselines-legacy-rsi",
     ]
     assert all("dashboard/sections" in section.path.as_posix() for section in USER_FACING_SECTIONS)
     assert not tuple(Path("dashboard/pages").glob("*.py"))

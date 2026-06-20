@@ -25,9 +25,17 @@ data/processed/*
 !data/processed/.gitkeep
 data/features/*
 !data/features/.gitkeep
+data/universes/*
+!data/universes/.gitkeep
+data/manifests/*
+!data/manifests/.gitkeep
 data/signals/*
 !data/signals/.gitkeep
 data/forward_tests/*
 !data/forward_tests/.gitkeep
 reports/*
 !reports/.gitkeep
+artifacts/*
+!artifacts/.gitkeep
+state/*
+!state/.gitkeep

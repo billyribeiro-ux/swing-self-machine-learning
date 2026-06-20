@@ -14,13 +14,15 @@ For each fold:
 4. Evaluate only on the next unseen test window.
 5. Preserve every fold, including failures.
 
+Historical walk-forward validation is legacy research evaluation. It is not the same as paper forward testing of a frozen deployed scanner model.
+
 ## Final holdout
 
 Before any model is promoted, reserve a final untouched time period that was not used for feature design, parameter ranges, threshold tuning, or model selection.
 
 ## Stability requirements
 
-Prefer broad stable parameter regions over one isolated optimum. Reports should show performance around neighboring RSI lengths and levels.
+Prefer broad stable feature/model behavior over one isolated optimum. RSI parameter stability remains a baseline diagnostic; autonomous models must also report feature stability, calibration, symbol concentration, sector concentration, year/regime stability, and cost sensitivity.
 
 ## Minimum sample
 
@@ -42,12 +44,14 @@ Track rolling expectancy, hit rate, drawdown, and calibration. A model can be do
 ## Promotion states
 
 ```text
-RESEARCH_ONLY
-BACKTEST_CANDIDATE
-OUT_OF_SAMPLE_CANDIDATE
-WALK_FORWARD_CANDIDATE
-FORWARD_TESTING
-PAPER_APPROVED
-LIVE_ELIGIBLE (future; not Version 1)
+EXPERIMENTAL
+CANDIDATE
+CHALLENGER
+CHAMPION
 RETIRED
+REJECTED
 ```
+
+Only explicit promotion can create a champion. Discovery never silently replaces a deployed model.
+
+Legacy RSI reports may still use older research labels, but the autonomous registry uses the states above.

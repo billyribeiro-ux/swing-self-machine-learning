@@ -1,5 +1,23 @@
 # Decision Log
 
+## 2026-06-19 — RSI becomes a baseline feature family
+
+Decision: Reframe the product as the Self-Learning Swing Trading Engine. RSI remains implemented and tested, but it is one feature family and legacy/baseline research view rather than the scanner strategy.
+
+Reason: The original system goal is autonomous market discovery and attribution across price, volume, market, sector, breadth, inverse/leveraged ETF, relationship, and regime behavior. Treating RSI as the strategy would overfit the product to one indicator.
+
+## 2026-06-19 — Local autonomous engine uses SQLite state and immutable artifacts
+
+Decision: Store operational model registry, scanner snapshots, scanner candidates, forward events, and daily-cycle status in local SQLite under `state/engine.sqlite3`. Store model and scanner artifacts under `artifacts/`. Keep all generated state ignored by Git.
+
+Reason: The vertical slice needs persistent local state and idempotent orchestration without introducing a service database, deployment infrastructure, authentication, or a separate API.
+
+## 2026-06-19 — Discovery never silently deploys a model
+
+Decision: Discovery registers trained models as candidates/challengers/rejections. Only explicit promotion can create a champion. Scanner inspection may use retained candidates only when requested with `--include-challengers`.
+
+Reason: Auto-adaptation must be controlled. A newly trained model is a challenger, not a silent replacement for the deployed champion.
+
 ## 2026-06-19 — Build one complete scanner first
 
 Decision: Begin with daily swing trading rather than attempting scalping, day trading, swing trading, portfolio, options, and attribution simultaneously.

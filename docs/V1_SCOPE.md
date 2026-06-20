@@ -4,28 +4,27 @@
 
 Build one elite daily swing-trading self-learning scanner first.
 
-The engine will use historical daily price and volume data to discover RSI behavior and confirmation rules, backtest them with honest timing, validate them chronologically and walk-forward, scan current bars, and preserve all forward signals before outcomes are known.
+The engine uses historical daily price and volume data to discover measurable relationships behind bullish and bearish swing outcomes, backtest scanner outputs with honest timing, register frozen model versions, scan current bars, and preserve paper-forward signals before outcomes are known.
 
 ## Included
 
 - Daily OHLCV for stocks and ETFs, with FMP as the primary Version 1 provider
 - Secure local secret handling through a Git-ignored `.env` file
 - Corporate-action-aware data handling policy
-- RSI lengths from 2 through 50
-- Learned lower and upper regions
-- RSI slope, crosses, reclaims, turns, compression, divergence, and failure-swing research over time
-- Price trend, moving-average, volatility, candle, pullback, gap, and relative-volume confirmations
-- SPY and QQQ regime features in a later Version 1 milestone
-- 3, 5, 10, 20, and 30 trading-day outcomes
+- Configurable stock, broad ETF, sector ETF, inverse ETF, and leveraged ETF universe
+- RSI lengths from 2 through 50 as one feature family and baseline, not as the strategy
+- Price trend, moving-average, volatility, candle, pullback, gap, relative-volume, breadth, market-relative, sector-relative, inverse/leveraged ETF, relationship, and regime features
+- 3, 5, 10, 20, and 40 trading-day outcomes
 - Next-session-open default entry
 - Fixed-horizon exits first
 - Transaction-cost assumptions
 - Non-overlapping trades per ticker
 - Baseline comparison with RSI(14), 70/30, and simple benchmarks
 - Grid search first, Optuna later
-- Out-of-sample and expanding walk-forward validation
-- Scanner output with evidence and sample size
-- Append-only forward signal and outcome records
+- Chronological train, calibration, and holdout validation with purged label horizons
+- Historical walk-forward validation retained as legacy research tooling
+- Scanner output with attribution, candidate status, model ID, and feature snapshot hash
+- Append-only paper-forward signal and pending-entry records
 
 ## Excluded
 
@@ -49,6 +48,6 @@ Version 1 is done only when the complete loop works:
 5. Backtests model costs and overlapping positions honestly.
 6. Candidate settings are compared using more than win rate.
 7. Walk-forward validation selects parameters only from prior data.
-8. Current scanner output identifies the exact model and evidence.
-9. Forward records are written before outcomes and never rewritten.
+8. Current scanner output identifies the exact model, feature snapshot, attribution, and evidence.
+9. Paper-forward records are written before outcomes and never rewritten.
 10. Reports expose failures, instability, and insufficient samples.
