@@ -13,6 +13,7 @@
 - Added dashboard error handling with concise UI messages and ignored local logs for unexpected exceptions.
 - Added walk-forward configuration prevalidation in the application service wrapper.
 - Added tests for navigation order, ticker normalization, selected-window audit behavior, formatting, cache invalidation, AppTest interactions, and no-network dashboard startup.
+- Added `watchdog` to the optional `dashboard` dependency group so local Streamlit runs can use filesystem event watching and avoid the performance hint.
 
 ## 0.1.2 — 2026-06-19
 

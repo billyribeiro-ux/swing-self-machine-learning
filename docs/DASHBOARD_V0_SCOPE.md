@@ -37,6 +37,8 @@ The script uses `.venv/bin/streamlit` directly. If Streamlit is missing, run:
 .venv/bin/python -m pip install -e ".[all,dev,dashboard]"
 ```
 
+The `dashboard` optional dependency group includes `watchdog` so Streamlit can use filesystem event watching locally and avoid the runtime performance hint.
+
 ## Temporary UI Decision
 
 Streamlit is temporary local presentation infrastructure. The long-term commercial UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary, but that is outside the current Version 1 dashboard milestone.
