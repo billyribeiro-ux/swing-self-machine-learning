@@ -13,9 +13,9 @@ Every report must state round-trip transaction cost and slippage assumptions. Ze
 
 ## Overlap
 
-The starter engine permits only one open trade per ticker. Signals occurring while a trade is open are ignored. Portfolio-level capital and cross-ticker overlap are future work.
+The legacy starter RSI engine permits only one open trade per ticker. Signals occurring while a trade is open are ignored in that legacy path.
 
-The autonomous scanner vertical slice adds a portfolio-level scanner-output backtester with maximum concurrent positions, per-symbol limits, costs, slippage, long/short handling, conservative target/stop ambiguity, equity, drawdown, turnover, exposure, and trade ledger output.
+The autonomous scanner vertical slice adds a portfolio-level scanner-output backtester with cross-ticker overlap, maximum concurrent positions, per-symbol limits, sector concentration limits, gross/net exposure limits, costs, slippage, long/short handling, conservative target/stop ambiguity, equity, drawdown, turnover, exposure, and trade ledger output. This does not change the legacy starter RSI backtester behavior.
 
 ## Price adjustments
 

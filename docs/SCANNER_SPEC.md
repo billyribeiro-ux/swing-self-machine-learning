@@ -5,7 +5,7 @@ The live scanner is implemented in `src/swing_rsi/engine/scanner.py` and called 
 ## Inputs
 
 - Latest local feature parquet from `data/features/`.
-- Deployed champion model artifacts from the registry.
+- Deployed champion model artifacts from the registry, filtered to the current feature-manifest hash.
 - Optional explicit `--include-challengers` flag for inspection when no champion exists.
 - Universe snapshot metadata.
 
@@ -13,12 +13,12 @@ The live scanner is implemented in `src/swing_rsi/engine/scanner.py` and called 
 
 The scanner:
 
-1. Selects the latest completed session available in the feature panel.
+1. Selects the latest common completed session available across enabled local universe symbols.
 2. Builds one as-of feature snapshot per symbol.
-3. Loads champion model bundles, or review candidates only when explicitly requested.
+3. Loads champion model bundles that match the current feature manifest, or review candidates only when explicitly requested.
 4. Generates bullish and bearish predictions.
 5. Applies probability, expected-return, and liquidity gates.
-6. Creates attribution and relationship evidence.
+6. Creates attribution, relationship evidence, and compact historical analog records.
 7. Saves immutable CSV and Parquet scanner snapshots under `artifacts/scanner/`.
 8. Writes snapshot and candidate rows to SQLite.
 9. Returns an idempotent existing snapshot for the same date, model set, universe, and feature hash.
@@ -32,10 +32,11 @@ Snapshots include:
 - ticker;
 - direction;
 - horizon;
+- signal close context;
 - calibrated probability;
 - expected return;
 - expected MFE and MAE;
-- target-before-stop probability proxy;
+- target-before-stop probability from the separate target-before-stop classifier;
 - composite utility score;
 - liquidity score;
 - regime;
@@ -48,5 +49,7 @@ Snapshots include:
 - feature snapshot hash;
 - candidate status;
 - exclusion reason.
+- supporting evidence;
+- compact historical analog records.
 
 Scanner predictions are candidates, not trades. Only rows that pass configured gates become actionable paper candidates.

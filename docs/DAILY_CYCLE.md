@@ -22,8 +22,9 @@ The wrapper script is:
 6. Run the live scanner.
 7. Run drift checks for the scanned model set.
 8. Append forward-test events from the scanner snapshot.
-9. Mark the market date as completed in SQLite.
-10. Release the lock.
+9. Write an ignored local JSON report under `reports/daily_cycle_<market-date>.json`.
+10. Mark the market date as completed in SQLite.
+11. Release the lock.
 
 ## Idempotency
 
@@ -32,6 +33,8 @@ The same market-date cycle returns `already_completed` after the first completed
 Scanner snapshots are keyed by as-of date, model IDs, universe snapshot, and feature snapshot hash.
 
 Forward events use unique event keys and `INSERT OR IGNORE`, so reruns do not duplicate event rows.
+
+The ignored JSON report is deterministic by market date. If it already exists, the cycle reports the existing path rather than overwriting it.
 
 ## Secrets
 

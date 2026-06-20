@@ -30,8 +30,34 @@ Every feature records:
 - `relationship_graph`: rolling pair correlations, anti-correlation, beta, residual divergence, lagged correlation, relationship stability, decoupling.
 - `regime`: unsupervised trend/volatility/breadth/correlation state labels.
 
+## Latest Verified Local Feature Panel
+
+The 2026-06-20 real local-data run produced:
+
+- Feature rows: 89,973
+- Feature columns: 534
+- Enabled symbols represented: 35
+- Date coverage in the feature parquet: 2006-08-03 through 2026-06-18
+- Feature manifest hash: `3007abe80b54d40c87566bc9185a3086098c91b95d156c664ced290242090ae5`
+
+Family counts for numeric feature columns in that run:
+
+- `rsi_family`: 294
+- `relationship_graph`: 60
+- `trend_structure`: 32
+- `returns_momentum`: 29
+- `technical_primitives`: 29
+- `market_relative`: 20
+- `volatility_range`: 16
+- `inverse_leveraged`: 12
+- `volume_participation`: 11
+- `candle_geometry`: 8
+- `sector_relative`: 8
+- `breadth`: 6
+- `regime`: 3
+
 ## Discovery Controls
 
-The discovery runner applies missingness filtering, zero-variance filtering, near-duplicate correlation pruning, bounded feature counts, chronological validation, and train-only preprocessing.
+The discovery runner applies missingness filtering, zero-variance filtering, near-duplicate correlation pruning, bounded feature counts, bounded mutual-information screening, chronological validation, and train-only preprocessing.
 
 No feature family is an automatic trading rule. Tree and linear model families discover relationships from the training slice, then the selected feature set and manifest hash are stored with each model.

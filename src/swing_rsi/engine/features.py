@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from dataclasses import asdict, dataclass
 from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
+from sklearn.cluster import KMeans
 
 from swing_rsi.data.validation import validate_ohlcv
 from swing_rsi.engine.universe import UniverseConfig, UniverseSymbol, symbol_metadata
@@ -168,6 +171,43 @@ def base_feature_registry() -> tuple[FeatureSpec, ...]:
     return tuple(specs)
 
 
+def _lookback_from_name(name: str) -> int:
+    values = [int(value) for value in re.findall(r"_(\d+)", name)]
+    return max(values) if values else 1
+
+
+def feature_specs_for_columns(
+    columns: list[str], family_by_column: dict[str, str]
+) -> tuple[FeatureSpec, ...]:
+    base = {spec.name: spec for spec in base_feature_registry()}
+    specs: list[FeatureSpec] = []
+    for column in sorted(columns):
+        if column in base:
+            specs.append(base[column])
+            continue
+        family = cast(FeatureFamily, family_by_column.get(column, "technical_primitives"))
+        specs.append(
+            _spec(
+                column,
+                family,
+                parameters={"generated_from": "bounded_autonomous_feature_builder"},
+                lookback=_lookback_from_name(column),
+                cross_sectional_required=family
+                in {
+                    "breadth",
+                    "market_relative",
+                    "sector_relative",
+                    "inverse_leveraged",
+                    "relationship_graph",
+                    "regime",
+                },
+                benchmark_required=family
+                in {"market_relative", "inverse_leveraged", "relationship_graph", "regime"},
+            )
+        )
+    return tuple(specs)
+
+
 def feature_manifest_hash(specs: tuple[FeatureSpec, ...], columns: tuple[str, ...]) -> str:
     payload = json.dumps(
         {
@@ -202,6 +242,38 @@ def _true_range(data: pd.DataFrame) -> pd.Series:
     ).max(axis=1)
 
 
+def _gaussian_mutual_information(correlation: pd.Series) -> pd.Series:
+    clipped = correlation.clip(lower=-0.999, upper=0.999)
+    values = -0.5 * np.log(1.0 - clipped.pow(2))
+    return pd.Series(values, index=correlation.index)
+
+
+def _expanding_kmeans_regime(market_frame: pd.DataFrame) -> pd.Series:
+    columns = [
+        "market_regime_trend_score",
+        "market_regime_volatility_score",
+        "breadth_advance_pct",
+        "breadth_dispersion_20",
+    ]
+    values = market_frame[columns].replace([np.inf, -np.inf], np.nan)
+    clusters: list[float] = []
+    minimum_rows = 126
+    for position in range(len(values)):
+        history = values.iloc[: position + 1].copy()
+        if len(history) < minimum_rows:
+            clusters.append(math.nan)
+            continue
+        medians = history.median(numeric_only=True).fillna(0.0)
+        filled = history.fillna(medians)
+        if len(filled.drop_duplicates()) < 3:
+            clusters.append(math.nan)
+            continue
+        model = KMeans(n_clusters=3, random_state=42, n_init=10)
+        labels = model.fit_predict(filled)
+        clusters.append(float(labels[-1]))
+    return pd.Series(clusters, index=market_frame.index, name="market_regime_cluster_expanding")
+
+
 def _symbol_features(
     symbol: str, frame: pd.DataFrame, metadata: UniverseSymbol | None
 ) -> pd.DataFrame:
@@ -219,6 +291,14 @@ def _symbol_features(
         result[f"return_{window}"] = close.pct_change(window)
         result[f"log_return_{window}"] = np.log(close / close.shift(window))
     result["return_accel_5_20"] = result["return_5"] - result["return_20"]
+    result["return_5_lag_1"] = result["return_5"].shift(1)
+    result["return_20_lag_1"] = result["return_20"].shift(1)
+    result["return_5_change_5"] = result["return_5"] - result["return_5"].shift(5)
+    prior_return_20_mean = result["return_20"].shift(1).rolling(252, min_periods=60).mean()
+    prior_return_20_std = result["return_20"].shift(1).rolling(252, min_periods=60).std()
+    result["return_20_zscore_252"] = _safe_divide(
+        result["return_20"] - prior_return_20_mean, prior_return_20_std
+    )
     up = close > prior_close
     down = close < prior_close
     result["up_streak_5"] = up.rolling(5, min_periods=1).sum()
@@ -277,7 +357,13 @@ def _symbol_features(
     result["volatility_compression_20_100"] = _safe_divide(
         result["realized_vol_20"], result["realized_vol_63"].rolling(100, min_periods=40).median()
     )
+    result["volatility_expansion_20_63"] = _safe_divide(
+        result["realized_vol_20"], result["realized_vol_63"]
+    )
     result["overnight_gap_vol_20"] = result["gap_pct"].rolling(20, min_periods=20).std()
+    result["intraday_range_relative_20"] = _safe_divide(
+        result["range_pct"], result["range_pct"].shift(1).rolling(20, min_periods=10).median()
+    )
 
     prior_volume_mean = volume.shift(1).rolling(20, min_periods=10).mean()
     prior_volume_std = volume.shift(1).rolling(20, min_periods=10).std()
@@ -294,6 +380,7 @@ def _symbol_features(
     result["price_volume_agreement_5"] = np.sign(result["return_5"]) * np.sign(
         result["volume_trend_20"]
     )
+    result["return_volume_interaction_20"] = result["return_20"] * result["relative_volume_20"]
     obv_step = np.sign(close.diff()).fillna(0.0) * volume
     result["obv_change_20"] = obv_step.cumsum().pct_change(20)
     result["volume_expansion_after_compression"] = (
@@ -340,6 +427,7 @@ def _symbol_features(
     ema_12 = close.ewm(span=12, adjust=False, min_periods=12).mean()
     ema_26 = close.ewm(span=26, adjust=False, min_periods=26).mean()
     result["macd_12_26"] = _safe_divide(ema_12 - ema_26, close)
+    result["macd_12_26_slope_5"] = result["macd_12_26"].diff(5)
     sma_20 = close.rolling(20, min_periods=20).mean()
     std_20 = close.rolling(20, min_periods=20).std()
     result["bollinger_z_20"] = _safe_divide(close - sma_20, std_20)
@@ -357,6 +445,16 @@ def _symbol_features(
     )
     money_ratio = _safe_divide(positive_flow, negative_flow)
     result["mfi_14"] = 100.0 - (100.0 / (1.0 + money_ratio))
+    plus_dm = (high.diff()).where((high.diff() > low.diff().abs()) & (high.diff() > 0), 0.0)
+    minus_dm = (low.diff().abs()).where((low.diff().abs() > high.diff()) & (low.diff() < 0), 0.0)
+    atr_14 = result["atr_14"].replace(0, np.nan)
+    result["plus_di_14"] = 100.0 * _safe_divide(wilder_average(plus_dm, 14), atr_14)
+    result["minus_di_14"] = 100.0 * _safe_divide(wilder_average(minus_dm, 14), atr_14)
+    dx = 100.0 * _safe_divide(
+        (result["plus_di_14"] - result["minus_di_14"]).abs(),
+        result["plus_di_14"] + result["minus_di_14"],
+    )
+    result["adx_14"] = wilder_average(dx, 14)
 
     result["symbol"] = symbol
     result["role"] = metadata.role if metadata else "stock"
@@ -390,6 +488,22 @@ def _add_cross_sectional_features(panel: pd.DataFrame, universe: UniverseConfig)
     total_volume = data.groupby("Date")["Volume"].sum().replace(0, np.nan)
     breadth["breadth_up_volume_pct"] = up_volume / total_volume
     data = data.merge(breadth.reset_index(), on="Date", how="left")
+    sector_daily = (
+        data.groupby(["Date", "sector"])
+        .agg(
+            sector_breadth_advance_pct=("return_1", lambda values: float((values > 0).mean())),
+            sector_participation_sma50_pct=(
+                "distance_sma_50",
+                lambda values: float((values > 0).mean()),
+            ),
+            sector_momentum_mean_20=("return_20", "mean"),
+        )
+        .reset_index()
+    )
+    sector_daily["sector_momentum_rank_20"] = sector_daily.groupby("Date")[
+        "sector_momentum_mean_20"
+    ].rank(pct=True)
+    data = data.merge(sector_daily, on=["Date", "sector"], how="left")
 
     pivot_returns = data.pivot(index="Date", columns="symbol", values="return_1")
     pivot_close = data.pivot(index="Date", columns="symbol", values="Close")
@@ -441,6 +555,12 @@ def _add_cross_sectional_features(panel: pd.DataFrame, universe: UniverseConfig)
                 * data.loc[mask, f"{benchmark.lower()}_return_5"].fillna(0.0)
                 / 5.0
             )
+            benchmark_trend = data.loc[
+                data["symbol"] == benchmark, ["Date", "distance_sma_50"]
+            ].set_index("Date")["distance_sma_50"]
+            data.loc[mask, f"benchmark_trend_agreement_vs_{benchmark.lower()}"] = np.sign(
+                data.loc[mask, "distance_sma_50"]
+            ) * np.sign(data.loc[mask, "Date"].map(benchmark_trend))
 
     sector_returns = {
         row.symbol: row.sector_proxy
@@ -460,6 +580,7 @@ def _add_cross_sectional_features(panel: pd.DataFrame, universe: UniverseConfig)
         data.loc[mask, "sector_trend_agreement"] = np.sign(
             data.loc[mask, "distance_sma_50"]
         ) * np.sign(data.loc[mask, "Date"].map(proxy_trend))
+        data.loc[mask, "sector_divergence_20"] = data.loc[mask, "relative_return_vs_sector_20"]
 
     for source, related_symbols in universe.relationships.items():
         if source not in pivot_returns.columns:
@@ -486,6 +607,16 @@ def _add_cross_sectional_features(panel: pd.DataFrame, universe: UniverseConfig)
                     .corr(related_return),
                 }
             ).reset_index(drop=True)
+            corr_column = f"relationship_corr_{source.lower()}_{related.lower()}_63"
+            relationship[f"relationship_mutual_info_{source.lower()}_{related.lower()}_63"] = (
+                _gaussian_mutual_information(relationship[corr_column])
+            )
+            relationship[f"inverse_confirmation_{source.lower()}_{related.lower()}_63"] = (
+                relationship[corr_column].abs()
+            )
+            relationship[f"relationship_breakdown_{source.lower()}_{related.lower()}_63"] = (
+                relationship[corr_column].abs() < 0.4
+            ).astype(float)
             data = data.merge(relationship, on="Date", how="left")
 
     if "SPY" in pivot_close.columns:
@@ -519,13 +650,36 @@ def _add_cross_sectional_features(panel: pd.DataFrame, universe: UniverseConfig)
         ["uptrend_low_vol", "uptrend_high_vol", "downtrend_high_vol"],
         default="mixed",
     )
+    market_daily = (
+        data.groupby("Date")
+        .agg(
+            market_regime_trend_score=("market_regime_trend_score", "first"),
+            market_regime_volatility_score=("market_regime_volatility_score", "first"),
+            breadth_advance_pct=("breadth_advance_pct", "first"),
+            breadth_dispersion_20=("breadth_dispersion_20", "first"),
+        )
+        .reset_index()
+    )
+    market_daily["market_regime_cluster_expanding"] = _expanding_kmeans_regime(market_daily)
+    data = data.merge(
+        market_daily[["Date", "market_regime_cluster_expanding"]],
+        on="Date",
+        how="left",
+    )
+    data["regime_conditioned_return_20"] = data["return_20"] * data[
+        "market_regime_trend_score"
+    ].fillna(0.0)
     return data.sort_values(["Date", "symbol"]).reset_index(drop=True)
 
 
 def _family_map(columns: list[str]) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for column in columns:
-        if column.startswith(("return_", "log_return_", "momentum_", "up_streak", "down_streak")):
+        if column in {"Open", "High", "Low", "Close"}:
+            mapping[column] = "trend_structure"
+        elif column == "Volume":
+            mapping[column] = "volume_participation"
+        elif column.startswith(("return_", "log_return_", "momentum_", "up_streak", "down_streak")):
             mapping[column] = "returns_momentum"
         elif column.startswith(
             (
@@ -574,7 +728,18 @@ def _family_map(columns: list[str]) -> dict[str, str]:
         elif column.startswith("rsi_"):
             mapping[column] = "rsi_family"
         elif column.startswith(
-            ("roc_", "stochastic", "macd", "bollinger", "keltner", "cci", "mfi")
+            (
+                "roc_",
+                "stochastic",
+                "macd",
+                "bollinger",
+                "keltner",
+                "cci",
+                "mfi",
+                "adx_",
+                "plus_di_",
+                "minus_di_",
+            )
         ):
             mapping[column] = "technical_primitives"
         elif column.startswith(
@@ -591,13 +756,21 @@ def _family_map(columns: list[str]) -> dict[str, str]:
             mapping[column] = "market_relative"
         elif "sector" in column:
             mapping[column] = "sector_relative"
+        elif column.startswith("inverse_"):
+            mapping[column] = "inverse_leveraged"
         elif column.startswith("relationship_"):
             mapping[column] = "relationship_graph"
         elif column.startswith("breadth_"):
             mapping[column] = "breadth"
         elif column.startswith("market_regime"):
             mapping[column] = "regime"
+        else:
+            mapping[column] = "technical_primitives"
     return mapping
+
+
+def feature_family_map_for_columns(columns: list[str]) -> dict[str, str]:
+    return _family_map(columns)
 
 
 def build_feature_panel(
@@ -632,8 +805,8 @@ def build_feature_panel(
         }
         and not str(column).startswith("label_")
     ]
-    specs = base_feature_registry()
     family_by_column = _family_map(feature_columns)
+    specs = feature_specs_for_columns(feature_columns, family_by_column)
     manifest = feature_manifest_hash(specs, tuple(sorted(feature_columns)))
     return FeatureBuildResult(
         frame=panel,

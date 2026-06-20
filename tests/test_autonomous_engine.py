@@ -15,10 +15,10 @@ from swing_rsi.engine.forward import (
     list_forward_events,
 )
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
-from swing_rsi.engine.models import BaseRateClassifier, ModelBundle
+from swing_rsi.engine.models import BaseRateClassifier, ModelBundle, predict_bundle
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import RegisteredModel, promote_model, register_model
-from swing_rsi.engine.scanner import ScannerConfig, run_scanner
+from swing_rsi.engine.scanner import ScannerConfig, latest_common_session, run_scanner
 from swing_rsi.engine.splits import chronological_train_calibration_holdout_split
 from swing_rsi.engine.storage import engine_connection
 from swing_rsi.engine.universe import UniverseConfig, UniverseSymbol, load_universe_config
@@ -109,6 +109,29 @@ def test_features_are_backward_looking_when_future_rows_change() -> None:
         atol=1e-12,
         rtol=1e-12,
     )
+
+
+def test_feature_registry_covers_generated_columns_and_relationship_regime_features() -> None:
+    result = build_feature_panel(_frames(), _universe())
+    feature_columns = {
+        column
+        for column in result.frame.columns
+        if column
+        not in {
+            "Date",
+            "symbol",
+            "role",
+            "sector",
+            "sector_proxy",
+            "market_regime_label",
+        }
+        and not str(column).startswith("label_")
+    }
+    spec_names = {spec.name for spec in result.specs}
+
+    assert feature_columns <= spec_names
+    assert any(column.startswith("relationship_mutual_info_spy_sqqq") for column in feature_columns)
+    assert "market_regime_cluster_expanding" in feature_columns
 
 
 def test_label_engine_uses_next_open_and_separates_label_columns(
@@ -233,6 +256,8 @@ def _bundle(model_id: str = "model-a") -> ModelBundle:
         },
         classifier=ConstantClassifier(),
         calibrator=IdentityCalibrator(),
+        target_before_stop_model=ConstantClassifier(),
+        target_before_stop_calibrator=IdentityCalibrator(),
         return_model=ConstantRegressor(0.02),
         mfe_model=ConstantRegressor(0.04),
         mae_model=ConstantRegressor(-0.015),
@@ -244,6 +269,22 @@ def _bundle(model_id: str = "model-a") -> ModelBundle:
         metrics={},
         calibration_metrics={},
     )
+
+
+def test_predict_bundle_outputs_separate_target_before_stop_probability() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+
+    prediction = predict_bundle(_bundle(), frame)
+
+    assert "target_before_stop_probability" in prediction.columns
+    assert prediction["target_before_stop_probability"].iloc[0] == pytest.approx(0.75)
 
 
 def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_path: Path) -> None:
@@ -278,8 +319,20 @@ def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_pa
     assert first.scan_id == second.scan_id
     assert len(first.rows) == 2
     assert "residual/unexplained" in first.rows["top_attribution_categories"].iloc[0]
+    assert "historical_analogs" in first.rows.columns
+    assert "signal_close" in first.rows.columns
     with engine_connection(tmp_path / "engine.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scanner_candidates").fetchone()[0] == 2
+
+
+def test_latest_common_session_uses_all_enabled_symbol_histories() -> None:
+    frames = _frames(rows=300)
+    frames["SQQQ"] = frames["SQQQ"].iloc[:-5]
+
+    common = latest_common_session(frames, _universe().enabled_symbols)
+
+    assert common == frames["SQQQ"].index.max()
+    assert common < frames["AAPL"].index.max()
 
 
 def test_forward_events_are_append_only_and_idempotent(tmp_path: Path) -> None:
@@ -341,12 +394,17 @@ def test_forward_positions_fill_mark_exit_and_remain_idempotent(
     events = list_forward_events(db_path)
 
     assert "ENTRY_FILLED" in set(events["event_type"])
+    assert "TARGET_UPDATED" in set(events["event_type"])
+    assert "STOP_UPDATED" in set(events["event_type"])
     assert "POSITION_MARKED" in set(events["event_type"])
     assert "EXIT_FILLED" in set(events["event_type"])
+    target_event = events.loc[events["event_type"] == "TARGET_UPDATED"].iloc[0]
+    assert dict(target_event["payload"])["frozen_price"] > 0
     exit_event = events.loc[events["event_type"] == "EXIT_FILLED"].iloc[0]
     payload = dict(exit_event["payload"])
     assert payload["entry_date"] == simple_ohlcv.index[11].date().isoformat()
-    assert payload["exit_date"] == simple_ohlcv.index[15].date().isoformat()
+    assert payload["exit_reason"] in {"target", "stop", "stop_intraday_ambiguous", "time_exit"}
+    assert "net_realized_return" in payload
 
 
 def test_portfolio_backtester_enters_next_open_and_handles_shorts(
@@ -362,7 +420,16 @@ def test_portfolio_backtester_enters_next_open_and_handles_shorts(
                 "composite_utility_score": 1.0,
                 "model_id": "model-a",
                 "sector": "technology",
-            }
+            },
+            {
+                "as_of_date": simple_ohlcv.index[25].date().isoformat(),
+                "ticker": "AAPL",
+                "direction": "Bullish",
+                "candidate_status": "ACTIONABLE_PAPER_CANDIDATE",
+                "composite_utility_score": 0.9,
+                "model_id": "model-a",
+                "sector": "technology",
+            },
         ]
     )
 
@@ -372,6 +439,12 @@ def test_portfolio_backtester_enters_next_open_and_handles_shorts(
         config=PortfolioBacktestConfig(horizon=5),
     )
 
-    assert len(result.trades) == 1
+    assert len(result.trades) == 2
     assert result.trades["entry_date"].iloc[0] == simple_ohlcv.index[11].date().isoformat()
     assert result.trades["direction"].iloc[0] == "Bearish"
+    assert {"Date", "daily_return", "equity", "drawdown", "gross_exposure", "net_exposure"} <= set(
+        result.equity.columns
+    )
+    assert "annualized_return" in result.metrics
+    assert not result.yearly_returns.empty
+    assert not result.sector_returns.empty

@@ -43,8 +43,15 @@ The current vertical slice gates on:
 - holdout Brier score;
 - profit factor;
 - maximum drawdown.
+- finite lower confidence bound;
+- feature-stability cap;
+- symbol concentration cap;
+- sector concentration cap;
+- transaction-cost sensitivity;
+- prediction-turnover cap;
+- comparison-control availability.
 
-Registered metrics also retain feature-stability summaries and bounded holdout permutation-importance summaries for review. Those diagnostics do not override failed gates.
+Registered metrics also retain feature-stability summaries, bounded holdout permutation-importance summaries, target-before-stop calibration, positive year/regime/sector fractions, symbol/sector concentration, double-cost lower bound, prediction turnover, and naive/RSI-control availability for review. Those diagnostics do not override failed gates.
 
 The model report retains failed gates instead of weakening them. A model that does not pass every mandatory gate remains a `CANDIDATE` or `REJECTED`.
 

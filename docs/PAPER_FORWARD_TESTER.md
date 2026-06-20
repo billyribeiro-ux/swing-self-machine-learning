@@ -23,10 +23,9 @@ Forward testing uses append-only events in SQLite:
 The current vertical slice creates `SIGNAL_CREATED`, `SIGNAL_REJECTED`, and `ENTRY_PENDING` events from scanner snapshots. It also advances existing pending entries when later daily bars are available:
 
 - `ENTRY_FILLED` uses the next completed session open after the signal as-of date.
+- `TARGET_UPDATED` and `STOP_UPDATED` freeze policy prices after the next-open paper fill. Current policy derives bounded target/stop returns from signal-time expected return, MFE, and MAE and records the resulting prices as immutable events.
 - `POSITION_MARKED` records daily mark return, MFE, and MAE from completed bars after entry.
-- `EXIT_FILLED` records a conservative time exit at the frozen horizon when the exit bar is available.
-
-Stop/target update event types are reserved in the schema, but dynamic stop/target policy is not enabled in this milestone.
+- `EXIT_FILLED` records target, stop, conservative same-bar ambiguity, or frozen-horizon time exits when the relevant completed bar is available.
 
 ## Frozen Signal Context
 
@@ -41,7 +40,9 @@ Each event stores:
 - feature snapshot hash;
 - expected metrics;
 - entry rule;
+- signal price context when present;
 - planned stop and target policy;
+- frozen stop and target prices after entry fill;
 - horizon and model version.
 
 Old event rows are never updated. Position state is reconstructed from the event stream.

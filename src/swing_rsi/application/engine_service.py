@@ -11,7 +11,12 @@ from swing_rsi.application.datasets import download_daily_to_raw, normalize_tick
 from swing_rsi.config import ProjectPaths
 from swing_rsi.data.loader import load_ohlcv_csv
 from swing_rsi.engine.drift import DriftReport, build_drift_report
-from swing_rsi.engine.features import FeatureBuildResult, build_feature_panel
+from swing_rsi.engine.features import (
+    FeatureBuildResult,
+    build_feature_panel,
+    feature_family_map_for_columns,
+    numeric_feature_columns,
+)
 from swing_rsi.engine.forward import (
     advance_forward_positions,
     create_pending_events_from_snapshot,
@@ -26,7 +31,12 @@ from swing_rsi.engine.registry import (
     list_models,
     promote_model,
 )
-from swing_rsi.engine.scanner import ScannerConfig, ScannerSnapshot, run_scanner
+from swing_rsi.engine.scanner import (
+    ScannerConfig,
+    ScannerSnapshot,
+    latest_common_session,
+    run_scanner,
+)
 from swing_rsi.engine.storage import dumps, engine_connection, initialize_engine_db
 from swing_rsi.engine.universe import UniverseConfig, load_universe_config, universe_to_frame_rows
 
@@ -244,9 +254,8 @@ def run_model_discovery(
     model_frame = pd.read_parquet(modeling_path or latest_modeling_path(project_root))
     feature_path = latest_features_path(project_root)
     feature_hash = str(feature_path.name).split("_")[1] if "_" in feature_path.name else "unknown"
-    family_map = build_feature_panel(
-        load_universe_frames(project_root, universe), universe
-    ).feature_family_by_column
+    feature_frame = pd.read_parquet(feature_path)
+    family_map = feature_family_map_for_columns(numeric_feature_columns(feature_frame))
     manifests = tuple(hash_file(path) for path in sorted(paths.manifests.glob("*.json")))
     result = discover_models(
         model_frame,
@@ -275,14 +284,31 @@ def promote_registered_model(root: str | Path, model_id: str) -> RegisteredModel
     return promote_model(ProjectPaths(Path(root)).engine_db, model_id)
 
 
-def _scanner_models(root: Path, *, include_challengers: bool) -> tuple[RegisteredModel, ...]:
+def _feature_hash_from_path(path: Path) -> str:
+    return str(path.name).split("_")[1] if "_" in path.name else "unknown"
+
+
+def _scanner_models(
+    root: Path,
+    *,
+    include_challengers: bool,
+    feature_manifest_hash: str | None = None,
+) -> tuple[RegisteredModel, ...]:
     paths = ProjectPaths(root)
-    models: tuple[RegisteredModel, ...] = tuple(champion_models(paths.engine_db))
+    models: tuple[RegisteredModel, ...] = tuple(
+        model
+        for model in champion_models(paths.engine_db)
+        if feature_manifest_hash is None or model.feature_manifest_hash == feature_manifest_hash
+    )
     if not models and include_challengers:
         models = tuple(
             model
             for model in list_models(paths.engine_db)
             if model.state in {"CHALLENGER", "CANDIDATE"}
+            and (
+                feature_manifest_hash is None
+                or model.feature_manifest_hash == feature_manifest_hash
+            )
         )
     if not models:
         raise ValueError("No champion model is deployed. Promote a challenger before scanning.")
@@ -305,8 +331,17 @@ def run_live_scanner(
     project_root = Path(root)
     paths = ProjectPaths(project_root)
     universe = load_engine_universe(project_root)
-    feature_frame = pd.read_parquet(latest_features_path(project_root))
-    models = _scanner_models(project_root, include_challengers=include_challengers)
+    frames = load_universe_frames(project_root, universe)
+    common_session = latest_common_session(frames, universe.enabled_symbols)
+    feature_path = latest_features_path(project_root)
+    feature_hash = _feature_hash_from_path(feature_path)
+    feature_frame = pd.read_parquet(feature_path)
+    feature_frame = feature_frame.loc[pd.to_datetime(feature_frame["Date"]) <= common_session]
+    models = _scanner_models(
+        project_root,
+        include_challengers=include_challengers,
+        feature_manifest_hash=feature_hash,
+    )
     bundles = tuple(load_model_bundle(model.artifact_path) for model in models)
     return run_scanner(
         feature_frame,
@@ -325,11 +360,17 @@ def run_drift_checks(
     include_challengers: bool = False,
 ) -> tuple[DriftReport, ...]:
     project_root = Path(root)
-    feature_frame = pd.read_parquet(latest_features_path(project_root))
+    feature_path = latest_features_path(project_root)
+    feature_hash = _feature_hash_from_path(feature_path)
+    feature_frame = pd.read_parquet(feature_path)
     as_of = pd.Timestamp(feature_frame["Date"].max()).date().isoformat()
     current = feature_frame.loc[pd.to_datetime(feature_frame["Date"]) == pd.Timestamp(as_of)]
     reports: list[DriftReport] = []
-    for model in _scanner_models(project_root, include_challengers=include_challengers):
+    for model in _scanner_models(
+        project_root,
+        include_challengers=include_challengers,
+        feature_manifest_hash=feature_hash,
+    ):
         bundle = load_model_bundle(model.artifact_path)
         reports.append(
             build_drift_report(
@@ -403,6 +444,22 @@ def _lock_path(root: Path) -> Path:
     return ProjectPaths(root).state / "daily_cycle.lock"
 
 
+def _write_daily_cycle_report(
+    paths: ProjectPaths, market_date: str, summary: dict[str, object]
+) -> Path:
+    paths.reports.mkdir(parents=True, exist_ok=True)
+    report_path = paths.reports / f"daily_cycle_{market_date}.json"
+    if not report_path.exists():
+        payload = {
+            "market_date": market_date,
+            "created_at_utc": datetime.now(UTC).isoformat(),
+            "summary": summary,
+            "note": "Generated local immutable daily-cycle report. Does not contain secrets.",
+        }
+        report_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return report_path
+
+
 def run_daily_cycle(
     root: str | Path,
     *,
@@ -474,6 +531,8 @@ def run_daily_cycle(
             scan.rows,
             advance_existing=False,
         )
+        report_path = _write_daily_cycle_report(paths, market_date, summary)
+        summary["daily_report_path"] = str(report_path)
         with engine_connection(paths.engine_db) as connection:
             connection.execute(
                 "UPDATE daily_cycles SET completed_at_utc = ?, status = ?, summary_json = ? WHERE market_date = ?",

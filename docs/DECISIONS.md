@@ -1,5 +1,17 @@
 # Decision Log
 
+## 2026-06-20 — Scanner uses only current feature-manifest model artifacts
+
+Decision: Live scanner and drift checks filter registered models to the latest feature-manifest hash before loading artifacts. Feature-family attribution now maps every generated feature column to a known registry family, with residual/unexplained retained as a model-contribution bucket rather than an accidental unknown category.
+
+Reason: Model artifacts trained against older feature schemas can fail or produce misleading attributions after feature discovery changes. Scanner output must be grounded in the current feature snapshot and must disclose unexplained residual influence without inventing a cause.
+
+## 2026-06-20 — Forward paper events freeze risk policy after next-open fill
+
+Decision: Actionable paper candidates still become next-open pending entries, but after the paper fill the event stream appends frozen `TARGET_UPDATED` and `STOP_UPDATED` events with price levels derived from the signal-time expected MFE/MAE policy. Position exits can then occur from target, stop, conservative same-bar ambiguity, or time exit.
+
+Reason: Forward testing must preserve immutable policy state at the time it becomes knowable. This gives paper-forward records auditable stop/target context without allowing a later model version to rewrite old signals or positions.
+
 ## 2026-06-20 — Autonomous scanner models require diagnostics and append-only paper lifecycle
 
 Decision: Include a naive historical base-rate classifier as a required discovery baseline, store bounded permutation-importance and feature-stability diagnostics with model metrics, and run drift checks as review signals rather than self-mutating model changes. Paper-forward updates now advance through next-session paper fills, daily marks, and time exits as append-only events.

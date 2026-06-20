@@ -159,6 +159,7 @@ def run_scanner(
         item = row.to_dict()
         dollar_volume = float(item.get("dollar_volume", 0.0) or 0.0)
         probability = float(item["calibrated_probability"])
+        target_before_stop_probability = float(item["target_before_stop_probability"])
         expected_return = float(item["expected_return"])
         model_state = model_states.get(str(item["model_id"]), "UNKNOWN")
         status = "ACTIONABLE_PAPER_CANDIDATE"
@@ -182,6 +183,15 @@ def run_scanner(
             key=lambda item: item[1],
             reverse=True,
         )[:4]
+        analog_records: list[dict[str, object]] = []
+        if not attribution.analogs.empty:
+            for record in attribution.analogs.head(5).to_dict(orient="records"):
+                analog_records.append(
+                    {
+                        str(key): (value.isoformat() if hasattr(value, "isoformat") else value)
+                        for key, value in record.items()
+                    }
+                )
         utility = probability * expected_return
         rows.append(
             {
@@ -190,11 +200,12 @@ def run_scanner(
                 "ticker": item["symbol"],
                 "direction": "Bullish" if item["direction"] == "bull" else "Bearish",
                 "horizon": int(item["horizon"]),
+                "signal_close": float(item.get("Close", float("nan"))),
                 "calibrated_probability": probability,
                 "expected_return": expected_return,
                 "expected_mfe": float(item["expected_mfe"]),
                 "expected_mae": float(item["expected_mae"]),
-                "target_before_stop_probability": probability,
+                "target_before_stop_probability": target_before_stop_probability,
                 "composite_utility_score": utility,
                 "liquidity_score": dollar_volume,
                 "regime": item.get("market_regime_label", "unknown"),
@@ -210,6 +221,7 @@ def run_scanner(
                 "candidate_status": status,
                 "exclusion_reason": exclusion,
                 "supporting_evidence": "; ".join(attribution.supporting_evidence[:5]),
+                "historical_analogs": dumps(analog_records),
             }
         )
     result = pd.DataFrame(rows)

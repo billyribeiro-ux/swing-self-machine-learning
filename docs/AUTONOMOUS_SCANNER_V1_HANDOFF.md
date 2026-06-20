@@ -1,60 +1,62 @@
 # Autonomous Scanner V1 Handoff
 
-Generated: 2026-06-19 America/New_York
+Generated: 2026-06-20 America/New_York
 
 ## Repository State
 
 - Branch: `feat/autonomous-swing-scanner-v1`
-- Implementation commit: `3880c73` (`feat: add autonomous swing scanner vertical slice`)
-- Completion commit: `b5b985a` (`feat: complete scanner diagnostics and forward lifecycle`)
-- Remote push: not pushed
+- Existing scanner commits:
+  - `3880c73` — `feat: add autonomous swing scanner vertical slice`
+  - `ff244b1` — `docs: add autonomous scanner handoff`
+  - `b5b985a` — `feat: complete scanner diagnostics and forward lifecycle`
+  - `00717b7` — `docs: finalize autonomous scanner handoff`
+- This document describes the verified state after the current completion pass. The final completion commit hash is reported in the Codex conversation after the commit is created.
+- Remote push: not pushed.
 - Secrets: `.env` was not opened, printed, staged, committed, or copied.
 - Generated artifacts: raw data, feature parquet, model artifacts, scanner outputs, SQLite state, reports, logs, caches, and Streamlit local files are ignored.
 
 ## Architecture
 
-The project is now titled **Self-Learning Swing Trading Engine**.
+The visible product is now **Self-Learning Swing Trading Engine** with the subtitle **Autonomous Market Discovery, Attribution, Scanner, Backtester, and Paper Forward Tester**.
 
-The implementation keeps the existing `swing_rsi` package and adds an autonomous engine under `src/swing_rsi/engine/`. Streamlit remains a local presentation layer and calls application services directly; it does not duplicate feature, label, model, scanner, attribution, portfolio, or forward-testing logic.
+The implementation preserves the existing `swing_rsi` package and adds the autonomous engine under `src/swing_rsi/engine/`. RSI remains implemented and tested, but it is one feature family and a legacy/baseline view, not the scanner strategy. Streamlit remains a local presentation layer and calls Python application services directly.
 
-Main flow:
+Core flow:
 
-1. `configs/universe/core.yaml` defines enabled symbols and metadata.
-2. `swing_rsi.application.engine_service.update_universe_data` updates local OHLCV through the existing secure FMP provider adapter.
+1. `configs/universe/core.yaml` defines enabled symbols, roles, sectors, benchmarks, and inverse/leveraged relationships.
+2. `swing_rsi.application.engine_service.update_universe_data` updates OHLCV through the existing secure FMP provider abstraction.
 3. `swing_rsi.engine.manifest` writes per-symbol raw-data provenance manifests.
-4. `swing_rsi.engine.features.build_feature_panel` creates synchronized as-of feature rows.
-5. `swing_rsi.engine.labels.build_label_panel` creates physically separated future `label_` columns.
-6. `swing_rsi.engine.splits.chronological_train_calibration_holdout_split` creates chronological train, calibration, and holdout slices with purged overlapping label windows.
-7. `swing_rsi.engine.models.discover_models` trains bounded model families and registers candidates.
-8. `swing_rsi.engine.registry` persists immutable model metadata in SQLite.
+4. `swing_rsi.engine.features.build_feature_panel` builds synchronized as-of features.
+5. `swing_rsi.engine.labels.build_label_panel` builds physically separated `label_` outcome columns.
+6. `swing_rsi.engine.splits.chronological_train_calibration_holdout_split` creates chronological train/calibration/holdout slices and purges overlapping label horizons.
+7. `swing_rsi.engine.models.discover_models` trains bounded candidate families, applies gates, and writes immutable artifacts.
+8. `swing_rsi.engine.registry` persists model metadata and explicit promotions in SQLite.
 9. `swing_rsi.engine.scanner.run_scanner` creates immutable bullish and bearish scanner snapshots.
-10. `swing_rsi.engine.attribution.explain_candidate` produces feature-family contribution shares, evidence, relationship confirmations/divergences, and analogs.
-11. `swing_rsi.engine.portfolio.backtest_scanner_candidates` backtests scanner outputs with next-open entries and portfolio limits.
-12. `swing_rsi.engine.forward` appends paper-forward events and reconstructs position state.
-13. `swing_rsi.application.engine_service.run_daily_cycle` coordinates a restartable local daily cycle.
+10. `swing_rsi.engine.attribution.explain_candidate` computes model-contribution groups, supporting evidence, relationship evidence, residual/unexplained share, and historical analogs.
+11. `swing_rsi.engine.portfolio.backtest_scanner_candidates` backtests scanner outputs with next-open entries, long/short returns, costs, slippage, stops/targets/trailing stops, portfolio limits, daily equity, drawdown, exposure, and return breakdowns.
+12. `swing_rsi.engine.forward` appends paper-forward events, fills pending entries at next completed session open, freezes stop/target prices, marks positions, and exits from target/stop/ambiguity/time policies.
+13. `swing_rsi.application.engine_service.run_daily_cycle` coordinates an idempotent local daily cycle and writes an ignored JSON daily report.
 
 ## Modules Added
 
 - `src/swing_rsi/engine/universe.py`: YAML/CSV universe parsing, symbol normalization, metadata, snapshot IDs.
 - `src/swing_rsi/engine/manifest.py`: raw-file hashes, stale/missing-data status, retrieval manifests.
-- `src/swing_rsi/engine/storage.py`: SQLite schema for models, scanner snapshots, scanner candidates, forward events, and daily cycles; includes scanner-candidate primary-key migration.
+- `src/swing_rsi/engine/storage.py`: SQLite schema for models, scanner snapshots, scanner candidates, forward events, and daily cycles.
 - `src/swing_rsi/engine/features.py`: declarative feature registry and feature panel builder.
 - `src/swing_rsi/engine/labels.py`: bullish/bearish multi-horizon label engine.
 - `src/swing_rsi/engine/splits.py`: chronological train/calibration/holdout split with label purging.
-- `src/swing_rsi/engine/models.py`: logistic regression, HistGradientBoosting, ExtraTrees, Ridge expected-return/MFE/MAE models, calibration, quality gates, artifact writing.
-- `src/swing_rsi/engine/drift.py`: feature-distribution and prediction-distribution drift reporting.
+- `src/swing_rsi/engine/models.py`: base-rate, logistic regression, HistGradientBoosting, ExtraTrees, expected-return/MFE/MAE regressors, target-before-stop classifier, calibration, feature screening, gates, artifact writing.
+- `src/swing_rsi/engine/drift.py`: feature-distribution and prediction-distribution drift reports.
 - `src/swing_rsi/engine/registry.py`: immutable model registration and explicit promotion.
-- `src/swing_rsi/engine/scanner.py`: latest-session scanner snapshot persistence and candidate status gating.
-- `src/swing_rsi/engine/attribution.py`: local perturbation contribution shares, evidence, relationships, analogs.
+- `src/swing_rsi/engine/scanner.py`: latest common-session scanner snapshot persistence and candidate status gating.
+- `src/swing_rsi/engine/attribution.py`: local perturbation contribution shares, evidence, relationships, and analogs.
 - `src/swing_rsi/engine/portfolio.py`: portfolio-level scanner-output backtester.
-- `src/swing_rsi/engine/forward.py`: append-only paper-forward events, next-session paper fills, daily marks, time exits, and position reconstruction.
+- `src/swing_rsi/engine/forward.py`: append-only paper-forward events, next-session fills, stop/target freezes, marks, exits, and position reconstruction.
 - `src/swing_rsi/application/engine_service.py`: shared CLI/dashboard orchestration service.
 
 ## Universe
 
 Configured seed universe: 35 enabled symbols.
-
-Initial symbols include:
 
 - Stocks: AAPL, MSFT, NVDA, AMZN, META, GOOGL, TSLA, AMD.
 - Broad ETFs: SPY, QQQ, IWM, DIA.
@@ -63,28 +65,34 @@ Initial symbols include:
 
 Universe membership is configurable in `configs/universe/core.yaml`.
 
-## Feature Counts
+## Latest Feature Panel
 
-Latest real local run:
+Verified real local feature parquet:
 
+- File: `6b1a74750684506e1a5b_3007abe80b54d40c87566bc9185a3086098c91b95d156c664ced290242090ae5_features.parquet`
+- Feature manifest hash: `3007abe80b54d40c87566bc9185a3086098c91b95d156c664ced290242090ae5`
 - Feature rows: 89,973
-- Modeling rows: 89,973
-- Feature columns: 472
-- Feature manifest hash: `b5679396f3a0ef45f0551a26435c7d78241d36a6bc29eaa03810117cde0ed329`
+- Feature columns: 534
+- Symbols represented: 35
+- Feature date range: 2006-08-03 through 2026-06-18
 
-Registry spec counts:
+Feature-family counts for numeric columns:
 
-- breadth: 1
-- candle geometry: 4
-- regime: 1
-- returns/momentum: 20
-- RSI family: 98
-- technical primitives: 6
-- trend/structure: 10
-- volatility/range: 3
-- volume/participation: 3
+- `rsi_family`: 294
+- `relationship_graph`: 60
+- `trend_structure`: 32
+- `returns_momentum`: 29
+- `technical_primitives`: 29
+- `market_relative`: 20
+- `volatility_range`: 16
+- `inverse_leveraged`: 12
+- `volume_participation`: 11
+- `candle_geometry`: 8
+- `sector_relative`: 8
+- `breadth`: 6
+- `regime`: 3
 
-Additional generated columns include market-relative, sector-relative, inverse/leveraged ETF, breadth, relationship, and regime features.
+All generated numeric feature columns are mapped to a known family. Scanner attribution retains `residual/unexplained` as an explicit bucket, not as an accidental missing family.
 
 ## Labels
 
@@ -96,7 +104,7 @@ Implemented horizons:
 - 20 sessions
 - 40 sessions
 
-For each symbol/date/horizon the label engine creates:
+For each symbol/date/horizon, labels include:
 
 - next-open-to-horizon-close bullish and bearish returns;
 - positive-return flags;
@@ -110,156 +118,176 @@ For each symbol/date/horizon the label engine creates:
 
 All future-derived columns are prefixed with `label_`.
 
-## Model Families
+## Models and Governance
 
-Classifier candidates:
+Implemented model families:
 
 - naive historical base-rate classifier;
-- logistic regression;
-- HistGradientBoosting classifier;
-- ExtraTrees classifier.
+- logistic regression classifier;
+- HistGradientBoosting classifier/regressor;
+- ExtraTrees classifier/regressor;
+- Ridge-style linear regression for linear-family expected return, MFE, and MAE heads.
 
-Regression heads:
+Each accepted artifact stores train-only imputers/scalers, selected feature set, model bundle, calibration, feature-family map, training matrix, and training labels needed for attribution and analogs.
 
-- Ridge expected forward return;
-- Ridge expected MFE;
-- Ridge expected MAE.
-
-Preprocessing and calibration:
-
-- train-only median imputation;
-- train-only scaling where used;
-- separate chronological calibration slice with isotonic probability calibration;
-- no random train/test shuffling.
-
-Diagnostics:
-
-- bounded holdout permutation-importance summaries;
-- train-vs-holdout feature-stability summaries;
-- drift reports comparing training reference features with the latest as-of feature snapshot.
-
-## Split and Purge Methodology
-
-`chronological_train_calibration_holdout_split` sorts by date and creates train, calibration, and holdout slices. Training and calibration rows whose `label_end_date_{horizon}` overlaps the next slice are purged. This prevents training labels near boundaries from using future validation or holdout prices.
-
-Historical walk-forward validation remains legacy research tooling and is separate from paper forward testing.
-
-## Quality Gates
-
-Current mandatory gates:
+Quality gates include:
 
 - minimum training samples;
 - minimum unseen holdout observations;
 - positive expected value after costs;
-- holdout Brier score <= 0.35;
-- profit factor >= 0.90;
-- max drawdown better than -50%.
+- holdout Brier score;
+- profit factor;
+- maximum drawdown;
+- finite lower confidence bound;
+- feature-stability cap;
+- symbol concentration cap;
+- sector concentration cap;
+- transaction-cost sensitivity;
+- prediction-turnover cap;
+- comparison-control availability.
 
-No candidate is promoted automatically. Promotion requires:
+Latest model registry counts:
 
-```bash
-python -m swing_rsi.cli promote-model --model-id <model_id>
-```
-
-## Accepted and Rejected Models
-
-Latest local registry state after the final real local acceptance run:
-
-- `CANDIDATE`: 14
+- `CANDIDATE`: 30
 - `REJECTED`: 12
 - `CHALLENGER`: 0
 - `CHAMPION`: 0
 
-No model passed all quality gates, so no champion was promoted. The scanner can inspect candidate outputs with `--include-challengers`, but failed-gate `CANDIDATE` models are not allowed to create actionable paper entries.
+Models registered for the current feature manifest `3007abe80b54d40c87566bc9185a3086098c91b95d156c664ced290242090ae5`: 8 candidates.
+
+No model passed every gate, so no champion was promoted and no model was silently deployed.
+
+## Split and Purge Methodology
+
+`chronological_train_calibration_holdout_split` sorts by date and creates train, calibration, and holdout slices. Training and calibration rows whose `label_end_date_{horizon}` overlaps the next slice are purged. Model preprocessing and probability calibration are fit only on their intended chronological slices.
+
+Historical walk-forward validation remains separate legacy research tooling. Paper-forward testing is live append-only testing of frozen model versions.
 
 ## Latest Scanner Results
 
-Latest governance-aware scanner snapshot:
+Latest verified scanner snapshot:
 
-- Scan ID: `8e63cc0bbc6242eb5b38856e`
-- As-of date: `2026-06-18`
+- Scan ID: `a905e44c801fbe7f58b80ddb`
+- As-of date: 2026-06-18
 - Rows: 50
 - Bullish rows: 25
 - Bearish rows: 25
 - Candidate status: 50 `REJECTED`
-- Model state: 50 `CANDIDATE`
 - Rejection reason: `model_not_promoted_or_quality_gates_failed`
+- Unknown attribution categories: 0
+- Historical analog records present: 50 rows
+- Signal close context present: yes
+- CSV: `artifacts/scanner/a905e44c801fbe7f58b80ddb_scanner.csv`
+- Parquet: `artifacts/scanner/a905e44c801fbe7f58b80ddb_scanner.parquet`
 
-Prior inspection snapshots exist in ignored local artifacts. The current snapshot is the latest governance-correct one.
+The scanner uses the latest common completed session across enabled local universe symbols and filters model artifacts to the current feature-manifest hash before loading.
 
 ## Attribution Example
 
-Sample latest candidate:
+Sample latest scanner row:
 
 - Ticker: SOXL
 - Direction: Bearish
 - Horizon: 10
-- Calibrated probability: 0.5689935065
-- Expected return: 0.2259736009
-- Expected MFE: 0.8242213431
-- Expected MAE: -0.3911907876
+- Calibrated probability: 55.10%
+- Expected return: 29.09%
+- Expected MFE: 85.65%
+- Expected MAE: -35.74%
+- Target-before-stop probability: 43.64%
 - Model state: `CANDIDATE`
 - Candidate status: `REJECTED`
-- Exclusion reason: `model_not_promoted_or_quality_gates_failed`
 
-Contribution categories:
+Model contribution share:
 
-- trend_structure: 62.7%
-- returns_momentum: 16.6%
+- returns/momentum: 57.0%
+- volatility/range: 18.9%
+- trend/structure: 14.1%
 - residual/unexplained: 10.0%
-- volatility_range: 5.5%
 
-Relationship evidence in the snapshot included stable SPY/inverse and QQQ/inverse relationships plus multiple inverse/leveraged ETF divergences. These are model evidence, not causal claims.
+The relationship evidence showed stable broad-market/inverse ETF correlations and several inverse/leveraged ETF divergences. These are model evidence and relationship observations, not causal claims.
 
 ## Analog Example
 
-Historical analogs are generated inside `engine.attribution.explain_candidate` from the model bundle's stored training matrix and labels using train-fitted scaling. The scanner output persists attribution categories and relationship evidence; richer analog display is available through the Candidate Attribution dashboard section and remains subject to the same no-future-data rule.
+The SOXL bearish scanner row persisted five historical analog records. The nearest analog in the latest artifact was:
 
-## Portfolio Backtest Summary
+- Date: 2017-11-06
+- Symbol: SOXL
+- Distance: 75.93
+- Bear 10-session forward return: -1.10%
+- Bear MFE: 9.50%
+- Bear MAE: -1.63%
 
-The portfolio backtester is implemented and covered by tests for next-open entries and short returns.
+Analogs are drawn from the model bundle's training matrix and labels using train-fitted scaling, and future/current rows are excluded from the historical distance set.
 
-A real latest-snapshot backtest produced:
+## Portfolio Backtester
 
-- Trades: 0
-- Reason: latest as-of date was the newest local session, so no subsequent next-open bar existed yet.
+Implemented behavior:
 
-This is correct timing behavior; the latest scanner snapshot is for paper-forward observation, not a completed historical trade.
+- signal after close, entry at next session open;
+- bullish and bearish candidates;
+- configurable horizon, target, stop, trailing stop, costs, and slippage;
+- max concurrent positions;
+- max position per symbol;
+- sector concentration limit;
+- gross and net exposure limits;
+- equal weight or volatility-adjusted sizing;
+- conservative same-bar target/stop ambiguity handling;
+- complete trade ledger;
+- daily equity, daily drawdown, exposure;
+- yearly, regime, sector, and model-version return breakdowns.
 
-## Paper Forward-Test State
+Automated tests verify next-open entries, short returns, daily equity columns, yearly/sector outputs, and release of same-symbol capacity after a prior position exits.
 
-SQLite forward events after local acceptance:
+Latest real scanner snapshot had no actionable paper candidates because every model remains `CANDIDATE`; therefore the latest governance-correct real portfolio backtest has zero trades unless a model is explicitly promoted after passing gates.
 
-- Total forward events: 185
-- Latest governance-aware forward update inserted: 50 rejected-signal events
-- Immediate rerun inserted: 0 new events
+## Paper Forward Tester
 
-There are no champion-approved pending entries because no model passed quality gates.
+SQLite forward events after the latest pass:
 
-The forward engine now fills pending entries at the next completed session open when later bars exist, records `POSITION_MARKED` events with mark return/MFE/MAE, and records time-exit `EXIT_FILLED` events at the frozen horizon. This behavior is covered by regression tests and remains append-only/idempotent.
+- Total forward events: 235
+- Latest forward update inserted: 50 rejected-signal events.
+- Immediate rerun inserted: 0 new events.
 
-## Daily-Cycle Behavior
+Implemented event behavior:
 
-Daily cycle command:
+- `SIGNAL_REJECTED` preserves failed-gate scanner rows.
+- `SIGNAL_CREATED` and `ENTRY_PENDING` are created only for actionable paper candidates.
+- `ENTRY_FILLED` uses the next completed session open.
+- `TARGET_UPDATED` and `STOP_UPDATED` freeze policy prices after entry fill.
+- `POSITION_MARKED` stores mark return, MFE, and MAE.
+- `EXIT_FILLED` records target, stop, conservative same-bar ambiguity, or time exits.
+- Existing event rows are never updated.
+- Current position state is reconstructed from the append-only event stream.
+
+There are no champion-approved pending entries in the current real state because no model passed every quality gate.
+
+## Daily Cycle
+
+Verified command:
 
 ```bash
 python -m swing_rsi.cli daily-cycle --include-challengers
 ```
 
-Wrapper:
+Latest completed cycle:
 
-```bash
-./scripts/run_daily_cycle.sh --include-challengers
-```
+- Market date: 2026-06-20
+- Status: `completed`
+- Feature rows: 89,973
+- Modeling rows: 89,973
+- Scanner rows: 50
+- Scan ID: `a905e44c801fbe7f58b80ddb`
+- Drift alerts: 0
+- Forward events created during cycle: 0
+- Daily report: `reports/daily_cycle_2026-06-20.json`
 
-Verified behavior:
+Immediate rerun returned:
 
-- First run completed with feature rows, modeling rows, scanner rows, and forward-event summary.
-- Rerun for the same market date returned `already_completed`.
-- Lock file prevents simultaneous daily cycles.
-- Forward-event insertion is idempotent.
-- The wrapper script is executable and returned `already_completed` for the existing local daily cycle.
-- Drift checks ran separately after the stored daily-cycle summary was already completed: 14 model reports, 0 alerts.
+- Status: `already_completed`
+- Same market date: 2026-06-20
+- Same scan ID and report path.
+
+The lock file under `state/daily_cycle.lock` prevents concurrent cycles.
 
 ## Database Schema
 
@@ -273,28 +301,15 @@ Tables:
 - `forward_events`
 - `daily_cycles`
 
-Final local counts:
+Current local counts:
 
-- models: 26
-- scanner_snapshots: 3
-- scanner_candidates: 150
-- forward_events: 185
-- daily_cycles: 1
+- models: 42
+- scanner_snapshots: 5
+- scanner_candidates: 250
+- forward_events: 235
+- daily_cycles: 2
 
 Generated SQLite state is not committed.
-
-## CLI Commands Added
-
-```bash
-python -m swing_rsi.cli universe-update
-python -m swing_rsi.cli build-features
-python -m swing_rsi.cli discover-models
-python -m swing_rsi.cli model-registry
-python -m swing_rsi.cli promote-model
-python -m swing_rsi.cli scan
-python -m swing_rsi.cli forward-update
-python -m swing_rsi.cli daily-cycle
-```
 
 ## Dashboard
 
@@ -310,7 +325,7 @@ Primary sections:
 8. Model Registry
 9. Baselines and Legacy RSI
 
-Legacy RSI dashboard pages remain accessible under Baselines and Legacy RSI.
+Legacy RSI tools remain under Baselines and Legacy RSI.
 
 Launch command:
 
@@ -318,58 +333,70 @@ Launch command:
 ./scripts/run_dashboard.sh
 ```
 
-## Verification Commands
-
-Automated:
+## CLI Commands
 
 ```bash
-.venv/bin/pytest
-.venv/bin/ruff check .
-.venv/bin/ruff format --check .
-.venv/bin/mypy src
-```
-
-Results:
-
-- pytest: 74 collected, 74 passed
-- Ruff: all checks passed
-- Ruff format: 86 files already formatted
-- mypy: success, no issues in 50 source files
-
-Streamlit/App tests:
-
-- AppTest interactions were included in pytest and passed.
-- Local Streamlit startup smoke required sandbox escalation to bind `127.0.0.1:8765`.
-- HTTP smoke: `curl -I http://127.0.0.1:8765` returned `HTTP/1.1 200 OK`.
-- Clean shutdown: process on port 8765 was killed and subsequent curl failed to connect, confirming the port closed.
-- In-app Browser MCP was unavailable in this session (`iab` not exposed), so browser DOM verification could not be completed. AppTest plus HTTP smoke were completed.
-
-Real local-data pipeline:
-
-```bash
-python -m swing_rsi.cli universe-update --start 2016-06-20
+python -m swing_rsi.cli universe-update
 python -m swing_rsi.cli build-features
-python -m swing_rsi.cli discover-models --minimum-training-samples 200 --minimum-holdout-samples 80
-python -m swing_rsi.cli scan --include-challengers
+python -m swing_rsi.cli discover-models
+python -m swing_rsi.cli model-registry
+python -m swing_rsi.cli promote-model
+python -m swing_rsi.cli scan
 python -m swing_rsi.cli forward-update
+python -m swing_rsi.cli daily-cycle
 ```
 
-Real update included all configured 35 symbols through the existing FMP provider abstraction. The API key and `.env` contents were never printed.
-
-Additional verified commands:
+Daily wrapper:
 
 ```bash
-python -m swing_rsi.cli forward-update
-python -m swing_rsi.cli daily-cycle --include-challengers
 ./scripts/run_daily_cycle.sh --include-challengers
 ```
 
-Results:
+## Verification Results
 
-- Second `forward-update`: 0 new events, 185 total forward events.
-- Daily cycle: `already_completed` for `2026-06-19`, no duplicate cycle.
-- Wrapper: `already_completed` for `2026-06-19`, no duplicate cycle.
-- Drift check service: 14 reports, 0 alerts; PyArrow printed sandbox CPU-info warnings only.
+Automated tests:
+
+- Command: `.venv/bin/pytest`
+- Result: 77 collected, 77 passed, 0 failed, 0 skipped.
+- Warnings: 161. They are pandas fragmentation warnings in feature construction plus one joblib CPU-count warning in the sandbox.
+
+Quality checks:
+
+- `.venv/bin/ruff check .`: passed.
+- `.venv/bin/ruff format --check .`: 86 files already formatted.
+- `.venv/bin/mypy src`: success, no issues in 50 source files.
+
+Focused autonomous tests:
+
+- Command: `.venv/bin/pytest tests/test_autonomous_engine.py`
+- Result: 14 collected, 14 passed, 161 warnings.
+
+CLI smoke checks:
+
+- `python -m swing_rsi.cli doctor`: succeeded; reported FMP key configured yes/no without printing the key.
+- `python -m swing_rsi.cli model-registry`: succeeded; current candidates listed.
+- `python -m swing_rsi.cli forward-update`: succeeded; idempotent rerun inserted 0 events and left total at 235.
+
+Real local-data pipeline:
+
+- `python -m swing_rsi.cli universe-update --start 2016-06-20`: 35 enabled symbols, 35 updated, 0 errors.
+- `python -m swing_rsi.cli build-features`: produced 89,973 feature rows, 89,973 label rows, 89,973 modeling rows.
+- `python -m swing_rsi.cli discover-models --minimum-training-samples 200 --minimum-holdout-samples 80`: registered 8 current-feature candidates, 0 challengers, 0 rejected/experimental in that run, no silent promotion.
+- `python -m swing_rsi.cli scan --include-challengers`: produced scan `a905e44c801fbe7f58b80ddb`, 50 rows, 25 bullish, 25 bearish.
+- `python -m swing_rsi.cli forward-update`: inserted 50 events; immediate rerun inserted 0.
+- `python -m swing_rsi.cli daily-cycle --include-challengers`: completed once for 2026-06-20 and reran as `already_completed`.
+
+Streamlit smoke:
+
+- Command: `.venv/bin/streamlit run dashboard/app.py --server.headless true --server.port 8771 --browser.gatherUsageStats false`
+- Startup: succeeded on port 8771.
+- HTTP check: `curl -I http://localhost:8771` returned `HTTP/1.1 200 OK`.
+- Shutdown: local process on port 8771 was stopped; subsequent port check returned no process.
+
+Dashboard AppTest:
+
+- Included in `.venv/bin/pytest` via `tests/test_dashboard_interactions.py`.
+- Six dashboard interaction tests passed.
 
 ## Security Audit
 
@@ -377,45 +404,44 @@ PASS:
 
 - `.env` is ignored and was not opened or printed.
 - `.venv` is ignored.
-- `data/raw/*` is ignored.
-- `data/features/*` is ignored.
-- `artifacts/*` is ignored except `.gitkeep`.
-- `state/*` is ignored except `.gitkeep`.
-- reports, logs, caches, and Streamlit local files are ignored.
-- No API key or authenticated URL was staged or committed.
+- `data/raw/*`, `data/features/*`, `data/manifests/*`, `data/universes/*`, `artifacts/*`, `state/*`, and `reports/*` are ignored except `.gitkeep` files.
+- API keys and authenticated URLs are not printed by CLI/dashboard paths used here.
 - Automated tests do not call FMP.
 - Dashboard imports do not make FMP requests.
+- Generated raw data, model artifacts, scanner outputs, SQLite state, reports, logs, caches, and Streamlit local files are not committed.
 
 ## Leakage Audit
 
 PASS:
 
-- Feature calculations are trailing or same-date only.
-- Future rows mutation test confirms prior features are unchanged.
-- Labels are prefixed with `label_` and physically separated.
-- `reject_label_columns` prevents label columns from entering model features.
-- Chronological split purges rows whose label horizon overlaps calibration or holdout windows.
-- Train-only preprocessing and calibration separation are used.
-- Scanner uses latest as-of feature rows and no label columns.
-- Close-known signals cannot enter at the same close; portfolio and forward rules use next-session/next-completed-session open semantics.
-- Failed trades/signals are retained; rejected scanner rows include exclusion reasons.
-- Forward fills, marks, and exits are appended as new events; old event rows are not rewritten.
+- Features are trailing or same-date as-of values.
+- Future-row mutation tests confirm prior features do not change.
+- Cross-sectional ranks and breadth use same-date data only.
+- Labels are prefixed with `label_` and physically separated from features.
+- `reject_label_columns` prevents label columns entering model matrices.
+- Chronological splits purge overlapping label windows before calibration/holdout.
+- Calibration is separate from training and holdout.
+- Scanner rows use latest as-of features and no labels.
+- Scanner uses the latest common completed local session.
+- Close-known signals do not enter at the same close; portfolio and forward paths use next-session/next-completed-session open semantics.
+- Rejected candidates and failed signals are retained with exclusion reasons.
+- Forward events are append-only and idempotent.
 
 ## Known Limitations
 
-- No model passed all quality gates, so there is no champion and no champion-approved paper pending entry.
-- Scanner outputs from `--include-challengers` are review-only when models are `CANDIDATE`.
-- Feature families are broad but still a first bounded vertical slice; mutual information screening is not yet implemented, and permutation/drift diagnostics are intentionally bounded.
-- Regime labels are basic unsupervised states and are not named bull/bear causes.
-- Historical analogs are implemented in attribution but dashboard presentation is minimal.
-- Dynamic stop/target and trailing-stop paper-forward policies are not enabled yet; the current lifecycle uses frozen next-open entry and horizon time exits.
-- Portfolio backtester is implemented but latest real scanner snapshot has no subsequent next-open bar yet, so real latest-snapshot trades are zero.
-- No options, NLP, intraday data, brokerage execution, authentication, deployment, FastAPI, SvelteKit, or database server were added.
-- FMP corporate-action semantics, delisted coverage, and point-in-time historical universe membership remain unaudited.
+- No model passed every quality gate, so there is no champion and no champion-approved paper pending entry.
+- Scanner output using `--include-challengers` is review-only when models are still `CANDIDATE`.
+- Real-data portfolio backtest has zero actionable trades until a model passes gates and is explicitly promoted.
+- Feature construction is correct but currently emits pandas fragmentation performance warnings; this is a performance/refactor target.
+- Regime labels are bounded unsupervised state candidates, not causal bull/bear labels.
+- Attribution is perturbation/evidence based and probabilistic; it is not causal proof.
+- Drift checks currently cover feature and prediction distributions; realized-performance, calibration, relationship, and regime drift can be expanded after champion/live history exists.
+- Historical analog display exists but remains compact in scanner artifacts and dashboard.
+- FMP corporate-action semantics, delisted coverage, and point-in-time historical-universe membership remain unaudited.
 - Current-universe historical tests may contain survivorship bias.
-- PyArrow emitted sandbox-specific `sysctlbyname` CPU-info warnings during one inspection script; tests and pipeline still completed.
+- No options, NLP, intraday data, brokerage execution, authentication, deployment, FastAPI, SvelteKit, or database server were added.
 
-## Commands for Users
+## User Commands
 
 Open the dashboard:
 
@@ -434,11 +460,11 @@ Run the autonomous scanner pipeline manually:
 ```bash
 python -m swing_rsi.cli universe-update --start 2016-06-20
 python -m swing_rsi.cli build-features
-python -m swing_rsi.cli discover-models
+python -m swing_rsi.cli discover-models --minimum-training-samples 200 --minimum-holdout-samples 80
 python -m swing_rsi.cli scan --include-challengers
 python -m swing_rsi.cli forward-update
 ```
 
 ## Next Smallest Milestone
 
-Tighten model quality gates and diagnostics for the current daily scanner: add richer gate reporting, feature-stability summaries, calibration plots/tables, and a clear champion-promotion review workflow without adding new data domains or execution capabilities.
+Do not add new data domains. The next smallest sensible milestone is to make model-review and promotion stricter and easier to audit: add dashboard gate drilldowns, calibration tables/plots, feature-stability tables, and a manual champion-promotion checklist tied to the existing daily scanner and forward-test state.

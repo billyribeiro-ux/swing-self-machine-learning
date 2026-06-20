@@ -9,8 +9,14 @@ from typing import Any, cast
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    ExtraTreesRegressor,
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+)
+from sklearn.feature_selection import mutual_info_classif
 from sklearn.impute import SimpleImputer
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression, Ridge
@@ -37,6 +43,8 @@ class ModelBundle:
     feature_family_by_column: dict[str, str]
     classifier: Any
     calibrator: Any
+    target_before_stop_model: Any
+    target_before_stop_calibrator: Any
     return_model: Any
     mfe_model: Any
     mae_model: Any
@@ -61,6 +69,7 @@ class DiscoveryConfig:
     round_trip_cost_bps: float = 5.0
     random_seed: int = 42
     permutation_feature_limit: int = 12
+    mutual_information_top_k: int = 60
 
 
 @dataclass(frozen=True)
@@ -176,8 +185,38 @@ def _candidate_pipelines(seed: int) -> dict[str, Any]:
     }
 
 
-def _regressor(seed: int) -> Pipeline:
-    _ = seed
+def _regressor(seed: int, family: str) -> Pipeline:
+    if family == "hist_gradient_boosting":
+        return Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "model",
+                    HistGradientBoostingRegressor(
+                        max_iter=80,
+                        learning_rate=0.05,
+                        min_samples_leaf=20,
+                        l2_regularization=0.1,
+                        random_state=seed,
+                    ),
+                ),
+            ]
+        )
+    if family == "extra_trees":
+        return Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "model",
+                    ExtraTreesRegressor(
+                        n_estimators=120,
+                        min_samples_leaf=10,
+                        random_state=seed,
+                        n_jobs=1,
+                    ),
+                ),
+            ]
+        )
     return Pipeline(
         [
             ("imputer", SimpleImputer(strategy="median")),
@@ -259,6 +298,49 @@ def _feature_stability_summary(
     return mean_score, "; ".join(f"{column}={score:.4f}" for column, score in top)
 
 
+def _mutual_information_screen(
+    train: pd.DataFrame,
+    feature_columns: list[str],
+    target: str,
+    *,
+    seed: int,
+    top_k: int,
+) -> tuple[list[str], str]:
+    if top_k <= 0 or len(feature_columns) <= top_k:
+        return feature_columns, ""
+    target_values = train[target].astype(int)
+    if target_values.nunique() < 2:
+        return feature_columns, ""
+    x = train[feature_columns].replace([np.inf, -np.inf], np.nan)
+    x = x.fillna(x.median(numeric_only=True)).fillna(0.0)
+    scores = mutual_info_classif(x, target_values, random_state=seed)
+    ranked = sorted(
+        zip(feature_columns, scores, strict=True),
+        key=lambda item: float(item[1]),
+        reverse=True,
+    )
+    selected = [column for column, _ in ranked[:top_k]]
+    summary = "; ".join(f"{column}={float(score):.6f}" for column, score in ranked[:10])
+    return selected, summary
+
+
+def _positive_group_fraction(frame: pd.DataFrame, returns: pd.Series, group: str) -> float:
+    if frame.empty or group not in frame.columns:
+        return math.nan
+    grouped = pd.DataFrame({"group": frame[group], "return": returns}).dropna()
+    if grouped.empty:
+        return math.nan
+    means = grouped.groupby("group")["return"].mean()
+    return float((means > 0).mean()) if not means.empty else math.nan
+
+
+def _max_concentration(frame: pd.DataFrame, column: str) -> float:
+    if frame.empty or column not in frame.columns:
+        return math.nan
+    shares = frame[column].value_counts(normalize=True, dropna=True)
+    return float(shares.max()) if not shares.empty else math.nan
+
+
 def _train_family(
     *,
     family: str,
@@ -273,12 +355,20 @@ def _train_family(
     returns = f"label_{direction}_forward_return_{horizon}"
     mfe = f"label_{direction}_mfe_{horizon}"
     mae = f"label_{direction}_mae_{horizon}"
-    required = [target, returns, mfe, mae]
+    target_before_stop = f"label_{direction}_target_before_stop_{horizon}"
+    required = [target, returns, mfe, mae, target_before_stop]
     train = split.train.dropna(subset=[*feature_columns, *required]).copy()
     calibration = split.calibration.dropna(subset=[*feature_columns, *required]).copy()
     holdout = split.holdout.dropna(subset=[*feature_columns, *required]).copy()
     if train.empty or calibration.empty or holdout.empty:
         raise ValueError("Training, calibration, and holdout sets must be nonempty")
+    feature_columns, mutual_information_summary = _mutual_information_screen(
+        train,
+        feature_columns,
+        target,
+        seed=config.random_seed,
+        top_k=config.mutual_information_top_k,
+    )
 
     x_train = train[feature_columns]
     y_train = train[target].astype(int)
@@ -293,9 +383,24 @@ def _train_family(
     holdout_raw = _positive_class_probability(classifier, holdout[feature_columns])
     holdout_probability = np.asarray(calibrator.predict(holdout_raw), dtype=float)
 
-    return_model = _regressor(config.random_seed)
-    mfe_model = _regressor(config.random_seed + 1)
-    mae_model = _regressor(config.random_seed + 2)
+    target_classifier = clone(classifier)
+    target_y = train[target_before_stop].astype(int)
+    if target_y.nunique() < 2:
+        target_classifier = BaseRateClassifier()
+    target_classifier.fit(x_train, target_y)
+    target_calibration_raw = _positive_class_probability(
+        target_classifier, calibration[feature_columns]
+    )
+    target_calibrator = IsotonicRegression(out_of_bounds="clip")
+    target_calibrator.fit(target_calibration_raw, calibration[target_before_stop].astype(int))
+    target_holdout_raw = _positive_class_probability(target_classifier, holdout[feature_columns])
+    target_holdout_probability = np.asarray(
+        target_calibrator.predict(target_holdout_raw), dtype=float
+    )
+
+    return_model = _regressor(config.random_seed, family)
+    mfe_model = _regressor(config.random_seed + 1, family)
+    mae_model = _regressor(config.random_seed + 2, family)
     return_model.fit(x_train, train[returns])
     mfe_model.fit(x_train, train[mfe])
     mae_model.fit(x_train, train[mae])
@@ -336,6 +441,22 @@ def _train_family(
         )
     holdout_profit_factor = _profit_factor(selected_returns)
     holdout_max_drawdown = _max_drawdown(selected_returns)
+    double_cost_returns = selected[returns] - ((config.round_trip_cost_bps * 2.0) / 10_000.0)
+    double_cost_lcb = (
+        float(double_cost_returns.mean())
+        if len(double_cost_returns) <= 1
+        else float(double_cost_returns.mean())
+        - (1.645 * float(double_cost_returns.std(ddof=1)) / math.sqrt(len(double_cost_returns)))
+    )
+    year_fraction = math.nan
+    if "Date" in selected.columns and not selected.empty:
+        selected = selected.assign(_year=pd.to_datetime(selected["Date"]).dt.year.astype(str))
+        year_fraction = _positive_group_fraction(selected, selected_returns, "_year")
+    regime_fraction = _positive_group_fraction(selected, selected_returns, "market_regime_label")
+    sector_fraction = _positive_group_fraction(selected, selected_returns, "sector")
+    symbol_concentration = _max_concentration(selected, "symbol")
+    sector_concentration = _max_concentration(selected, "sector")
+    prediction_turnover = len(selected_returns) / len(holdout) if len(holdout) else math.nan
     metrics: dict[str, float | int | str | bool | None] = {
         "training_samples": len(train),
         "calibration_samples": len(calibration),
@@ -354,6 +475,20 @@ def _train_family(
         "feature_stability_mean_abs_z": feature_stability_mean,
         "feature_stability_top": feature_stability_top,
         "permutation_importance_top": permutation_summary,
+        "mutual_information_top": mutual_information_summary,
+        "holdout_target_before_stop_brier": float(
+            brier_score_loss(holdout[target_before_stop].astype(int), target_holdout_probability)
+        ),
+        "holdout_target_before_stop_probability_mean": float(np.mean(target_holdout_probability)),
+        "holdout_double_cost_lcb_90": double_cost_lcb,
+        "positive_year_fraction": year_fraction,
+        "positive_regime_fraction": regime_fraction,
+        "positive_sector_fraction": sector_fraction,
+        "symbol_concentration_top": symbol_concentration,
+        "sector_concentration_top": sector_concentration,
+        "prediction_turnover": prediction_turnover,
+        "rsi_control_columns_available": "rsi_14" in train.columns,
+        "naive_control_family": family == "naive_base_rate",
     }
     calibration_metrics: dict[str, float | int | str | bool | None] = {
         "calibration_brier": calibration_brier,
@@ -374,6 +509,24 @@ def _train_family(
         "drawdown_not_worse_than_50pct": bool(
             math.isfinite(holdout_max_drawdown) and holdout_max_drawdown > -0.50
         ),
+        "confidence_lower_bound_finite": math.isfinite(lower_bound),
+        "feature_stability_mean_abs_z_max_250": bool(
+            math.isfinite(feature_stability_mean) and feature_stability_mean <= 2.50
+        ),
+        "symbol_concentration_max_050": bool(
+            not math.isfinite(symbol_concentration) or symbol_concentration <= 0.50
+        ),
+        "sector_concentration_max_080": bool(
+            not math.isfinite(sector_concentration) or sector_concentration <= 0.80
+        ),
+        "transaction_cost_sensitivity_not_collapsed": bool(
+            math.isfinite(double_cost_lcb)
+            and double_cost_lcb > -((config.round_trip_cost_bps * 2.0) / 10_000.0)
+        ),
+        "prediction_turnover_max_050": bool(
+            math.isfinite(prediction_turnover) and prediction_turnover <= 0.50
+        ),
+        "comparison_controls_available": bool("rsi_14" in train.columns),
     }
     medians = {column: float(x_train[column].median()) for column in feature_columns}
     means = {column: float(x_train[column].mean()) for column in feature_columns}
@@ -392,6 +545,8 @@ def _train_family(
         feature_family_by_column={},
         classifier=classifier,
         calibrator=calibrator,
+        target_before_stop_model=target_classifier,
+        target_before_stop_calibrator=target_calibrator,
         return_model=return_model,
         mfe_model=mfe_model,
         mae_model=mae_model,
@@ -516,6 +671,8 @@ def discover_models(
                     },
                     classifier=bundle.classifier,
                     calibrator=bundle.calibrator,
+                    target_before_stop_model=bundle.target_before_stop_model,
+                    target_before_stop_calibrator=bundle.target_before_stop_calibrator,
                     return_model=bundle.return_model,
                     mfe_model=bundle.mfe_model,
                     mae_model=bundle.mae_model,
@@ -583,6 +740,10 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     output["horizon"] = bundle.horizon
     output["model_id"] = bundle.model_id
     output["calibrated_probability"] = probability
+    target_raw = _positive_class_probability(bundle.target_before_stop_model, x)
+    output["target_before_stop_probability"] = np.asarray(
+        bundle.target_before_stop_calibrator.predict(target_raw), dtype=float
+    )
     output["expected_return"] = bundle.return_model.predict(x)
     output["expected_mfe"] = bundle.mfe_model.predict(x)
     output["expected_mae"] = bundle.mae_model.predict(x)

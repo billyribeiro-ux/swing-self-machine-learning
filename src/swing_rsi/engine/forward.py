@@ -175,14 +175,27 @@ def create_pending_events_from_snapshot(db_path: str | Path, scanner_rows: pd.Da
             )
             count += int(event.inserted)
             continue
-        payload = {
+        expected_return = float(row["expected_return"])
+        expected_mfe = float(row["expected_mfe"])
+        expected_mae = float(row["expected_mae"])
+        signal_close = row.get("signal_close")
+        signal_price_context = (
+            None if signal_close is None or pd.isna(signal_close) else float(signal_close)
+        )
+        planned_target_return = max(expected_return, max(expected_mfe, 0.0) * 0.5, 0.005)
+        planned_stop_return = max(abs(expected_mae), 0.005)
+        payload: dict[str, object] = {
             "entry_rule": "next_completed_session_open",
-            "planned_stop": "frozen_model_policy_at_signal_time",
-            "planned_target": "frozen_model_policy_at_signal_time",
+            "signal_price_context": signal_price_context,
+            "planned_stop_return": planned_stop_return,
+            "planned_target_return": planned_target_return,
+            "planned_stop": "entry_price_adjusted_after_next_open_fill",
+            "planned_target": "entry_price_adjusted_after_next_open_fill",
+            "planned_round_trip_cost_bps": 5.0,
             "signal_as_of_date": str(row["as_of_date"]),
-            "expected_return": float(row["expected_return"]),
-            "expected_mfe": float(row["expected_mfe"]),
-            "expected_mae": float(row["expected_mae"]),
+            "expected_return": expected_return,
+            "expected_mfe": expected_mfe,
+            "expected_mae": expected_mae,
             "calibrated_probability": float(row["calibrated_probability"]),
             "horizon": int(row["horizon"]),
         }
@@ -262,6 +275,86 @@ def _time_exit_date(
     return pd.Timestamp(data.index[exit_position])
 
 
+def _risk_policy_prices(
+    *,
+    direction: str,
+    entry_price: float,
+    payload: dict[str, object],
+) -> tuple[float | None, float | None]:
+    target_return = float(cast(float, payload.get("planned_target_return", 0.0) or 0.0))
+    stop_return = float(cast(float, payload.get("planned_stop_return", 0.0) or 0.0))
+    target_price: float | None = None
+    stop_price: float | None = None
+    if target_return > 0:
+        target_price = (
+            entry_price * (1.0 + target_return)
+            if direction == "Bullish"
+            else entry_price * (1.0 - target_return)
+        )
+    if stop_return > 0:
+        stop_price = (
+            entry_price * (1.0 - stop_return)
+            if direction == "Bullish"
+            else entry_price * (1.0 + stop_return)
+        )
+    return target_price, stop_price
+
+
+def _first_policy_exit(
+    frame: pd.DataFrame,
+    *,
+    direction: str,
+    entry_date: str,
+    entry_price: float,
+    through_date: str,
+    payload: dict[str, object],
+) -> tuple[pd.Timestamp, str, float] | None:
+    target_price, stop_price = _risk_policy_prices(
+        direction=direction,
+        entry_price=entry_price,
+        payload=payload,
+    )
+    if target_price is None and stop_price is None:
+        return None
+    data = validate_ohlcv(frame)
+    window = data.loc[pd.Timestamp(entry_date) : pd.Timestamp(through_date)]
+    for index, bar in window.iterrows():
+        high = float(bar["High"])
+        low = float(bar["Low"])
+        if direction == "Bullish":
+            target_hit = target_price is not None and high >= target_price
+            stop_hit = stop_price is not None and low <= stop_price
+        else:
+            target_hit = target_price is not None and low <= target_price
+            stop_hit = stop_price is not None and high >= stop_price
+        if target_hit and stop_hit:
+            assert stop_price is not None
+            return pd.Timestamp(str(index)), "stop_intraday_ambiguous", float(stop_price)
+        if stop_hit:
+            assert stop_price is not None
+            return pd.Timestamp(str(index)), "stop", float(stop_price)
+        if target_hit:
+            assert target_price is not None
+            return pd.Timestamp(str(index)), "target", float(target_price)
+    return None
+
+
+def _realized_return_from_price(
+    *,
+    direction: str,
+    entry_price: float,
+    exit_price: float,
+    cost_bps: float,
+) -> tuple[float, float]:
+    gross = (
+        (exit_price / entry_price) - 1.0
+        if direction == "Bullish"
+        else (entry_price / exit_price) - 1.0
+    )
+    costs = cost_bps / 10_000.0
+    return gross, gross - costs
+
+
 def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFrame]) -> int:
     events = list_forward_events(db_path)
     if events.empty:
@@ -288,6 +381,13 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
             "actual_paper_fill": entry_price,
             "fill_rule": "next_completed_session_open",
         }
+        target_price, stop_price = _risk_policy_prices(
+            direction=str(pending["direction"]),
+            entry_price=entry_price,
+            payload=payload,
+        )
+        payload["planned_target_price"] = target_price
+        payload["planned_stop_price"] = stop_price
         event = append_forward_event(
             db_path,
             event_type="ENTRY_FILLED",
@@ -301,6 +401,30 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
             unique_suffix=f"{pending['event_id']}|{pending_payload.get('horizon', '')}",
         )
         inserted += int(event.inserted)
+        for event_type, price_key in (
+            ("TARGET_UPDATED", "planned_target_price"),
+            ("STOP_UPDATED", "planned_stop_price"),
+        ):
+            price = payload.get(price_key)
+            if price is None:
+                continue
+            policy_event = append_forward_event(
+                db_path,
+                event_type=event_type,
+                market_as_of_date=entry_date.date().isoformat(),
+                ticker=ticker,
+                direction=str(pending["direction"]),
+                model_id=str(pending["model_id"]),
+                scanner_snapshot_id=str(pending["scanner_snapshot_id"]),
+                feature_snapshot_hash=str(pending["feature_snapshot_hash"]),
+                payload={
+                    **payload,
+                    "policy_event": event_type,
+                    "frozen_price": float(cast(float, price)),
+                },
+                unique_suffix=f"{pending['event_id']}|{event_type}",
+            )
+            inserted += int(policy_event.inserted)
 
     events = list_forward_events(db_path)
     filled_entries = events.loc[events["event_type"] == "ENTRY_FILLED"]
@@ -326,6 +450,21 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
         exit_date = _time_exit_date(frame, signal_as_of_date=signal_date, horizon=horizon)
         latest_date = pd.Timestamp(data.index.max())
         last_mark_date = min(latest_date, exit_date) if exit_date is not None else latest_date
+        policy_exit = _first_policy_exit(
+            frame,
+            direction=str(filled["direction"]),
+            entry_date=entry_date_label,
+            entry_price=float(cast(float, payload["entry_price"])),
+            through_date=last_mark_date.date().isoformat(),
+            payload=payload,
+        )
+        actual_exit_date = exit_date
+        actual_exit_reason = "time_exit"
+        actual_exit_price: float | None = None
+        if policy_exit is not None:
+            actual_exit_date, actual_exit_reason, actual_exit_price = policy_exit
+        if actual_exit_date is not None:
+            last_mark_date = min(last_mark_date, actual_exit_date)
         mark_dates = data.index[
             (data.index >= pd.Timestamp(entry_date_label)) & (data.index <= last_mark_date)
         ]
@@ -357,27 +496,40 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
                 unique_suffix=f"{source_id}|{mark_date.date().isoformat()}",
             )
             inserted += int(event.inserted)
-        if exit_date is not None and latest_date >= exit_date:
+        if actual_exit_date is not None and latest_date >= actual_exit_date:
+            exit_price = (
+                actual_exit_price
+                if actual_exit_price is not None
+                else float(cast(float, data.at[actual_exit_date, "Close"]))
+            )
             realized_return, mfe, mae = _trade_window_stats(
                 frame,
                 direction=str(filled["direction"]),
                 entry_date=entry_date_label,
                 entry_price=float(cast(float, payload["entry_price"])),
-                through_date=exit_date.date().isoformat(),
+                through_date=actual_exit_date.date().isoformat(),
+            )
+            gross_return, net_return = _realized_return_from_price(
+                direction=str(filled["direction"]),
+                entry_price=float(cast(float, payload["entry_price"])),
+                exit_price=float(exit_price),
+                cost_bps=float(payload.get("planned_round_trip_cost_bps", 0.0) or 0.0),
             )
             exit_payload = {
                 **payload,
-                "exit_date": exit_date.date().isoformat(),
-                "exit_reason": "time_exit",
-                "actual_paper_fill": float(cast(float, data.at[exit_date, "Close"])),
-                "realized_return": realized_return,
+                "exit_date": actual_exit_date.date().isoformat(),
+                "exit_reason": actual_exit_reason,
+                "actual_paper_fill": float(exit_price),
+                "mark_to_close_return": realized_return,
+                "realized_return": gross_return,
+                "net_realized_return": net_return,
                 "mfe": mfe,
                 "mae": mae,
             }
             event = append_forward_event(
                 db_path,
                 event_type="EXIT_FILLED",
-                market_as_of_date=exit_date.date().isoformat(),
+                market_as_of_date=actual_exit_date.date().isoformat(),
                 ticker=ticker,
                 direction=str(filled["direction"]),
                 model_id=str(filled["model_id"]),
