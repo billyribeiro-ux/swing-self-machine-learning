@@ -6,7 +6,7 @@ Generated: 2026-06-19 America/New_York
 
 - Branch: `feat/autonomous-swing-scanner-v1`
 - Implementation commit: `3880c73` (`feat: add autonomous swing scanner vertical slice`)
-- Completion commit: pending final local commit
+- Completion commit: `b5b985a` (`feat: complete scanner diagnostics and forward lifecycle`)
 - Remote push: not pushed
 - Secrets: `.env` was not opened, printed, staged, committed, or copied.
 - Generated artifacts: raw data, feature parquet, model artifacts, scanner outputs, SQLite state, reports, logs, caches, and Streamlit local files are ignored.
