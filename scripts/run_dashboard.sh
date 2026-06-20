@@ -10,7 +10,7 @@ export STREAMLIT_CONFIG_DIR="${ROOT_DIR}/.streamlit"
 export STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 export STREAMLIT_CLIENT_TOOLBAR_MODE=minimal
 mkdir -p "${STREAMLIT_CONFIG_DIR}"
-printf '[browser]\ngatherUsageStats = false\n\n[client]\ntoolbarMode = "minimal"\n' > "${STREAMLIT_CONFIG_DIR}/config.toml"
+printf '[browser]\ngatherUsageStats = false\n\n[client]\ntoolbarMode = "minimal"\n\n[server]\nfileWatcherType = "none"\nrunOnSave = false\n' > "${STREAMLIT_CONFIG_DIR}/config.toml"
 if [[ ! -f "${STREAMLIT_CONFIG_DIR}/credentials.toml" ]]; then
   printf '[general]\nemail = ""\n' > "${STREAMLIT_CONFIG_DIR}/credentials.toml"
 fi

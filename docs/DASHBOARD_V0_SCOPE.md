@@ -39,6 +39,8 @@ The script uses `.venv/bin/streamlit` directly. If Streamlit is missing, run:
 
 The `dashboard` optional dependency group includes `watchdog` so Streamlit can use filesystem event watching locally and avoid the runtime performance hint.
 
+`scripts/run_dashboard.sh` disables Streamlit's automatic file watcher for the local research console. This prevents browser reload loops caused by ignored local artifacts such as raw data, reports, caches, logs, or generated Streamlit configuration changing while the dashboard is open.
+
 ## Temporary UI Decision
 
 Streamlit is temporary local presentation infrastructure. The long-term commercial UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary, but that is outside the current Version 1 dashboard milestone.

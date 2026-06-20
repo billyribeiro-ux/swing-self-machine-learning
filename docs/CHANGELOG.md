@@ -14,6 +14,7 @@
 - Added walk-forward configuration prevalidation in the application service wrapper.
 - Added tests for navigation order, ticker normalization, selected-window audit behavior, formatting, cache invalidation, AppTest interactions, and no-network dashboard startup.
 - Added `watchdog` to the optional `dashboard` dependency group so local Streamlit runs can use filesystem event watching and avoid the performance hint.
+- Disabled Streamlit's automatic file watcher in `scripts/run_dashboard.sh` to prevent browser reload loops while local ignored artifacts change during dashboard use.
 
 ## 0.1.2 — 2026-06-19
 
