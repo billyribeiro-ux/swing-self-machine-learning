@@ -20,6 +20,26 @@ Historical walk-forward validation is legacy research evaluation. It is not the 
 
 Before any model is promoted, reserve a final untouched time period that was not used for feature design, parameter ranges, threshold tuning, or model selection.
 
+## Evaluation layers
+
+Autonomous scanner validation separates:
+
+- prediction-level diagnostics over every eligible holdout row;
+- selected-candidate diagnostics over rows passing the frozen selection policy;
+- portfolio-level diagnostics from chronological portfolio simulation only.
+
+Maximum drawdown used for promotion gates must come from daily portfolio equity. Sequential compounding of selected cross-sectional rows is allowed only as the diagnostic `selected_row_sequence_drawdown`.
+
+## Research date eligibility
+
+Raw data may begin before `research_start` for trailing-feature warm-up. Model-eligible training, calibration, holdout, label, quality, and historical portfolio rows must begin on or after the configured research start and must not use labels extending beyond the configured research end.
+
+The current autonomous default research start is `2016-06-20`.
+
+## Predictive skill
+
+Every classifier is compared against the matching naive control on the exact same holdout rows. Store model Brier, naive Brier, absolute Brier improvement, relative Brier improvement, and Brier skill score. A model with worse holdout Brier than the matching naive control fails the mandatory predictive-skill gate.
+
 ## Stability requirements
 
 Prefer broad stable feature/model behavior over one isolated optimum. RSI parameter stability remains a baseline diagnostic; autonomous models must also report feature stability, calibration, symbol concentration, sector concentration, year/regime stability, and cost sensitivity.
@@ -55,3 +75,5 @@ REJECTED
 Only explicit promotion can create a champion. Discovery never silently replaces a deployed model.
 
 Legacy RSI reports may still use older research labels, but the autonomous registry uses the states above.
+
+Promotion eligibility is computed only from persisted canonical gate results. Missing mandatory gates, failed mandatory gates, mandatory `NOT_CONFIGURED`, and mandatory `NOT_APPLICABLE` block promotion.

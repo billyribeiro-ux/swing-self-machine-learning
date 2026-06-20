@@ -25,7 +25,7 @@ Each registered model stores immutable metadata:
 - raw-data manifest hashes;
 - hyperparameters;
 - metrics and calibration metrics;
-- quality-gate results;
+- canonical quality-gate results;
 - artifact path;
 - code commit hash when available;
 - creation and promotion timestamps;
@@ -35,14 +35,17 @@ Artifacts are written under `artifacts/models/` and ignored by Git.
 
 ## Quality Gates
 
+Each canonical gate stores gate ID, name, category, scope, metric name, threshold, comparator, actual value, status, mandatory flag, evidence source, reason, evaluation time, and configuration hash.
+
 The current vertical slice gates on:
 
 - minimum training samples;
 - minimum unseen holdout observations;
+- Brier skill versus matching naive control;
 - positive expected value after costs;
 - holdout Brier score;
 - profit factor;
-- maximum drawdown.
+- portfolio maximum drawdown from daily portfolio equity;
 - finite lower confidence bound;
 - feature-stability cap;
 - symbol concentration cap;
@@ -52,8 +55,13 @@ The current vertical slice gates on:
 - temporal-fold stability;
 - exceptional-period concentration;
 - comparison-control availability.
+- prediction-unit sanity;
+- prediction out-of-distribution sanity;
+- selection-rate policy configuration.
 
 Registered metrics also retain feature-stability summaries, bounded holdout permutation-importance summaries, target-before-stop calibration, positive year/regime/sector fractions, symbol/sector concentration, double-cost lower bound, prediction turnover, temporal-fold positive fraction, exceptional-period concentration, model plugin metadata, and naive/RSI-control availability for review. Those diagnostics do not override failed gates.
+
+The selected row sequence drawdown is retained only as `selected_row_sequence_drawdown`. It is not a portfolio drawdown gate.
 
 ## Model Plugin Interface
 
@@ -78,7 +86,9 @@ Drift alerts are evidence for review and possible challenger training. They neve
 Champion promotion requires:
 
 1. The model is a candidate/challenger in the registry.
-2. Every quality gate passes.
-3. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
+2. Persisted canonical mandatory gates exist.
+3. Every mandatory quality gate passes.
+4. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
+5. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
 
 Existing champion models for the same task, direction, and horizon are retired with a recorded reason.

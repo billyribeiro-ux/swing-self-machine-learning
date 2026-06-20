@@ -39,6 +39,8 @@ Core flow:
 12. `swing_rsi.engine.forward` appends paper-forward events, fills pending entries at next completed session open, freezes stop/target prices, marks positions, and exits from target/stop/ambiguity/time policies.
 13. `swing_rsi.application.engine_service.run_daily_cycle` coordinates an idempotent local daily cycle and writes an ignored JSON daily report.
 
+Model evaluation was hardened on 2026-06-20. Promotion gates now distinguish prediction-level diagnostics, selected-candidate diagnostics, and portfolio-level holdout simulation. Portfolio drawdown is calculated from daily portfolio equity; the invalid cross-sectional row-compounding drawdown is retained only as `selected_row_sequence_drawdown`. See `docs/MODEL_EVALUATION_INTEGRITY.md` and `docs/MODEL_GATE_AUDIT_HANDOFF.md`.
+
 ## Modules Added
 
 - `src/swing_rsi/engine/universe.py`: YAML/CSV universe parsing, symbol normalization, metadata, snapshot IDs.

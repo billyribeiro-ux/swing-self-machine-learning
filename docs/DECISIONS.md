@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-20 — Model promotion requires canonical portfolio-aware gates
+
+Decision: Autonomous model promotion is computed only from persisted canonical gate records. Portfolio maximum drawdown must come from chronological daily portfolio equity. Cross-sectional selected-row compounding is retained only as `selected_row_sequence_drawdown` and cannot satisfy the portfolio drawdown gate.
+
+Reason: Same-date panel predictions are not sequential full-capital trades. Using their compounded row sequence produced near--100% drawdowns that were mathematically invalid as portfolio evidence and obscured the real promotion blockers.
+
 ## 2026-06-20 — Scanner review mode uses newest candidate generation only
 
 Decision: When no champion exists and scanner review mode is explicitly enabled with `--include-challengers`, load only the newest `CANDIDATE`/`CHALLENGER` generation for the active feature-manifest hash. Keep older model artifacts registered for audit history, but do not mix them into the current scanner run.
