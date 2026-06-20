@@ -55,3 +55,17 @@ Reason: Streamlit provides the fastest path to inspect data quality, RSI candida
 Decision: Treat dashboard and CLI FMP downloads as non-destructive updates. Existing ticker CSVs are loaded, newly downloaded rows replace matching dates, new dates are inserted, the merged OHLCV frame is validated, and the final file is saved atomically.
 
 Reason: A narrow refresh window must not silently truncate broader local history. Destructive replacement remains out of scope for Dashboard V0.1 unless it is later added as an explicit confirmed action.
+
+## 2026-06-19 — Dashboard navigation and audit scopes are explicit
+
+Decision: Dashboard V0.2 uses explicit `st.navigation` / `st.Page` registrations from `dashboard/app.py` and keeps page renderers in `dashboard/sections/`. Streamlit's auto-discovered `dashboard/pages/*.py` page files are not used.
+
+Reason: Filename-derived page labels produced an unprofessional sidebar and exposed `app` as a user-facing page. The dashboard must show exactly the five research sections in the required order.
+
+Decision: Data and Audit displays selected research-window audits separately from full raw-file audits.
+
+Reason: A selected 10-year window must not show older raw-file rows or largest moves as if they belong to the selected window. Full raw history remains visible in its own tab for coverage review.
+
+Decision: Ticker symbols are normalized through one application-level function before provider calls or storage naming.
+
+Reason: A filename such as `AAPL.csv` is not a provider ticker. Normalization prevents accidental filename submission to FMP while preserving valid symbols such as `BRK.B` and `BRK-B`.

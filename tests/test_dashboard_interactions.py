@@ -32,10 +32,12 @@ def _assert_no_streamlit_exceptions(app: Any) -> None:
 
 
 def test_rsi_explorer_controls_smoke(demo_dashboard_root: Path) -> None:
-    app = AppTest.from_file("dashboard/pages/rsi_explorer.py").run(timeout=30)
+    app = AppTest.from_file("dashboard/sections/rsi_explorer.py").run(timeout=30)
     _assert_no_streamlit_exceptions(app)
 
-    app.selectbox[0].set_value("DEMO - DEMO.csv")
+    assert "DEMO" in app.selectbox[0].options
+    assert all(".csv" not in str(option).lower() for option in app.selectbox[0].options)
+    app.selectbox[0].set_value("DEMO")
     app.slider[0].set_value(12)
     app.slider[1].set_value(38)
     app.selectbox[1].set_value("turn_up_below")
@@ -54,30 +56,34 @@ def test_rsi_explorer_controls_smoke(demo_dashboard_root: Path) -> None:
 def test_data_audit_end_date_stays_editable_when_optional(
     demo_dashboard_root: Path,
 ) -> None:
-    app = AppTest.from_file("dashboard/pages/data_audit.py").run(timeout=30)
+    app = AppTest.from_file("dashboard/sections/data_audit.py").run(timeout=30)
     _assert_no_streamlit_exceptions(app)
 
-    end_date = next(widget for widget in app.date_input if widget.label == "End date")
+    end_date = next(widget for widget in app.date_input if widget.label == "Request end date")
+    custom_end_date = next(widget for widget in app.date_input if widget.label == "End date")
     assert end_date.disabled is False
-    assert app.checkbox[0].label == "Use end date in download request"
+    assert custom_end_date.disabled is False
+    assert app.checkbox[0].label == "Use end date in request"
     assert app.checkbox[0].value is True
 
     app.checkbox[0].set_value(False)
     app.run(timeout=30)
 
     _assert_no_streamlit_exceptions(app)
-    end_date = next(widget for widget in app.date_input if widget.label == "End date")
+    end_date = next(widget for widget in app.date_input if widget.label == "Request end date")
     assert end_date.disabled is False
     assert app.checkbox[0].value is False
+    assert "DEMO" in app.selectbox[0].options
+    assert "DEMO.csv" not in {str(option) for option in app.selectbox[0].options}
 
 
 def test_quick_research_submission_and_candidate_selection_smoke(
     demo_dashboard_root: Path,
 ) -> None:
-    app = AppTest.from_file("dashboard/pages/research_backtest.py").run(timeout=30)
+    app = AppTest.from_file("dashboard/sections/research_backtest.py").run(timeout=30)
     _assert_no_streamlit_exceptions(app)
 
-    app.selectbox[0].set_value("DEMO - DEMO.csv")
+    app.selectbox[0].set_value("DEMO")
     app.number_input[2].set_value(5)
     app.button[0].click()
     app.run(timeout=120)
@@ -96,10 +102,10 @@ def test_quick_research_submission_and_candidate_selection_smoke(
 
 
 def test_walk_forward_submission_smoke(demo_dashboard_root: Path) -> None:
-    app = AppTest.from_file("dashboard/pages/walk_forward.py").run(timeout=30)
+    app = AppTest.from_file("dashboard/sections/walk_forward.py").run(timeout=30)
     _assert_no_streamlit_exceptions(app)
 
-    app.selectbox[0].set_value("DEMO - DEMO.csv")
+    app.selectbox[0].set_value("DEMO")
     app.number_input[2].set_value(5)
     app.button[0].click()
     app.run(timeout=120)
@@ -109,3 +115,24 @@ def test_walk_forward_submission_smoke(demo_dashboard_root: Path) -> None:
         subheader.value == "Out-of-sample walk-forward results" for subheader in app.subheader
     )
     assert len(app.dataframe) >= 3
+
+
+def test_dashboard_app_startup_smoke_no_network(demo_dashboard_root: Path) -> None:
+    app = AppTest.from_file("dashboard/app.py").run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert any(title.value == "Overview" for title in app.title)
+
+
+def test_every_dashboard_section_renders_without_streamlit_exceptions(
+    demo_dashboard_root: Path,
+) -> None:
+    for path in (
+        "dashboard/sections/overview.py",
+        "dashboard/sections/data_audit.py",
+        "dashboard/sections/rsi_explorer.py",
+        "dashboard/sections/research_backtest.py",
+        "dashboard/sections/walk_forward.py",
+    ):
+        app = AppTest.from_file(path).run(timeout=30)
+        _assert_no_streamlit_exceptions(app)

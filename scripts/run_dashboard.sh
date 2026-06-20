@@ -8,10 +8,9 @@ export PYTHONPATH="${ROOT_DIR}/src:${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export HOME="${ROOT_DIR}"
 export STREAMLIT_CONFIG_DIR="${ROOT_DIR}/.streamlit"
 export STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+export STREAMLIT_CLIENT_TOOLBAR_MODE=minimal
 mkdir -p "${STREAMLIT_CONFIG_DIR}"
-if [[ ! -f "${STREAMLIT_CONFIG_DIR}/config.toml" ]]; then
-  printf '[browser]\ngatherUsageStats = false\n' > "${STREAMLIT_CONFIG_DIR}/config.toml"
-fi
+printf '[browser]\ngatherUsageStats = false\n\n[client]\ntoolbarMode = "minimal"\n' > "${STREAMLIT_CONFIG_DIR}/config.toml"
 if [[ ! -f "${STREAMLIT_CONFIG_DIR}/credentials.toml" ]]; then
   printf '[general]\nemail = ""\n' > "${STREAMLIT_CONFIG_DIR}/credentials.toml"
 fi

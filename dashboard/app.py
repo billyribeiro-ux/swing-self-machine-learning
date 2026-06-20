@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from dashboard.sections.overview import render_page
 from dashboard.ui.components import configure_page
+from dashboard.ui.navigation import streamlit_pages
 
 
 def main() -> None:
     configure_page("Swing RSI Dashboard")
-    render_page()
+    import streamlit as st
+
+    page = st.navigation(streamlit_pages(st), position="sidebar")
+    page.run()
 
 
 if __name__ == "__main__":

@@ -58,6 +58,16 @@ Open the local research dashboard:
 
 The dashboard is a temporary local Streamlit presentation layer over the typed Python research modules. It is not a production trading application. The long-term UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary.
 
+Dashboard sections:
+
+1. Overview
+2. Data and Audit
+3. RSI Explorer
+4. Research and Backtest
+5. Walk-Forward Validation
+
+Dataset updates in the dashboard are merge-safe: existing ticker history is preserved, overlapping dates are replaced by newly downloaded values, duplicates are removed, the merged OHLCV data is validated, and the CSV is written atomically. The dashboard displays ticker symbols such as `AAPL`, not filenames such as `AAPL.csv`, as provider symbols.
+
 ## Download real daily data from FMP
 
 ```bash

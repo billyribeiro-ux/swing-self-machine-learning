@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 import pytest
+from dashboard.ui.formatting import date_label, percent
 
 from swing_rsi.application.datasets import (
+    dataset_cache_key,
     discover_raw_datasets,
     download_daily_to_raw,
+    normalize_ticker,
     slice_date_window,
     structural_audit_csv,
+    structural_audit_frame,
 )
 from swing_rsi.application.project_status import collect_project_status
 from swing_rsi.application.research_service import (
@@ -53,6 +58,30 @@ def _fixed_downloader(frame: pd.DataFrame):
         return frame.copy()
 
     return download
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("aapl", "AAPL"),
+        (" AAPL ", "AAPL"),
+        ("AAPL.csv", "AAPL"),
+        ("aapl.CSV", "AAPL"),
+        ("brk.b", "BRK.B"),
+        ("BRK-B.csv", "BRK-B"),
+    ],
+)
+def test_normalize_ticker_returns_provider_symbol(raw: str, expected: str) -> None:
+    assert normalize_ticker(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["../../AAPL.csv", "../AAPL", "data/raw/AAPL.csv", "AAPL/B", "AAPL\\B", "AAPL$"],
+)
+def test_normalize_ticker_rejects_paths_and_unsupported_values(raw: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_ticker(raw)
 
 
 def test_project_status_never_returns_api_key(
@@ -123,6 +152,71 @@ def test_structural_audit_counts_known_errors(tmp_path: Path) -> None:
     assert audit.invalid_ohlc_rows == 1
     assert audit.nonpositive_price_rows == 1
     assert len(audit.largest_close_moves) > 0
+
+
+def test_selected_window_audit_excludes_older_rows_and_moves() -> None:
+    dates = pd.to_datetime(["2006-01-03", "2008-10-10", "2016-06-20", "2020-03-16", "2026-06-19"])
+    close = pd.Series([100.0, 190.0, 102.0, 92.0, 110.0], index=dates)
+    frame = pd.DataFrame(
+        {
+            "Open": close,
+            "High": close + 2.0,
+            "Low": close - 2.0,
+            "Close": close,
+            "Volume": 1_000_000.0,
+        },
+        index=dates.rename("Date"),
+    )
+
+    window = slice_date_window(frame, start="2016-01-01", end="2026-12-31")
+    selected_audit = structural_audit_frame(window)
+    raw_audit = structural_audit_frame(frame)
+
+    assert selected_audit.row_count == 3
+    assert selected_audit.first_date == "2016-06-20"
+    assert selected_audit.last_date == "2026-06-19"
+    assert raw_audit.row_count == 5
+    assert raw_audit.first_date == "2006-01-03"
+    assert pd.Timestamp("2008-10-10") in set(pd.to_datetime(raw_audit.first_rows["Date"]))
+    selected_move_dates = set(pd.to_datetime(selected_audit.largest_close_moves["Date"]))
+    assert all(value >= pd.Timestamp("2016-01-01") for value in selected_move_dates)
+    assert pd.Timestamp("2008-10-10") not in selected_move_dates
+    assert pd.to_datetime(selected_audit.first_rows["Date"]).min() >= pd.Timestamp("2016-01-01")
+    assert pd.to_datetime(selected_audit.last_rows["Date"]).min() >= pd.Timestamp("2016-01-01")
+
+
+def test_structural_audit_frame_uses_the_supplied_dataframe(simple_ohlcv: pd.DataFrame) -> None:
+    window = slice_date_window(simple_ohlcv, start="2020-03-01", end="2020-04-01")
+
+    audit = structural_audit_frame(window)
+
+    assert audit.row_count == len(window)
+    assert audit.first_date == pd.Timestamp(window.index.min()).date().isoformat()
+    assert audit.last_date == pd.Timestamp(window.index.max()).date().isoformat()
+
+
+def test_display_formatting_uses_percentages_and_date_labels() -> None:
+    assert percent(0.179) == "17.90%"
+    assert date_label(pd.Timestamp("2024-01-02 00:00:00")) == "2024-01-02"
+
+
+def test_dataset_cache_key_changes_after_file_modification(
+    tmp_path: Path,
+    simple_ohlcv: pd.DataFrame,
+) -> None:
+    path = tmp_path / "AAPL.csv"
+    save_ohlcv_csv(simple_ohlcv, path)
+    first = dataset_cache_key(path)
+    time.sleep(0.01)
+    changed = simple_ohlcv.copy()
+    changed.iloc[-1, changed.columns.get_loc("Close")] += 1.0
+    changed.iloc[-1, changed.columns.get_loc("High")] += 1.0
+    save_ohlcv_csv(changed, path)
+
+    second = dataset_cache_key(path)
+
+    assert first.path == second.path
+    assert first.modified_ns != second.modified_ns
 
 
 def test_candidate_grid_count_is_correct() -> None:

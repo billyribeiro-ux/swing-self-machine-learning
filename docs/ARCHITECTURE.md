@@ -52,6 +52,9 @@ src/swing_rsi/
   sample_data.py            deterministic plumbing-only demo data
   cli.py                    user-facing commands
 dashboard/                  local Streamlit presentation layer
+  app.py                    explicit st.navigation entrypoint
+  sections/                 five page renderers
+  ui/                       local formatting, chart, cache, and error helpers
 ```
 
 ## Provider boundary
@@ -78,6 +81,24 @@ Version 1 signals are known only after a daily bar closes. The default simulated
 ## Local dashboard boundary
 
 The Streamlit dashboard is a local-only presentation layer. It calls reusable Python services under `src/swing_rsi/application/` and does not duplicate market-data, RSI, signal, backtest, research, or walk-forward logic inside dashboard pages.
+
+Dashboard navigation is explicit. `dashboard/app.py` registers exactly five pages with `st.navigation` / `st.Page`:
+
+1. Overview
+2. Data and Audit
+3. RSI Explorer
+4. Research and Backtest
+5. Walk-Forward Validation
+
+Streamlit auto-discovered `dashboard/pages/*.py` page files are not used, because filename-derived labels caused confusing navigation.
+
+The Data and Audit page uses `swing_rsi.application.datasets.structural_audit_frame` for both selected-window and full-raw-file audits. Selected-window metrics and tables are calculated only from the sliced dataframe; raw-file metrics and tables remain visibly separate.
+
+Ticker input is normalized at the application boundary with `normalize_ticker`, which strips a single trailing `.csv`, uppercases the provider symbol, preserves valid period/hyphen symbols, and rejects path or traversal input.
+
+The dashboard may cache deterministic local CSV reads by file path and modification time through `dashboard/ui/cache.py`. It does not cache API keys, FMP update requests, file writes, research runs, walk-forward runs, or append-only actions.
+
+Expected dashboard errors are handled with concise user-facing messages. Unexpected dashboard errors are logged to ignored local files under `logs/`.
 
 Streamlit is temporary local presentation infrastructure. The long-term UI may later be replaced by SvelteKit over a typed FastAPI/OpenAPI boundary, but no separate API or deployment layer exists in this milestone.
 

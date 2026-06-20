@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.2-dashboard-v0.2 — 2026-06-19
+
+- Replaced Streamlit filename-derived multipage navigation with explicit `st.navigation` / `st.Page` registration.
+- Moved active page renderers to `dashboard/sections/` and removed auto-discovered `dashboard/pages/*.py` source files.
+- Added ticker normalization so filename input such as `AAPL.csv` becomes provider symbol `AAPL` and path/traversal input is rejected.
+- Split Data and Audit into separate selected-window and full-raw-file audit scopes.
+- Added pure dataframe structural auditing through `structural_audit_frame`.
+- Added readable dashboard display formatting for dates, prices, percentages, volume, and table column names.
+- Reworked Data and Audit download controls into explicit update-existing and custom-download workflows.
+- Added mtime-keyed local CSV read caching and cache invalidation after successful dataset updates.
+- Added dashboard error handling with concise UI messages and ignored local logs for unexpected exceptions.
+- Added walk-forward configuration prevalidation in the application service wrapper.
+- Added tests for navigation order, ticker normalization, selected-window audit behavior, formatting, cache invalidation, AppTest interactions, and no-network dashboard startup.
+
 ## 0.1.2 — 2026-06-19
 
 - Added local Streamlit research dashboard scaffold with overview, data audit, RSI explorer, research/backtest, and walk-forward pages.

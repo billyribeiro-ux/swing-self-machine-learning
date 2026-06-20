@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -14,6 +15,8 @@ from swing_rsi.reports.writer import atomic_write_csv
 
 type DateLike = date | str | pd.Timestamp
 type DailyDownloader = Callable[[str, str | None, str | None, str], pd.DataFrame]
+
+_TICKER_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.-]*$")
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,7 @@ class DownloadResult:
 
 @dataclass(frozen=True)
 class StructuralAudit:
-    path: Path
+    path: Path | None
     row_count: int
     first_date: str | None
     last_date: str | None
@@ -55,6 +58,31 @@ class StructuralAudit:
     largest_close_moves: pd.DataFrame
     first_rows: pd.DataFrame
     last_rows: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class DatasetCacheKey:
+    path: Path
+    modified_ns: int
+
+
+def normalize_ticker(value: str) -> str:
+    """Return a provider symbol, not a filename or path."""
+    raw = value.strip()
+    if not raw:
+        raise ValueError("Ticker is required")
+    if "/" in raw or "\\" in raw or ".." in raw:
+        raise ValueError("Ticker must be a symbol, not a path")
+    if raw.lower().endswith(".csv"):
+        raw = raw[:-4].strip()
+    symbol = raw.upper()
+    if not symbol:
+        raise ValueError("Ticker is required")
+    if "/" in symbol or "\\" in symbol or ".." in symbol:
+        raise ValueError("Ticker must be a symbol, not a path")
+    if _TICKER_PATTERN.fullmatch(symbol) is None:
+        raise ValueError("Ticker may contain only letters, numbers, periods, and hyphens")
+    return symbol
 
 
 def _iso_date(value: date | datetime | str | pd.Timestamp | None) -> str | None:
@@ -75,7 +103,10 @@ def discover_raw_datasets(root: str | Path) -> tuple[DatasetSummary, ...]:
 
     summaries: list[DatasetSummary] = []
     for path in sorted(raw_directory.glob("*.csv")):
-        ticker = path.stem.upper()
+        try:
+            ticker = normalize_ticker(path.name)
+        except ValueError:
+            continue
         try:
             frame = load_ohlcv_csv(path)
         except (FileNotFoundError, ValueError) as exc:
@@ -107,6 +138,11 @@ def discover_raw_datasets(root: str | Path) -> tuple[DatasetSummary, ...]:
 
 def load_raw_dataset(path: str | Path) -> pd.DataFrame:
     return load_ohlcv_csv(path)
+
+
+def dataset_cache_key(path: str | Path) -> DatasetCacheKey:
+    source = Path(path)
+    return DatasetCacheKey(path=source.resolve(), modified_ns=source.stat().st_mtime_ns)
 
 
 def slice_date_window(
@@ -164,7 +200,7 @@ def download_daily_to_raw(
 
     paths = ProjectPaths(Path(root))
     paths.ensure()
-    symbol = ticker.strip().upper()
+    symbol = normalize_ticker(ticker)
     output = paths.raw_data / f"{symbol}.csv"
 
     existing = load_ohlcv_csv(output) if output.exists() else None
@@ -190,7 +226,16 @@ def download_daily_to_raw(
 
 def structural_audit_csv(path: str | Path) -> StructuralAudit:
     source = Path(path)
-    raw = normalize_ohlcv_columns(pd.read_csv(source))
+    return structural_audit_frame(pd.read_csv(source), path=source)
+
+
+def structural_audit_frame(frame: pd.DataFrame, path: str | Path | None = None) -> StructuralAudit:
+    source = Path(path) if path is not None else None
+    raw = normalize_ohlcv_columns(frame)
+    if "Date" not in raw.columns and isinstance(raw.index, pd.DatetimeIndex):
+        raw = raw.reset_index()
+        if "index" in raw.columns and "Date" not in raw.columns:
+            raw = raw.rename(columns={"index": "Date"})
     row_count = len(raw)
     missing_columns = tuple(column for column in REQUIRED_COLUMNS if column not in raw.columns)
 

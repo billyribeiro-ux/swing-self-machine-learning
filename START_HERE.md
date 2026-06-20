@@ -28,7 +28,9 @@ python -m swing_rsi.cli demo
 ./scripts/run_dashboard.sh
 ```
 
-The dashboard is local research tooling only. It is not a production trading application.
+The dashboard is local research tooling only. It is not a production trading application. It opens exactly five sections: Overview, Data and Audit, RSI Explorer, Research and Backtest, and Walk-Forward Validation.
+
+In Data and Audit, ticker fields display provider symbols such as `AAPL`, not filenames such as `AAPL.csv`. Update Existing Dataset preserves older stored history and merges new FMP rows by date.
 
 7. Download the first real dataset:
 

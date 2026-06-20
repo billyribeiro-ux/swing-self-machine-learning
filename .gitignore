@@ -10,6 +10,7 @@ __pycache__/
 .streamlit/
 .coverage
 htmlcov/
+logs/
 build/
 dist/
 *.egg-info/

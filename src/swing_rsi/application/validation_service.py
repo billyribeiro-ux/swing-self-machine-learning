@@ -7,7 +7,7 @@ import pandas as pd
 
 from swing_rsi.application.datasets import DateLike, slice_date_window
 from swing_rsi.application.research_service import GridPreset, candidate_rule_count, grid_for_preset
-from swing_rsi.research.walk_forward import run_walk_forward
+from swing_rsi.research.walk_forward import expanding_splits, run_walk_forward
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,12 @@ class WalkForwardRun:
     folds: pd.DataFrame
     aggregate: WalkForwardAggregate
     candidate_count: int
+
+
+def validate_walk_forward_configuration(sample_count: int, n_splits: int, gap: int) -> None:
+    if sample_count <= 0:
+        raise ValueError("Selected walk-forward window contains no rows")
+    expanding_splits(sample_count, n_splits=n_splits, gap=gap)
 
 
 def _empty_parameter_stability() -> pd.DataFrame:
@@ -135,8 +141,7 @@ def run_walk_forward_validation(
     grid_preset: GridPreset,
 ) -> WalkForwardRun:
     window = slice_date_window(frame, start=start, end=end)
-    if window.empty:
-        raise ValueError("Selected walk-forward window contains no rows")
+    validate_walk_forward_configuration(len(window), n_splits=n_splits, gap=gap)
     grid = grid_for_preset(grid_preset)
     folds = run_walk_forward(
         window,
