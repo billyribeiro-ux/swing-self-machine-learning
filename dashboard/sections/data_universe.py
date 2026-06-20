@@ -49,3 +49,7 @@ def render_page() -> None:
             rows = pd.DataFrame([row.__dict__ for row in result.results])
             streamlit.success("Universe update completed. Symbols with errors were recorded.")
             streamlit.dataframe(display_frame(rows), width="stretch", hide_index=True)
+
+
+if __name__ == "__main__":
+    render_page()

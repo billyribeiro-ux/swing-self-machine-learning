@@ -33,3 +33,7 @@ def render_page() -> None:
     else:
         from dashboard.sections.walk_forward import render_page as render_legacy
     render_legacy()
+
+
+if __name__ == "__main__":
+    render_page()

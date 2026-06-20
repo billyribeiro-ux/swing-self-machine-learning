@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 from dashboard.ui.components import render_page_header, repository_root, st
 from dashboard.ui.formatting import display_frame
-from swing_rsi.application.engine_service import latest_scanner_snapshot
+from swing_rsi.application.engine_service import (
+    latest_scanner_snapshot,
+    load_engine_universe,
+    load_universe_frames,
+)
 
 
 def render_page() -> None:
@@ -27,6 +33,17 @@ def render_page() -> None:
     columns[0].metric("Probability", f"{float(row['calibrated_probability']):.2%}")
     columns[1].metric("Expected return", f"{float(row['expected_return']):.2%}")
     columns[2].metric("Utility", f"{float(row['composite_utility_score']):.4f}")
+    streamlit.subheader("Recent Price Context")
+    try:
+        universe = load_engine_universe(root)
+        frame = load_universe_frames(root, universe).get(str(row["ticker"]))
+    except (FileNotFoundError, RuntimeError, ValueError):
+        frame = None
+    if frame is None or frame.empty:
+        streamlit.info("No local OHLCV frame is available for this ticker.")
+    else:
+        price = frame.loc[frame.index <= pd.Timestamp(str(row["as_of_date"]))].tail(252)
+        streamlit.line_chart(price[["Close"]])
     streamlit.subheader("Model Contribution Share")
     streamlit.write(row.get("top_attribution_categories", "n/a"))
     streamlit.subheader("Supporting Evidence")
@@ -35,7 +52,41 @@ def render_page() -> None:
     streamlit.write(row.get("top_confirming_relationships", "n/a"))
     streamlit.subheader("Divergences")
     streamlit.write(row.get("top_divergences", "n/a"))
+    streamlit.subheader("Historical Analogs")
+    try:
+        analogs = pd.DataFrame(json.loads(str(row.get("historical_analogs", "[]"))))
+    except json.JSONDecodeError:
+        analogs = pd.DataFrame()
+    if analogs.empty:
+        streamlit.info("No compact analog records are available for this candidate.")
+    else:
+        streamlit.dataframe(display_frame(analogs), width="stretch", hide_index=True)
+    streamlit.subheader("Model And Snapshot Details")
+    streamlit.dataframe(
+        display_frame(
+            pd.DataFrame(
+                [
+                    {
+                        "model_id": row.get("model_id"),
+                        "model_state": row.get("model_state"),
+                        "feature_snapshot_hash": row.get("feature_snapshot_hash"),
+                        "candidate_status": row.get("candidate_status"),
+                        "exclusion_reason": row.get("exclusion_reason"),
+                        "target_before_stop_probability": row.get("target_before_stop_probability"),
+                        "expected_mfe": row.get("expected_mfe"),
+                        "expected_mae": row.get("expected_mae"),
+                    }
+                ]
+            )
+        ),
+        width="stretch",
+        hide_index=True,
+    )
     streamlit.subheader("Raw Candidate Row")
     streamlit.dataframe(
         display_frame(pd.DataFrame([row.to_dict()])), width="stretch", hide_index=True
     )
+
+
+if __name__ == "__main__":
+    render_page()

@@ -36,6 +36,29 @@ def render_page() -> None:
     )
     streamlit.subheader("Equity")
     if not result.equity.empty:
-        streamlit.line_chart(result.equity.set_index("trade_number")["equity"])
+        equity = result.equity.copy()
+        if "Date" in equity.columns and "equity" in equity.columns:
+            streamlit.line_chart(equity.set_index("Date")["equity"])
+        if "Date" in equity.columns and "drawdown" in equity.columns:
+            streamlit.subheader("Drawdown")
+            streamlit.line_chart(equity.set_index("Date")["drawdown"])
     streamlit.subheader("Trade Ledger")
     streamlit.dataframe(display_frame(result.trades), width="stretch", hide_index=True)
+    streamlit.subheader("Candidate Audit")
+    streamlit.dataframe(display_frame(result.candidate_audit), width="stretch", hide_index=True)
+    for title, frame in (
+        ("Yearly Results", result.yearly_returns),
+        ("Regime Results", result.regime_returns),
+        ("Sector Results", result.sector_returns),
+        ("Symbol Results", result.symbol_returns),
+        ("Model Version Results", result.model_version_returns),
+    ):
+        streamlit.subheader(title)
+        if frame.empty:
+            streamlit.info("No rows available for this breakdown.")
+        else:
+            streamlit.dataframe(display_frame(frame), width="stretch", hide_index=True)
+
+
+if __name__ == "__main__":
+    render_page()

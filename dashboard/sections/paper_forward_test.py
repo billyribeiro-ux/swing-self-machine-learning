@@ -32,3 +32,7 @@ def render_page() -> None:
             width="stretch",
             hide_index=True,
         )
+
+
+if __name__ == "__main__":
+    render_page()

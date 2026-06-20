@@ -100,3 +100,7 @@ def render_page() -> None:
         }
     )
     streamlit.dataframe(display, width="stretch", hide_index=True)
+
+
+if __name__ == "__main__":
+    render_page()

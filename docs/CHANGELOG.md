@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tightened scanner dashboard lifecycle evidence display: direct AppTest execution now runs every primary scanner section, Candidate Attribution displays recent price context, parsed historical analogs, and model/snapshot details, and Portfolio Backtests renders equity, drawdown, trade ledger, candidate audit, and return breakdowns from actionable scanner snapshots.
 - Completed the remaining autonomous scanner audit gaps: added a formal model plugin registry, temporal-fold and exceptional-period quality gates, expanded drift checks for relationship/regime, realized-performance, and calibration shifts, target-before-stop outcomes in analog payloads, portfolio candidate-audit rows, and symbol-level return output.
 - Changed scanner candidate fallback so `--include-challengers` uses only the newest candidate generation for the active feature manifest when no champion exists, preventing stale artifacts from mixing into current scanner evidence.
 - Added explicit `scan --update-data` and `scan --universe` controls so universe updates can be part of the scanner workflow without making external provider calls on ordinary scans.

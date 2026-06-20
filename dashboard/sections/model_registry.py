@@ -46,3 +46,7 @@ def render_page() -> None:
                 streamlit.error(str(exc))
             else:
                 streamlit.success(f"Promoted champion: {promoted.model_id}")
+
+
+if __name__ == "__main__":
+    render_page()

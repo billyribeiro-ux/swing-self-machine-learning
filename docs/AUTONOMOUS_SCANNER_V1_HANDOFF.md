@@ -11,6 +11,7 @@ Generated: 2026-06-20 America/New_York
   - `b5b985a` — `feat: complete scanner diagnostics and forward lifecycle`
   - `00717b7` — `docs: finalize autonomous scanner handoff`
   - `6e20ea3` — `feat: harden autonomous scanner evidence pipeline`
+  - `e6b1c69` — `feat: complete autonomous scanner evidence gaps`
 - This document describes the verified state after the current completion pass. The final local completion commit hash is reported in the Codex conversation after the commit is created.
 - Remote push: not pushed.
 - Secrets: `.env` was not opened, printed, staged, committed, or copied.
@@ -354,6 +355,13 @@ Primary sections:
 
 Legacy RSI tools remain under Baselines and Legacy RSI.
 
+Current dashboard evidence behavior:
+
+- Each primary scanner section can be executed directly by Streamlit AppTest.
+- Candidate Attribution displays the selected candidate's recent local OHLCV price context, model contribution groups, supporting evidence, confirming relationships, divergences, parsed historical analog records, and model/snapshot details.
+- Portfolio Backtests replays the latest scanner snapshot and displays metrics, daily equity, daily drawdown, trade ledger, candidate audit rows, yearly results, regime results, sector results, symbol results, and model-version results.
+- The canonical lifecycle is represented as: historical research/backtest, discovered settings, frozen registered model version, scanner snapshot, paper signal/event, next-open paper entry, open-position tracking, paper exit, and append-only forward-test result.
+
 Launch command:
 
 ```bash
@@ -385,7 +393,7 @@ Daily wrapper:
 Automated tests:
 
 - Command: `.venv/bin/pytest`
-- Result: 79 collected, 79 passed, 0 failed, 0 skipped.
+- Result: 81 collected, 81 passed, 0 failed, 0 skipped.
 - Warnings: 161. They are pandas fragmentation warnings in feature construction plus one joblib CPU-count warning in the sandbox.
 
 Quality checks:
@@ -426,7 +434,8 @@ Streamlit smoke:
 Dashboard AppTest:
 
 - Included in `.venv/bin/pytest` via `tests/test_dashboard_interactions.py`.
-- Six dashboard interaction tests passed.
+- Eight dashboard interaction tests passed.
+- The interaction tests cover RSI Explorer controls, Data and Audit date inputs, Quick Research submission, candidate selection, Walk-Forward submission, app startup, every dashboard section rendering, Candidate Attribution scanner evidence rendering, and Portfolio Backtests scanner replay rendering.
 
 ## Security Audit
 
