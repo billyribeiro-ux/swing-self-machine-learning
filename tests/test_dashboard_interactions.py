@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from swing_rsi.data.loader import load_ohlcv_csv, save_ohlcv_csv
+from swing_rsi.engine.registry import RegisteredModel, register_model
 from swing_rsi.sample_data import generate_sample_ohlcv
 
 streamlit_testing = pytest.importorskip("streamlit.testing.v1")
@@ -102,6 +103,41 @@ def _write_demo_scanner_snapshot(root: Path) -> Path:
         ]
     ).to_csv(path, index=False)
     return path
+
+
+def _registered_dashboard_model(model_id: str = "1234567890abcdef12345678") -> RegisteredModel:
+    return RegisteredModel(
+        model_id=model_id,
+        task="probability_positive_return",
+        horizon=10,
+        direction="bull",
+        family="hist_gradient_boosting",
+        state="CANDIDATE",
+        training_start="2020-01-01",
+        training_end="2021-01-01",
+        validation_start="2021-01-04",
+        validation_end="2021-06-01",
+        holdout_start="2021-06-02",
+        holdout_end="2022-01-01",
+        universe_snapshot_id="universe",
+        feature_manifest_hash="features",
+        raw_manifest_hashes=(),
+        hyperparameters={},
+        metrics={
+            "training_samples": 1200,
+            "holdout_samples": 300,
+            "selected_holdout_samples": 42,
+            "holdout_win_rate": 0.571,
+            "holdout_mean_return_lcb_90": -0.0123,
+            "holdout_profit_factor": 1.234,
+            "holdout_max_drawdown": -0.0876,
+        },
+        calibration_metrics={"holdout_brier": 0.2174},
+        quality_gates={"minimum_training_samples": True, "profit_factor_min_090": False},
+        artifact_path="artifacts/models/model.joblib",
+        code_commit_hash="abcdef",
+        created_at_utc="2026-06-20T12:34:56+00:00",
+    )
 
 
 def test_rsi_explorer_controls_smoke(demo_dashboard_root: Path) -> None:
@@ -252,3 +288,20 @@ def test_portfolio_backtest_renders_actionable_scanner_replay(
     assert "Trade Ledger" in subheaders
     assert "Candidate Audit" in subheaders
     assert len(app.dataframe) >= 3
+
+
+def test_model_registry_renders_compact_table_with_registered_models(
+    demo_dashboard_root: Path,
+) -> None:
+    register_model(
+        demo_dashboard_root / "state" / "engine.sqlite3",
+        _registered_dashboard_model(),
+    )
+
+    app = AppTest.from_file("dashboard/sections/model_registry.py").run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert any("Compact default view" in caption.value for caption in app.caption)
+    assert app.selectbox[0].label == "Selected model details"
+    assert app.selectbox[1].label == "Model to promote"
+    assert len(app.dataframe) >= 1
