@@ -18,10 +18,12 @@ The wrapper script is:
 2. Optionally update local universe data through the existing provider abstraction.
 3. Rebuild autonomous features and labels.
 4. Run discovery only if no champion, challenger, or retained candidate exists.
-5. Run the live scanner.
-6. Append forward-test events from the scanner snapshot.
-7. Mark the market date as completed in SQLite.
-8. Release the lock.
+5. Advance existing paper-forward entries and open positions using newly available bars.
+6. Run the live scanner.
+7. Run drift checks for the scanned model set.
+8. Append forward-test events from the scanner snapshot.
+9. Mark the market date as completed in SQLite.
+10. Release the lock.
 
 ## Idempotency
 

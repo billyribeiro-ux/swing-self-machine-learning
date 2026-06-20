@@ -13,9 +13,9 @@ def render_page() -> None:
     render_page_header(
         "Paper Forward Test", "Append-only paper events for frozen model scanner signals."
     )
-    if streamlit.button("Create pending events from latest scanner snapshot"):
+    if streamlit.button("Advance paper state and record latest scanner snapshot"):
         count = run_forward_update(root)
-        streamlit.success(f"Created {count:,} pending/actionable signal event groups.")
+        streamlit.success(f"Created {count:,} new append-only paper-forward events.")
     positions = reconstruct_positions(ProjectPaths(root).engine_db)
     streamlit.subheader("Reconstructed Position State")
     if positions.empty:

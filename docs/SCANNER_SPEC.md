@@ -44,6 +44,7 @@ Snapshots include:
 - confirming relationships;
 - divergences;
 - model ID;
+- model state;
 - feature snapshot hash;
 - candidate status;
 - exclusion reason.

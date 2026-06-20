@@ -15,7 +15,7 @@ Version 1 includes:
 - Live scanner snapshots with probabilistic market attribution and historical analogs
 - Portfolio-level backtesting of scanner outputs
 - Honest next-session entries
-- Append-only paper-forward signal and pending-entry records
+- Append-only paper-forward signals, pending entries, next-session paper fills, daily marks, and time exits
 - Legacy RSI research and historical walk-forward tools under Baselines and Legacy RSI
 
 Version 1 excludes options, gamma, implied volatility, intraday data, market internals, NLP/news attribution, live brokerage execution, deep learning, and reinforcement learning.
@@ -102,6 +102,8 @@ python -m swing_rsi.cli forward-update
 ```
 
 Use `--include-challengers` only for inspection when no champion has passed promotion gates yet. Discovery never silently promotes a model.
+
+`forward-update` is append-only and idempotent: it advances existing paper entries/positions from newly available bars and records the latest scanner snapshot without rewriting old events.
 
 Run the idempotent daily cycle:
 

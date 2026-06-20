@@ -7,10 +7,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from swing_rsi.engine.drift import build_drift_report
 from swing_rsi.engine.features import build_feature_panel, reject_label_columns
-from swing_rsi.engine.forward import create_pending_events_from_snapshot, list_forward_events
+from swing_rsi.engine.forward import (
+    advance_forward_positions,
+    create_pending_events_from_snapshot,
+    list_forward_events,
+)
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
-from swing_rsi.engine.models import ModelBundle
+from swing_rsi.engine.models import BaseRateClassifier, ModelBundle
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import RegisteredModel, promote_model, register_model
 from swing_rsi.engine.scanner import ScannerConfig, run_scanner
@@ -171,6 +176,40 @@ def test_model_registry_is_immutable_and_promotion_is_explicit(tmp_path: Path) -
     assert promoted.state == "CHAMPION"
 
 
+def test_naive_base_rate_classifier_is_deterministic_baseline() -> None:
+    classifier = BaseRateClassifier().fit(
+        pd.DataFrame({"feature": [1.0, 2.0, 3.0, 4.0]}),
+        pd.Series([0, 1, 1, 1]),
+    )
+
+    probabilities = classifier.predict_proba(pd.DataFrame({"feature": [10.0, 20.0]}))
+
+    assert probabilities.shape == (2, 2)
+    assert probabilities[:, 1].tolist() == pytest.approx([0.75, 0.75])
+
+
+def test_drift_report_flags_shift_without_mutating_models() -> None:
+    reference = pd.DataFrame({"feature_a": [0.0, 1.0, 2.0, 3.0], "feature_b": [10.0] * 4})
+    current = pd.DataFrame({"feature_a": [10.0, 11.0], "feature_b": [10.0, 10.0]})
+
+    report = build_drift_report(
+        model_id="model-a",
+        as_of_date="2024-01-02",
+        reference_features=reference,
+        current_features=current,
+        feature_columns=("feature_a", "feature_b"),
+        reference_probabilities=np.array([0.45, 0.50, 0.55]),
+        current_probabilities=np.array([0.90, 0.92]),
+    )
+
+    assert report.model_id == "model-a"
+    assert report.alert_count == 2
+    assert {metric.name for metric in report.metrics} == {
+        "feature_distribution_mean_abs_z",
+        "prediction_probability_mean_shift",
+    }
+
+
 def _bundle(model_id: str = "model-a") -> ModelBundle:
     training = pd.DataFrame({"f1": [0.0, 1.0, 2.0], "dollar_volume": [10_000_000.0] * 3})
     labels = pd.DataFrame(
@@ -269,6 +308,45 @@ def test_forward_events_are_append_only_and_idempotent(tmp_path: Path) -> None:
 
     assert len(events) == 2
     assert set(events["event_type"]) == {"SIGNAL_CREATED", "ENTRY_PENDING"}
+
+
+def test_forward_positions_fill_mark_exit_and_remain_idempotent(
+    tmp_path: Path,
+    simple_ohlcv: pd.DataFrame,
+) -> None:
+    scanner_rows = pd.DataFrame(
+        [
+            {
+                "candidate_status": "ACTIONABLE_PAPER_CANDIDATE",
+                "as_of_date": simple_ohlcv.index[10].date().isoformat(),
+                "ticker": "AAPL",
+                "direction": "Bullish",
+                "model_id": "model-a",
+                "scan_id": "scan-a",
+                "feature_snapshot_hash": "hash-a",
+                "expected_return": 0.02,
+                "expected_mfe": 0.04,
+                "expected_mae": -0.01,
+                "calibrated_probability": 0.75,
+                "horizon": 5,
+            }
+        ]
+    )
+    db_path = tmp_path / "engine.sqlite3"
+
+    assert create_pending_events_from_snapshot(db_path, scanner_rows) == 2
+    inserted = advance_forward_positions(db_path, {"AAPL": simple_ohlcv})
+    assert inserted > 0
+    assert advance_forward_positions(db_path, {"AAPL": simple_ohlcv}) == 0
+    events = list_forward_events(db_path)
+
+    assert "ENTRY_FILLED" in set(events["event_type"])
+    assert "POSITION_MARKED" in set(events["event_type"])
+    assert "EXIT_FILLED" in set(events["event_type"])
+    exit_event = events.loc[events["event_type"] == "EXIT_FILLED"].iloc[0]
+    payload = dict(exit_event["payload"])
+    assert payload["entry_date"] == simple_ohlcv.index[11].date().isoformat()
+    assert payload["exit_date"] == simple_ohlcv.index[15].date().isoformat()
 
 
 def test_portfolio_backtester_enters_next_open_and_handles_shorts(

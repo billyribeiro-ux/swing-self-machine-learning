@@ -20,7 +20,13 @@ Forward testing uses append-only events in SQLite:
 - `POSITION_CANCELED`
 - `DATA_CORRECTION_RECORDED`
 
-The current vertical slice creates `SIGNAL_CREATED`, `SIGNAL_REJECTED`, and `ENTRY_PENDING` events from scanner snapshots. Entry resolution, marking, and exit events are prepared by schema and reconstruction logic but remain intentionally limited until another daily bar arrives after deployment.
+The current vertical slice creates `SIGNAL_CREATED`, `SIGNAL_REJECTED`, and `ENTRY_PENDING` events from scanner snapshots. It also advances existing pending entries when later daily bars are available:
+
+- `ENTRY_FILLED` uses the next completed session open after the signal as-of date.
+- `POSITION_MARKED` records daily mark return, MFE, and MAE from completed bars after entry.
+- `EXIT_FILLED` records a conservative time exit at the frozen horizon when the exit bar is available.
+
+Stop/target update event types are reserved in the schema, but dynamic stop/target policy is not enabled in this milestone.
 
 ## Frozen Signal Context
 
@@ -45,3 +51,5 @@ Old event rows are never updated. Position state is reconstructed from the event
 Signals are created after the latest completed daily close. The default paper entry rule is the next completed session open. A close-known signal cannot enter at that same close.
 
 Rerunning the same forward-update is idempotent and reports zero newly inserted events when nothing changed.
+
+The latest governance-aware local acceptance run had no champion-approved actionable paper entries because no model passed every quality gate. It still recorded rejected signal events append-only so failed-gate candidates are visible rather than hidden.

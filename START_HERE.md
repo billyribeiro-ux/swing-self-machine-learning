@@ -44,6 +44,12 @@ python -m swing_rsi.cli forward-update
 
 If no model passes quality gates, inspect retained candidates. Do not weaken gates just to force a champion.
 
+The daily cycle wrapper is idempotent for the same market date:
+
+```bash
+./scripts/run_daily_cycle.sh --include-challengers
+```
+
 8. Download a single legacy RSI dataset when needed:
 
 ```bash

@@ -8,6 +8,11 @@
 - Added `configs/universe/core.yaml` seed universe for large stocks, broad ETFs, sector ETFs, inverse ETFs, and leveraged ETFs.
 - Added scikit-learn, joblib, and pyarrow dependencies for local model discovery and parquet artifacts.
 - Added autonomous-engine regression tests for backward-looking features, label isolation, purged splits, registry immutability, scanner idempotency, scanner-candidate persistence, append-only forward events, and next-open portfolio entries.
+- Added a naive historical base-rate classifier as an explicit model-discovery baseline.
+- Added holdout permutation-importance and feature-stability diagnostics to registered model metrics.
+- Added drift reporting for feature and prediction distributions; drift can alert and train challengers later, but it does not mutate or promote models.
+- Completed the paper-forward vertical slice from latest scanner events through pending entries, next-session paper fills, position marks, and time exits with idempotent append-only events.
+- Fixed `scripts/run_daily_cycle.sh` executable permissions and verified the wrapper returns idempotent daily-cycle status.
 - Fixed walk-forward split planning so automatically calculated test folds reserve the configured gap before sizing test windows.
 - Added a canonical split-plan object shared by dashboard preflight validation and actual walk-forward execution.
 - Added dashboard split-plan details for requested dates, effective trading sessions, available sessions, initial training sessions, sessions per test fold, gap, folds, total required sessions, and validity status.

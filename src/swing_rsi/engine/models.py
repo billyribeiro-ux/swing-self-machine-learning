@@ -9,6 +9,7 @@ from typing import Any, cast
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.isotonic import IsotonicRegression
@@ -59,6 +60,7 @@ class DiscoveryConfig:
     probability_threshold: float = 0.55
     round_trip_cost_bps: float = 5.0
     random_seed: int = 42
+    permutation_feature_limit: int = 12
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,28 @@ class DiscoveryResult:
     registered_models: tuple[RegisteredModel, ...]
     rejected_models: tuple[RegisteredModel, ...]
     best_challenger_id: str | None
+
+
+class BaseRateClassifier(ClassifierMixin, BaseEstimator):  # type: ignore[misc]
+    """Naive historical base-rate classifier used as a discovery baseline."""
+
+    def __init__(self) -> None:
+        self.probability = 0.5
+        self.classes_ = np.array([0, 1])
+        self.is_fitted_ = False
+
+    def fit(self, frame: pd.DataFrame, target: pd.Series) -> BaseRateClassifier:
+        _ = frame
+        mean_probability = float(pd.to_numeric(target, errors="coerce").mean())
+        self.probability = float(np.clip(mean_probability, 0.001, 0.999))
+        self.classes_ = np.array([0, 1])
+        self.is_fitted_ = True
+        return self
+
+    def predict_proba(self, frame: pd.DataFrame) -> np.ndarray:
+        positive = np.full(len(frame), self.probability, dtype=float)
+        negative = 1.0 - positive
+        return np.column_stack([negative, positive])
 
 
 def _clean_feature_columns(
@@ -103,6 +127,12 @@ def _clean_feature_columns(
 
 def _candidate_pipelines(seed: int) -> dict[str, Any]:
     return {
+        "naive_base_rate": Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                ("model", BaseRateClassifier()),
+            ]
+        ),
         "logistic_regression": Pipeline(
             [
                 ("imputer", SimpleImputer(strategy="median")),
@@ -178,6 +208,57 @@ def _max_drawdown(returns: pd.Series) -> float:
     return float(((equity / equity.cummax()) - 1.0).min())
 
 
+def _permutation_importance_summary(
+    *,
+    classifier: Any,
+    calibrator: Any,
+    holdout: pd.DataFrame,
+    feature_columns: list[str],
+    target: str,
+    baseline_brier: float,
+    seed: int,
+    limit: int,
+) -> str:
+    rng = np.random.default_rng(seed)
+    importances: list[tuple[str, float]] = []
+    selected_columns = feature_columns[: max(0, min(limit, len(feature_columns)))]
+    for column in selected_columns:
+        permuted = holdout[feature_columns].copy()
+        values = permuted[column].to_numpy(copy=True)
+        rng.shuffle(values)
+        permuted[column] = values
+        raw = _positive_class_probability(classifier, permuted)
+        probability = np.asarray(calibrator.predict(raw), dtype=float)
+        brier = float(brier_score_loss(holdout[target].astype(int), probability))
+        delta = brier - baseline_brier
+        if math.isfinite(delta):
+            importances.append((column, delta))
+    top = sorted(importances, key=lambda item: item[1], reverse=True)[:8]
+    return "; ".join(f"{column}={value:.6f}" for column, value in top)
+
+
+def _feature_stability_summary(
+    train: pd.DataFrame,
+    holdout: pd.DataFrame,
+    feature_columns: list[str],
+) -> tuple[float, str]:
+    scores: list[tuple[str, float]] = []
+    for column in feature_columns:
+        train_values = pd.to_numeric(train[column], errors="coerce")
+        holdout_values = pd.to_numeric(holdout[column], errors="coerce")
+        train_std = float(train_values.std(ddof=0))
+        if not math.isfinite(train_std) or train_std <= 1e-12:
+            continue
+        score = abs(float(holdout_values.mean()) - float(train_values.mean())) / train_std
+        if math.isfinite(score):
+            scores.append((column, score))
+    if not scores:
+        return math.nan, ""
+    top = sorted(scores, key=lambda item: item[1], reverse=True)[:8]
+    mean_score = float(np.mean([score for _, score in scores]))
+    return mean_score, "; ".join(f"{column}={score:.4f}" for column, score in top)
+
+
 def _train_family(
     *,
     family: str,
@@ -228,6 +309,21 @@ def _train_family(
         brier_score_loss(calibration[target].astype(int), calibration_probability)
     )
     holdout_brier = float(brier_score_loss(holdout[target].astype(int), holdout_probability))
+    permutation_summary = _permutation_importance_summary(
+        classifier=classifier,
+        calibrator=calibrator,
+        holdout=holdout,
+        feature_columns=feature_columns,
+        target=target,
+        baseline_brier=holdout_brier,
+        seed=config.random_seed,
+        limit=config.permutation_feature_limit,
+    )
+    feature_stability_mean, feature_stability_top = _feature_stability_summary(
+        train,
+        holdout,
+        feature_columns,
+    )
     holdout_mae = float(mean_absolute_error(holdout[returns], expected_return))
     holdout_rmse = float(mean_squared_error(holdout[returns], expected_return) ** 0.5)
     mean_selected_return = (
@@ -255,6 +351,9 @@ def _train_family(
         "holdout_mae_return_model": holdout_mae,
         "holdout_rmse_return_model": holdout_rmse,
         "holdout_expected_return_mean": float(expected_return.mean()),
+        "feature_stability_mean_abs_z": feature_stability_mean,
+        "feature_stability_top": feature_stability_top,
+        "permutation_importance_top": permutation_summary,
     }
     calibration_metrics: dict[str, float | int | str | bool | None] = {
         "calibration_brier": calibration_brier,

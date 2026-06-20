@@ -6,6 +6,7 @@ Generated: 2026-06-19 America/New_York
 
 - Branch: `feat/autonomous-swing-scanner-v1`
 - Implementation commit: `3880c73` (`feat: add autonomous swing scanner vertical slice`)
+- Completion commit: pending final local commit
 - Remote push: not pushed
 - Secrets: `.env` was not opened, printed, staged, committed, or copied.
 - Generated artifacts: raw data, feature parquet, model artifacts, scanner outputs, SQLite state, reports, logs, caches, and Streamlit local files are ignored.
@@ -41,11 +42,12 @@ Main flow:
 - `src/swing_rsi/engine/labels.py`: bullish/bearish multi-horizon label engine.
 - `src/swing_rsi/engine/splits.py`: chronological train/calibration/holdout split with label purging.
 - `src/swing_rsi/engine/models.py`: logistic regression, HistGradientBoosting, ExtraTrees, Ridge expected-return/MFE/MAE models, calibration, quality gates, artifact writing.
+- `src/swing_rsi/engine/drift.py`: feature-distribution and prediction-distribution drift reporting.
 - `src/swing_rsi/engine/registry.py`: immutable model registration and explicit promotion.
 - `src/swing_rsi/engine/scanner.py`: latest-session scanner snapshot persistence and candidate status gating.
 - `src/swing_rsi/engine/attribution.py`: local perturbation contribution shares, evidence, relationships, analogs.
 - `src/swing_rsi/engine/portfolio.py`: portfolio-level scanner-output backtester.
-- `src/swing_rsi/engine/forward.py`: append-only paper-forward events.
+- `src/swing_rsi/engine/forward.py`: append-only paper-forward events, next-session paper fills, daily marks, time exits, and position reconstruction.
 - `src/swing_rsi/application/engine_service.py`: shared CLI/dashboard orchestration service.
 
 ## Universe
@@ -112,6 +114,7 @@ All future-derived columns are prefixed with `label_`.
 
 Classifier candidates:
 
+- naive historical base-rate classifier;
 - logistic regression;
 - HistGradientBoosting classifier;
 - ExtraTrees classifier.
@@ -128,6 +131,12 @@ Preprocessing and calibration:
 - train-only scaling where used;
 - separate chronological calibration slice with isotonic probability calibration;
 - no random train/test shuffling.
+
+Diagnostics:
+
+- bounded holdout permutation-importance summaries;
+- train-vs-holdout feature-stability summaries;
+- drift reports comparing training reference features with the latest as-of feature snapshot.
 
 ## Split and Purge Methodology
 
@@ -154,9 +163,9 @@ python -m swing_rsi.cli promote-model --model-id <model_id>
 
 ## Accepted and Rejected Models
 
-Latest local registry state:
+Latest local registry state after the final real local acceptance run:
 
-- `CANDIDATE`: 6
+- `CANDIDATE`: 14
 - `REJECTED`: 12
 - `CHALLENGER`: 0
 - `CHAMPION`: 0
@@ -167,7 +176,7 @@ No model passed all quality gates, so no champion was promoted. The scanner can 
 
 Latest governance-aware scanner snapshot:
 
-- Scan ID: `72c827f555d0992da1c85d4c`
+- Scan ID: `8e63cc0bbc6242eb5b38856e`
 - As-of date: `2026-06-18`
 - Rows: 50
 - Bullish rows: 25
@@ -176,7 +185,7 @@ Latest governance-aware scanner snapshot:
 - Model state: 50 `CANDIDATE`
 - Rejection reason: `model_not_promoted_or_quality_gates_failed`
 
-Prior inspection snapshot `290a4f850dbb93d567e3b918` existed before model-state gating. The current snapshot is the governance-correct one.
+Prior inspection snapshots exist in ignored local artifacts. The current snapshot is the latest governance-correct one.
 
 ## Attribution Example
 
@@ -221,11 +230,13 @@ This is correct timing behavior; the latest scanner snapshot is for paper-forwar
 
 SQLite forward events after local acceptance:
 
-- Total forward events: 135
+- Total forward events: 185
 - Latest governance-aware forward update inserted: 50 rejected-signal events
 - Immediate rerun inserted: 0 new events
 
 There are no champion-approved pending entries because no model passed quality gates.
+
+The forward engine now fills pending entries at the next completed session open when later bars exist, records `POSITION_MARKED` events with mark return/MFE/MAE, and records time-exit `EXIT_FILLED` events at the frozen horizon. This behavior is covered by regression tests and remains append-only/idempotent.
 
 ## Daily-Cycle Behavior
 
@@ -247,6 +258,8 @@ Verified behavior:
 - Rerun for the same market date returned `already_completed`.
 - Lock file prevents simultaneous daily cycles.
 - Forward-event insertion is idempotent.
+- The wrapper script is executable and returned `already_completed` for the existing local daily cycle.
+- Drift checks ran separately after the stored daily-cycle summary was already completed: 14 model reports, 0 alerts.
 
 ## Database Schema
 
@@ -262,10 +275,10 @@ Tables:
 
 Final local counts:
 
-- models: 18
-- scanner_snapshots: 2
-- scanner_candidates: 100
-- forward_events: 135
+- models: 26
+- scanner_snapshots: 3
+- scanner_candidates: 150
+- forward_events: 185
 - daily_cycles: 1
 
 Generated SQLite state is not committed.
@@ -318,10 +331,10 @@ Automated:
 
 Results:
 
-- pytest: 71 collected, 71 passed
+- pytest: 74 collected, 74 passed
 - Ruff: all checks passed
-- Ruff format: 85 files already formatted
-- mypy: success, no issues in 49 source files
+- Ruff format: 86 files already formatted
+- mypy: success, no issues in 50 source files
 
 Streamlit/App tests:
 
@@ -342,6 +355,21 @@ python -m swing_rsi.cli forward-update
 ```
 
 Real update included all configured 35 symbols through the existing FMP provider abstraction. The API key and `.env` contents were never printed.
+
+Additional verified commands:
+
+```bash
+python -m swing_rsi.cli forward-update
+python -m swing_rsi.cli daily-cycle --include-challengers
+./scripts/run_daily_cycle.sh --include-challengers
+```
+
+Results:
+
+- Second `forward-update`: 0 new events, 185 total forward events.
+- Daily cycle: `already_completed` for `2026-06-19`, no duplicate cycle.
+- Wrapper: `already_completed` for `2026-06-19`, no duplicate cycle.
+- Drift check service: 14 reports, 0 alerts; PyArrow printed sandbox CPU-info warnings only.
 
 ## Security Audit
 
@@ -371,14 +399,16 @@ PASS:
 - Scanner uses latest as-of feature rows and no label columns.
 - Close-known signals cannot enter at the same close; portfolio and forward rules use next-session/next-completed-session open semantics.
 - Failed trades/signals are retained; rejected scanner rows include exclusion reasons.
+- Forward fills, marks, and exits are appended as new events; old event rows are not rewritten.
 
 ## Known Limitations
 
 - No model passed all quality gates, so there is no champion and no champion-approved paper pending entry.
 - Scanner outputs from `--include-challengers` are review-only when models are `CANDIDATE`.
-- Feature families are broad but still a first bounded vertical slice; mutual information screening, permutation importance, and drift monitoring are not yet exhaustive.
+- Feature families are broad but still a first bounded vertical slice; mutual information screening is not yet implemented, and permutation/drift diagnostics are intentionally bounded.
 - Regime labels are basic unsupervised states and are not named bull/bear causes.
 - Historical analogs are implemented in attribution but dashboard presentation is minimal.
+- Dynamic stop/target and trailing-stop paper-forward policies are not enabled yet; the current lifecycle uses frozen next-open entry and horizon time exits.
 - Portfolio backtester is implemented but latest real scanner snapshot has no subsequent next-open bar yet, so real latest-snapshot trades are zero.
 - No options, NLP, intraday data, brokerage execution, authentication, deployment, FastAPI, SvelteKit, or database server were added.
 - FMP corporate-action semantics, delisted coverage, and point-in-time historical universe membership remain unaudited.

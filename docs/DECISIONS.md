@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-20 — Autonomous scanner models require diagnostics and append-only paper lifecycle
+
+Decision: Include a naive historical base-rate classifier as a required discovery baseline, store bounded permutation-importance and feature-stability diagnostics with model metrics, and run drift checks as review signals rather than self-mutating model changes. Paper-forward updates now advance through next-session paper fills, daily marks, and time exits as append-only events.
+
+Reason: The scanner must learn from observable data without treating any one strategy or model family as privileged. Diagnostics and drift alerts improve review quality, but auto-adaptation remains controlled. Forward testing must preserve exactly what was known and done at the time, so existing events are never rewritten.
+
 ## 2026-06-19 — RSI becomes a baseline feature family
 
 Decision: Reframe the product as the Self-Learning Swing Trading Engine. RSI remains implemented and tested, but it is one feature family and legacy/baseline research view rather than the scanner strategy.

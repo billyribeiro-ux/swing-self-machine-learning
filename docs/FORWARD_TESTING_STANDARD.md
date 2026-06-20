@@ -20,19 +20,21 @@ Written when a frozen model scanner signal is generated:
 - Confidence or research score
 - Data version
 
-### Outcome record
+### Position and outcome events
 
-Written only after a horizon is fully observable:
+Written only when the corresponding paper event becomes knowable:
 
-- Signal ID
-- Evaluation timestamp
-- Horizon
-- Actual return
-- MFE and MAE
-- Result label
-- Notes
+- `ENTRY_PENDING`
+- `ENTRY_FILLED`
+- `POSITION_MARKED`
+- `STOP_UPDATED`
+- `TARGET_UPDATED`
+- `EXIT_FILLED`
+- `POSITION_EXPIRED`
+- `POSITION_CANCELED`
+- `DATA_CORRECTION_RECORDED`
 
-Signals and outcomes are stored separately. Outcomes do not mutate the original signal record.
+Signal, position, and outcome events are stored separately. Later events do not mutate the original signal record.
 
 ## No cherry-picking
 

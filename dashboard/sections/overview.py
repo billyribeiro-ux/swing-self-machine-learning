@@ -6,6 +6,7 @@ from dashboard.ui.components import render_page_header, repository_root, st
 from dashboard.ui.formatting import date_label, whole
 from swing_rsi.application.engine_service import (
     forward_events,
+    latest_daily_cycle_summary,
     latest_scanner_snapshot,
     list_registered_models,
 )
@@ -29,6 +30,7 @@ def render_page() -> None:
     challengers = [model for model in models if model.state == "CHALLENGER"]
     scanner = latest_scanner_snapshot(root)
     events = forward_events(root)
+    daily_cycle = latest_daily_cycle_summary(root)
     bullish_count = (
         int((scanner.get("direction", pd.Series(dtype=str)) == "Bullish").sum())
         if not scanner.empty
@@ -54,7 +56,15 @@ def render_page() -> None:
     columns[0].metric("Bullish candidates", whole(bullish_count))
     columns[1].metric("Bearish candidates", whole(bearish_count))
     columns[2].metric("Forward events", whole(len(events)))
-    columns[3].metric("Data errors", whole(len(status.datasets) - len(valid)))
+    columns[3].metric("Drift alerts", whole(int(daily_cycle.get("drift_alerts") or 0)))
+    columns = streamlit.columns(4)
+    columns[0].metric("Data errors", whole(len(status.datasets) - len(valid)))
+    columns[1].metric("Latest daily cycle", str(daily_cycle.get("market_date", "n/a")))
+    columns[2].metric("Daily cycle status", str(daily_cycle.get("status", "n/a")))
+    columns[3].metric(
+        "Forward events created",
+        whole(int(daily_cycle.get("forward_events_created") or 0)),
+    )
 
     streamlit.write(f"Project: **{status.project_name}**")
     streamlit.write(f"Project root: `{status.project_root}`")

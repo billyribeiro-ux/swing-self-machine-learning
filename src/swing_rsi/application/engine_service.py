@@ -10,8 +10,13 @@ import pandas as pd
 from swing_rsi.application.datasets import download_daily_to_raw, normalize_ticker
 from swing_rsi.config import ProjectPaths
 from swing_rsi.data.loader import load_ohlcv_csv
+from swing_rsi.engine.drift import DriftReport, build_drift_report
 from swing_rsi.engine.features import FeatureBuildResult, build_feature_panel
-from swing_rsi.engine.forward import create_pending_events_from_snapshot, list_forward_events
+from swing_rsi.engine.forward import (
+    advance_forward_positions,
+    create_pending_events_from_snapshot,
+    list_forward_events,
+)
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, merge_features_and_labels
 from swing_rsi.engine.manifest import create_manifest, hash_file, write_manifest
 from swing_rsi.engine.models import DiscoveryConfig, discover_models, load_model_bundle
@@ -314,6 +319,30 @@ def run_live_scanner(
     )
 
 
+def run_drift_checks(
+    root: str | Path,
+    *,
+    include_challengers: bool = False,
+) -> tuple[DriftReport, ...]:
+    project_root = Path(root)
+    feature_frame = pd.read_parquet(latest_features_path(project_root))
+    as_of = pd.Timestamp(feature_frame["Date"].max()).date().isoformat()
+    current = feature_frame.loc[pd.to_datetime(feature_frame["Date"]) == pd.Timestamp(as_of)]
+    reports: list[DriftReport] = []
+    for model in _scanner_models(project_root, include_challengers=include_challengers):
+        bundle = load_model_bundle(model.artifact_path)
+        reports.append(
+            build_drift_report(
+                model_id=model.model_id,
+                as_of_date=as_of,
+                reference_features=bundle.training_matrix,
+                current_features=current,
+                feature_columns=bundle.feature_columns,
+            )
+        )
+    return tuple(reports)
+
+
 def latest_scanner_snapshot(root: str | Path) -> pd.DataFrame:
     paths = ProjectPaths(Path(root))
     candidates = sorted(
@@ -324,15 +353,50 @@ def latest_scanner_snapshot(root: str | Path) -> pd.DataFrame:
     return pd.read_csv(candidates[-1])
 
 
-def run_forward_update(root: str | Path, scanner_rows: pd.DataFrame | None = None) -> int:
+def run_forward_update(
+    root: str | Path,
+    scanner_rows: pd.DataFrame | None = None,
+    *,
+    advance_existing: bool = True,
+) -> int:
+    project_root = Path(root)
+    paths = ProjectPaths(project_root)
+    inserted = 0
+    if advance_existing:
+        universe = load_engine_universe(project_root)
+        inserted += advance_forward_positions(
+            paths.engine_db,
+            load_universe_frames(project_root, universe),
+        )
     rows = scanner_rows if scanner_rows is not None else latest_scanner_snapshot(root)
     if rows.empty:
-        return 0
-    return create_pending_events_from_snapshot(ProjectPaths(Path(root)).engine_db, rows)
+        return inserted
+    return inserted + create_pending_events_from_snapshot(paths.engine_db, rows)
 
 
 def forward_events(root: str | Path) -> pd.DataFrame:
     return list_forward_events(ProjectPaths(Path(root)).engine_db)
+
+
+def latest_daily_cycle_summary(root: str | Path) -> dict[str, object]:
+    paths = ProjectPaths(Path(root))
+    with engine_connection(paths.engine_db) as connection:
+        row = connection.execute(
+            """
+            SELECT market_date, status, summary_json
+            FROM daily_cycles
+            ORDER BY started_at_utc DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        return {}
+    summary = json.loads(str(row["summary_json"]))
+    return {
+        "market_date": str(row["market_date"]),
+        "status": str(row["status"]),
+        **dict(summary),
+    }
 
 
 def _lock_path(root: Path) -> Path:
@@ -384,6 +448,11 @@ def run_daily_cycle(
             summary["update_errors"] = len(
                 [row for row in updated.results if row.status == "error"]
             )
+        existing_forward_events = advance_forward_positions(
+            paths.engine_db,
+            load_universe_frames(project_root, load_engine_universe(project_root, universe_path)),
+        )
+        summary["existing_forward_events_created"] = existing_forward_events
         features = build_autonomous_features(project_root, universe_path=universe_path)
         summary["feature_rows"] = len(features.features.frame)
         summary["modeling_rows"] = len(features.modeling_frame)
@@ -398,7 +467,13 @@ def run_daily_cycle(
         scan = run_live_scanner(project_root, include_challengers=include_challengers)
         summary["scanner_rows"] = len(scan.rows)
         summary["scan_id"] = scan.scan_id
-        summary["forward_events_created"] = run_forward_update(project_root, scan.rows)
+        drift_reports = run_drift_checks(project_root, include_challengers=include_challengers)
+        summary["drift_alerts"] = sum(report.alert_count for report in drift_reports)
+        summary["forward_events_created"] = run_forward_update(
+            project_root,
+            scan.rows,
+            advance_existing=False,
+        )
         with engine_connection(paths.engine_db) as connection:
             connection.execute(
                 "UPDATE daily_cycles SET completed_at_utc = ?, status = ?, summary_json = ? WHERE market_date = ?",

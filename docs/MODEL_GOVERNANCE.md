@@ -44,7 +44,15 @@ The current vertical slice gates on:
 - profit factor;
 - maximum drawdown.
 
+Registered metrics also retain feature-stability summaries and bounded holdout permutation-importance summaries for review. Those diagnostics do not override failed gates.
+
 The model report retains failed gates instead of weakening them. A model that does not pass every mandatory gate remains a `CANDIDATE` or `REJECTED`.
+
+## Drift Policy
+
+`src/swing_rsi/engine/drift.py` compares train-reference feature distributions and optional prediction distributions with the latest as-of snapshot.
+
+Drift alerts are evidence for review and possible challenger training. They never mutate an existing model, never silently promote a challenger, and never alter paper-forward events already recorded by a frozen model version.
 
 ## Champion Policy
 

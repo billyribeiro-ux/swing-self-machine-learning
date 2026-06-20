@@ -25,7 +25,7 @@ Latest-session scanner and attribution
    ↓
 Portfolio scanner-output backtester
    ↓
-Append-only paper-forward event log
+Drift checks and append-only paper-forward lifecycle
    ↓
 Daily-cycle orchestration
 ```
@@ -78,7 +78,7 @@ Version 1 signals are known only after a daily bar closes. The default simulated
 
 - Raw and derived market data live under `data/` and are ignored by Git.
 - Reports live under `reports/` and are ignored by Git.
-- Forward signals and outcomes are separate append-only files.
+- Forward signals, fills, marks, and exits are stored as append-only SQLite events.
 - Methodology and decisions live under `docs/` and are the permanent source of truth.
 
 ## Autonomous engine boundary
@@ -86,6 +86,8 @@ Version 1 signals are known only after a daily bar closes. The default simulated
 The autonomous engine is implemented in typed Python modules under `src/swing_rsi/engine/` and shared through `src/swing_rsi/application/engine_service.py`.
 
 Streamlit calls these services directly. It does not implement feature calculation, label creation, model training, scanner ranking, attribution, portfolio backtesting, or paper-forward event logic.
+
+Model drift checks are review signals only. They do not mutate, replace, or promote deployed model versions.
 
 ## Local dashboard boundary
 
