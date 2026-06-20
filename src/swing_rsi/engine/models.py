@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -79,6 +80,14 @@ class DiscoveryResult:
     best_challenger_id: str | None
 
 
+@dataclass(frozen=True)
+class ModelPlugin:
+    name: str
+    classifier_factory: Callable[[int], Any]
+    regressor_factory: Callable[[int], Any]
+    nonlinear_interactions: bool
+
+
 class BaseRateClassifier(ClassifierMixin, BaseEstimator):  # type: ignore[misc]
     """Naive historical base-rate classifier used as a discovery baseline."""
 
@@ -134,55 +143,81 @@ def _clean_feature_columns(
     return selected
 
 
+def model_plugins() -> tuple[ModelPlugin, ...]:
+    return (
+        ModelPlugin(
+            name="naive_base_rate",
+            classifier_factory=lambda _seed: Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("model", BaseRateClassifier()),
+                ]
+            ),
+            regressor_factory=lambda seed: _regressor(seed, "naive_base_rate"),
+            nonlinear_interactions=False,
+        ),
+        ModelPlugin(
+            name="logistic_regression",
+            classifier_factory=lambda seed: Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    (
+                        "model",
+                        LogisticRegression(
+                            max_iter=500, class_weight="balanced", random_state=seed
+                        ),
+                    ),
+                ]
+            ),
+            regressor_factory=lambda seed: _regressor(seed, "logistic_regression"),
+            nonlinear_interactions=False,
+        ),
+        ModelPlugin(
+            name="hist_gradient_boosting",
+            classifier_factory=lambda seed: Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    (
+                        "model",
+                        HistGradientBoostingClassifier(
+                            max_iter=80,
+                            learning_rate=0.05,
+                            min_samples_leaf=20,
+                            l2_regularization=0.1,
+                            random_state=seed,
+                        ),
+                    ),
+                ]
+            ),
+            regressor_factory=lambda seed: _regressor(seed, "hist_gradient_boosting"),
+            nonlinear_interactions=True,
+        ),
+        ModelPlugin(
+            name="extra_trees",
+            classifier_factory=lambda seed: Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    (
+                        "model",
+                        ExtraTreesClassifier(
+                            n_estimators=120,
+                            min_samples_leaf=10,
+                            class_weight="balanced",
+                            random_state=seed,
+                            n_jobs=1,
+                        ),
+                    ),
+                ]
+            ),
+            regressor_factory=lambda seed: _regressor(seed, "extra_trees"),
+            nonlinear_interactions=True,
+        ),
+    )
+
+
 def _candidate_pipelines(seed: int) -> dict[str, Any]:
-    return {
-        "naive_base_rate": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                ("model", BaseRateClassifier()),
-            ]
-        ),
-        "logistic_regression": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                (
-                    "model",
-                    LogisticRegression(max_iter=500, class_weight="balanced", random_state=seed),
-                ),
-            ]
-        ),
-        "hist_gradient_boosting": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                (
-                    "model",
-                    HistGradientBoostingClassifier(
-                        max_iter=80,
-                        learning_rate=0.05,
-                        min_samples_leaf=20,
-                        l2_regularization=0.1,
-                        random_state=seed,
-                    ),
-                ),
-            ]
-        ),
-        "extra_trees": Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                (
-                    "model",
-                    ExtraTreesClassifier(
-                        n_estimators=120,
-                        min_samples_leaf=10,
-                        class_weight="balanced",
-                        random_state=seed,
-                        n_jobs=1,
-                    ),
-                ),
-            ]
-        ),
-    }
+    return {plugin.name: plugin.classifier_factory(seed) for plugin in model_plugins()}
 
 
 def _regressor(seed: int, family: str) -> Pipeline:
@@ -341,6 +376,41 @@ def _max_concentration(frame: pd.DataFrame, column: str) -> float:
     return float(shares.max()) if not shares.empty else math.nan
 
 
+def _temporal_fold_stability(frame: pd.DataFrame, returns: pd.Series, *, folds: int = 3) -> float:
+    if frame.empty or returns.empty or "Date" not in frame.columns:
+        return math.nan
+    ordered = pd.DataFrame(
+        {"Date": pd.to_datetime(frame["Date"]), "return": returns.to_numpy(dtype=float)}
+    ).dropna()
+    if len(ordered) < folds:
+        return math.nan
+    ordered = ordered.sort_values("Date")
+    fold_indices = np.array_split(np.arange(len(ordered)), folds)
+    fold_means = [
+        float(ordered.iloc[indices]["return"].mean()) for indices in fold_indices if len(indices)
+    ]
+    if not fold_means:
+        return math.nan
+    return float(sum(1 for value in fold_means if value > 0.0) / len(fold_means))
+
+
+def _period_concentration(frame: pd.DataFrame, returns: pd.Series) -> float:
+    if frame.empty or returns.empty or "Date" not in frame.columns:
+        return math.nan
+    data = pd.DataFrame({"Date": pd.to_datetime(frame["Date"]), "return": returns}).dropna()
+    if data.empty:
+        return math.nan
+    yearly_abs = (
+        data.assign(year=data["Date"].dt.year.astype(str))
+        .groupby("year")["return"]
+        .apply(lambda series: series.abs().sum())
+    )
+    total = float(yearly_abs.sum())
+    if total <= 0:
+        return math.nan
+    return float(yearly_abs.max() / total)
+
+
 def _train_family(
     *,
     family: str,
@@ -398,9 +468,11 @@ def _train_family(
         target_calibrator.predict(target_holdout_raw), dtype=float
     )
 
-    return_model = _regressor(config.random_seed, family)
-    mfe_model = _regressor(config.random_seed + 1, family)
-    mae_model = _regressor(config.random_seed + 2, family)
+    plugin_by_name = {plugin.name: plugin for plugin in model_plugins()}
+    plugin = plugin_by_name[family]
+    return_model = plugin.regressor_factory(config.random_seed)
+    mfe_model = plugin.regressor_factory(config.random_seed + 1)
+    mae_model = plugin.regressor_factory(config.random_seed + 2)
     return_model.fit(x_train, train[returns])
     mfe_model.fit(x_train, train[mfe])
     mae_model.fit(x_train, train[mae])
@@ -457,6 +529,8 @@ def _train_family(
     symbol_concentration = _max_concentration(selected, "symbol")
     sector_concentration = _max_concentration(selected, "sector")
     prediction_turnover = len(selected_returns) / len(holdout) if len(holdout) else math.nan
+    temporal_fold_positive_fraction = _temporal_fold_stability(selected, selected_returns)
+    period_concentration = _period_concentration(selected, selected_returns)
     metrics: dict[str, float | int | str | bool | None] = {
         "training_samples": len(train),
         "calibration_samples": len(calibration),
@@ -487,8 +561,12 @@ def _train_family(
         "symbol_concentration_top": symbol_concentration,
         "sector_concentration_top": sector_concentration,
         "prediction_turnover": prediction_turnover,
+        "temporal_fold_positive_fraction": temporal_fold_positive_fraction,
+        "exceptional_period_concentration_top": period_concentration,
         "rsi_control_columns_available": "rsi_14" in train.columns,
         "naive_control_family": family == "naive_base_rate",
+        "model_plugin_name": plugin.name,
+        "model_plugin_nonlinear_interactions": plugin.nonlinear_interactions,
     }
     calibration_metrics: dict[str, float | int | str | bool | None] = {
         "calibration_brier": calibration_brier,
@@ -526,6 +604,13 @@ def _train_family(
         "prediction_turnover_max_050": bool(
             math.isfinite(prediction_turnover) and prediction_turnover <= 0.50
         ),
+        "temporal_fold_stability_min_050": bool(
+            not math.isfinite(temporal_fold_positive_fraction)
+            or temporal_fold_positive_fraction >= 0.50
+        ),
+        "exceptional_period_concentration_max_060": bool(
+            not math.isfinite(period_concentration) or period_concentration <= 0.60
+        ),
         "comparison_controls_available": bool("rsi_14" in train.columns),
     }
     medians = {column: float(x_train[column].median()) for column in feature_columns}
@@ -554,7 +639,9 @@ def _train_family(
         training_means=means,
         training_stds=stds,
         training_matrix=x_train.reset_index(drop=True),
-        training_labels=train[["Date", "symbol", returns, mfe, mae]].reset_index(drop=True),
+        training_labels=train[
+            ["Date", "symbol", returns, mfe, mae, target_before_stop]
+        ].reset_index(drop=True),
         metrics=metrics,
         calibration_metrics=calibration_metrics,
     )

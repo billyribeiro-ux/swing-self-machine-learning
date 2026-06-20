@@ -15,7 +15,7 @@ Every report must state round-trip transaction cost and slippage assumptions. Ze
 
 The legacy starter RSI engine permits only one open trade per ticker. Signals occurring while a trade is open are ignored in that legacy path.
 
-The autonomous scanner vertical slice adds a portfolio-level scanner-output backtester with cross-ticker overlap, maximum concurrent positions, per-symbol limits, sector concentration limits, gross/net exposure limits, costs, slippage, long/short handling, conservative target/stop ambiguity, equity, drawdown, turnover, exposure, and trade ledger output. This does not change the legacy starter RSI backtester behavior.
+The autonomous scanner vertical slice adds a portfolio-level scanner-output backtester with cross-ticker overlap, maximum concurrent positions, per-symbol limits, sector concentration limits, gross/net exposure limits, costs, slippage, long/short handling, conservative target/stop ambiguity, equity, drawdown, turnover, exposure, trade ledger output, symbol-level return output, and a candidate audit table that retains rejected or skipped scanner rows with the reason. This does not change the legacy starter RSI backtester behavior.
 
 ## Price adjustments
 
@@ -50,6 +50,7 @@ Research must decide explicitly between raw OHLC with corporate-action events an
 - Lower confidence bound on mean return
 - Exposure and turnover for portfolio scanner backtests
 - Returns by model version, sector, year, and regime when enough data is available
+- Candidate audit counts for rejected/skipped scanner candidates
 
 ## Bias controls
 

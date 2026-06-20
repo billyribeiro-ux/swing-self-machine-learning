@@ -13,6 +13,7 @@ For each candidate:
 - relationship confirmations;
 - relationship divergences;
 - nearest historical analogs from train-fitted feature scaling;
+- analog forward return, MFE, MAE, and target-before-stop outcomes from stored training labels;
 - residual/unexplained component.
 
 ## Contribution Groups
@@ -37,4 +38,4 @@ The local contribution method perturbs selected features back to their training 
 
 Supporting evidence must come from actual feature values in the row being scanned. The engine does not invent news, intent, institutional behavior, or unsupported causes.
 
-Historical analogs exclude future information by using the model's stored training feature matrix and training labels.
+Historical analogs exclude future information by using the model's stored training feature matrix and training labels. Scanner artifacts include the relevant directional forward return, MFE, MAE, and target-before-stop label for each compact analog record.

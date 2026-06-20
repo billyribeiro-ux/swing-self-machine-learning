@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Completed the remaining autonomous scanner audit gaps: added a formal model plugin registry, temporal-fold and exceptional-period quality gates, expanded drift checks for relationship/regime, realized-performance, and calibration shifts, target-before-stop outcomes in analog payloads, portfolio candidate-audit rows, and symbol-level return output.
+- Changed scanner candidate fallback so `--include-challengers` uses only the newest candidate generation for the active feature manifest when no champion exists, preventing stale artifacts from mixing into current scanner evidence.
+- Added explicit `scan --update-data` and `scan --universe` controls so universe updates can be part of the scanner workflow without making external provider calls on ordinary scans.
+- Verified the latest local scanner snapshot `9ff465a229a0d4cd9e4e6b36` contains 50 review rows, 25 bullish and 25 bearish, 0 unknown attribution categories, and target-before-stop analog outcomes in every row.
 - Completed the autonomous scanner evidence pass against the current feature manifest: every generated feature column is mapped to a registry family, relationship mutual-information and expanding unsupervised regime features are generated, model discovery uses bounded mutual-information screening, scanner models are filtered by current feature-manifest hash, and scanner attribution no longer emits an `unknown` category.
 - Added separate target-before-stop probability modeling and scanner output, persisted compact historical analogs and signal close context in scanner snapshots, and verified the latest scanner artifact contains 25 bullish and 25 bearish review rows.
 - Expanded paper-forward lifecycle events with frozen stop/target policy prices after next-open paper fill, while preserving append-only/idempotent event insertion.
@@ -15,7 +19,7 @@
 - Added autonomous-engine regression tests for backward-looking features, label isolation, purged splits, registry immutability, scanner idempotency, scanner-candidate persistence, append-only forward events, and next-open portfolio entries.
 - Added a naive historical base-rate classifier as an explicit model-discovery baseline.
 - Added holdout permutation-importance and feature-stability diagnostics to registered model metrics.
-- Added drift reporting for feature and prediction distributions; drift can alert and train challengers later, but it does not mutate or promote models.
+- Added drift reporting for feature, relationship/regime, prediction, realized-performance, and calibration distributions; drift can alert and train challengers later, but it does not mutate or promote models.
 - Completed the paper-forward vertical slice from latest scanner events through pending entries, next-session paper fills, position marks, and time exits with idempotent append-only events.
 - Fixed `scripts/run_daily_cycle.sh` executable permissions and verified the wrapper returns idempotent daily-cycle status.
 - Fixed walk-forward split planning so automatically calculated test folds reserve the configured gap before sizing test windows.

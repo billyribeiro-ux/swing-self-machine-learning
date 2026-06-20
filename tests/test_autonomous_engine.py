@@ -15,7 +15,7 @@ from swing_rsi.engine.forward import (
     list_forward_events,
 )
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
-from swing_rsi.engine.models import BaseRateClassifier, ModelBundle, predict_bundle
+from swing_rsi.engine.models import BaseRateClassifier, ModelBundle, model_plugins, predict_bundle
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import RegisteredModel, promote_model, register_model
 from swing_rsi.engine.scanner import ScannerConfig, latest_common_session, run_scanner
@@ -211,25 +211,58 @@ def test_naive_base_rate_classifier_is_deterministic_baseline() -> None:
     assert probabilities[:, 1].tolist() == pytest.approx([0.75, 0.75])
 
 
+def test_model_plugins_define_classifier_and_regressor_interfaces() -> None:
+    plugins = {plugin.name: plugin for plugin in model_plugins()}
+
+    assert set(plugins) == {
+        "naive_base_rate",
+        "logistic_regression",
+        "hist_gradient_boosting",
+        "extra_trees",
+    }
+    for plugin in plugins.values():
+        assert plugin.classifier_factory(42) is not None
+        assert plugin.regressor_factory(42) is not None
+
+
 def test_drift_report_flags_shift_without_mutating_models() -> None:
-    reference = pd.DataFrame({"feature_a": [0.0, 1.0, 2.0, 3.0], "feature_b": [10.0] * 4})
-    current = pd.DataFrame({"feature_a": [10.0, 11.0], "feature_b": [10.0, 10.0]})
+    reference = pd.DataFrame(
+        {
+            "feature_a": [0.0, 1.0, 2.0, 3.0],
+            "feature_b": [10.0] * 4,
+            "relationship_corr_spy_sqqq_63": [0.1, 0.2, 0.1, 0.2],
+        }
+    )
+    current = pd.DataFrame(
+        {
+            "feature_a": [10.0, 11.0],
+            "feature_b": [10.0, 10.0],
+            "relationship_corr_spy_sqqq_63": [2.0, 2.1],
+        }
+    )
 
     report = build_drift_report(
         model_id="model-a",
         as_of_date="2024-01-02",
         reference_features=reference,
         current_features=current,
-        feature_columns=("feature_a", "feature_b"),
+        feature_columns=("feature_a", "feature_b", "relationship_corr_spy_sqqq_63"),
         reference_probabilities=np.array([0.45, 0.50, 0.55]),
         current_probabilities=np.array([0.90, 0.92]),
+        reference_returns=np.array([0.01, 0.02, 0.00]),
+        current_returns=np.array([-0.05, -0.04]),
+        reference_brier=0.20,
+        current_brier=0.31,
     )
 
     assert report.model_id == "model-a"
-    assert report.alert_count == 2
+    assert report.alert_count >= 4
     assert {metric.name for metric in report.metrics} == {
         "feature_distribution_mean_abs_z",
+        "relationship_regime_mean_abs_z",
         "prediction_probability_mean_shift",
+        "realized_performance_mean_return_shift",
+        "calibration_brier_deterioration",
     }
 
 
@@ -242,6 +275,7 @@ def _bundle(model_id: str = "model-a") -> ModelBundle:
             "label_bull_forward_return_10": [0.01, 0.02, -0.01],
             "label_bull_mfe_10": [0.03, 0.04, 0.01],
             "label_bull_mae_10": [-0.01, -0.02, -0.03],
+            "label_bull_target_before_stop_10": [1.0, 1.0, 0.0],
         }
     )
     return ModelBundle(
@@ -321,6 +355,7 @@ def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_pa
     assert "residual/unexplained" in first.rows["top_attribution_categories"].iloc[0]
     assert "historical_analogs" in first.rows.columns
     assert "signal_close" in first.rows.columns
+    assert "label_bull_target_before_stop_10" in first.rows["historical_analogs"].iloc[0]
     with engine_connection(tmp_path / "engine.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scanner_candidates").fetchone()[0] == 2
 
@@ -430,6 +465,16 @@ def test_portfolio_backtester_enters_next_open_and_handles_shorts(
                 "model_id": "model-a",
                 "sector": "technology",
             },
+            {
+                "as_of_date": simple_ohlcv.index[30].date().isoformat(),
+                "ticker": "AAPL",
+                "direction": "Bullish",
+                "candidate_status": "REJECTED",
+                "exclusion_reason": "model_not_promoted_or_quality_gates_failed",
+                "composite_utility_score": 0.1,
+                "model_id": "model-b",
+                "sector": "technology",
+            },
         ]
     )
 
@@ -448,3 +493,7 @@ def test_portfolio_backtester_enters_next_open_and_handles_shorts(
     assert "annualized_return" in result.metrics
     assert not result.yearly_returns.empty
     assert not result.sector_returns.empty
+    assert not result.symbol_returns.empty
+    assert "model_not_promoted_or_quality_gates_failed" in set(
+        result.candidate_audit["audit_reason"]
+    )

@@ -301,7 +301,7 @@ def _scanner_models(
         if feature_manifest_hash is None or model.feature_manifest_hash == feature_manifest_hash
     )
     if not models and include_challengers:
-        models = tuple(
+        reviewable = tuple(
             model
             for model in list_models(paths.engine_db)
             if model.state in {"CHALLENGER", "CANDIDATE"}
@@ -310,6 +310,11 @@ def _scanner_models(
                 or model.feature_manifest_hash == feature_manifest_hash
             )
         )
+        if reviewable:
+            latest_created_at = max(model.created_at_utc for model in reviewable)
+            models = tuple(
+                model for model in reviewable if model.created_at_utc == latest_created_at
+            )
     if not models:
         raise ValueError("No champion model is deployed. Promote a challenger before scanning.")
     return tuple(models)
@@ -327,10 +332,11 @@ def run_live_scanner(
     root: str | Path,
     *,
     include_challengers: bool = False,
+    universe_path: str | Path | None = None,
 ) -> ScannerSnapshot:
     project_root = Path(root)
     paths = ProjectPaths(project_root)
-    universe = load_engine_universe(project_root)
+    universe = load_engine_universe(project_root, universe_path)
     frames = load_universe_frames(project_root, universe)
     common_session = latest_common_session(frames, universe.enabled_symbols)
     feature_path = latest_features_path(project_root)

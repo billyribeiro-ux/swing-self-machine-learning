@@ -273,7 +273,19 @@ def command_promote_model(args: argparse.Namespace) -> int:
 
 
 def command_scan(args: argparse.Namespace) -> int:
-    snapshot = run_live_scanner(Path.cwd(), include_challengers=args.include_challengers)
+    if args.update_data:
+        update = update_universe_data(Path.cwd(), universe_path=args.universe)
+        updated = sum(1 for row in update.results if row.status == "updated")
+        errors = sum(1 for row in update.results if row.status == "error")
+        print(
+            f"Updated universe before scan: {updated:,} symbols updated, "
+            f"{errors:,} symbols with errors."
+        )
+    snapshot = run_live_scanner(
+        Path.cwd(),
+        include_challengers=args.include_challengers,
+        universe_path=args.universe,
+    )
     print(f"Scan ID: {snapshot.scan_id}")
     print(f"As-of date: {snapshot.as_of_date}")
     print(f"Rows: {len(snapshot.rows):,}")
@@ -374,6 +386,12 @@ def build_parser() -> argparse.ArgumentParser:
     promote.set_defaults(handler=command_promote_model)
 
     scan = subparsers.add_parser("scan", help="Run the latest-session autonomous scanner")
+    scan.add_argument("--universe", default=None)
+    scan.add_argument(
+        "--update-data",
+        action="store_true",
+        help="Update enabled universe symbols before scanning; does not print secrets",
+    )
     scan.add_argument(
         "--include-challengers",
         action="store_true",

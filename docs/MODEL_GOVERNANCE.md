@@ -49,15 +49,27 @@ The current vertical slice gates on:
 - sector concentration cap;
 - transaction-cost sensitivity;
 - prediction-turnover cap;
+- temporal-fold stability;
+- exceptional-period concentration;
 - comparison-control availability.
 
-Registered metrics also retain feature-stability summaries, bounded holdout permutation-importance summaries, target-before-stop calibration, positive year/regime/sector fractions, symbol/sector concentration, double-cost lower bound, prediction turnover, and naive/RSI-control availability for review. Those diagnostics do not override failed gates.
+Registered metrics also retain feature-stability summaries, bounded holdout permutation-importance summaries, target-before-stop calibration, positive year/regime/sector fractions, symbol/sector concentration, double-cost lower bound, prediction turnover, temporal-fold positive fraction, exceptional-period concentration, model plugin metadata, and naive/RSI-control availability for review. Those diagnostics do not override failed gates.
+
+## Model Plugin Interface
+
+`src/swing_rsi/engine/models.py` exposes `ModelPlugin` metadata for every discovery family. Each plugin defines:
+
+- a classifier factory;
+- a regressor factory;
+- whether the family can capture nonlinear interactions.
+
+The current plugin set is `naive_base_rate`, `logistic_regression`, `hist_gradient_boosting`, and `extra_trees`.
 
 The model report retains failed gates instead of weakening them. A model that does not pass every mandatory gate remains a `CANDIDATE` or `REJECTED`.
 
 ## Drift Policy
 
-`src/swing_rsi/engine/drift.py` compares train-reference feature distributions and optional prediction distributions with the latest as-of snapshot.
+`src/swing_rsi/engine/drift.py` compares train-reference feature distributions, relationship/regime feature distributions, optional prediction distributions, optional realized-performance returns, and optional calibration Brier deterioration with the latest as-of or forward-test evidence.
 
 Drift alerts are evidence for review and possible challenger training. They never mutate an existing model, never silently promote a challenger, and never alter paper-forward events already recorded by a frozen model version.
 

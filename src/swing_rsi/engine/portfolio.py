@@ -36,7 +36,9 @@ class PortfolioBacktestResult:
     yearly_returns: pd.DataFrame
     regime_returns: pd.DataFrame
     sector_returns: pd.DataFrame
+    symbol_returns: pd.DataFrame
     model_version_returns: pd.DataFrame
+    candidate_audit: pd.DataFrame
 
 
 def _exit_trade(
@@ -158,6 +160,8 @@ def _empty_result() -> PortfolioBacktestResult:
         pd.DataFrame(),
         pd.DataFrame(),
         pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
     )
 
 
@@ -244,8 +248,20 @@ def backtest_scanner_candidates(
     )
     open_positions: list[dict[str, object]] = []
     trades: list[dict[str, object]] = []
+    audit_rows: list[dict[str, object]] = []
     for _, candidate in candidates.iterrows():
+        audit: dict[str, object] = {
+            "as_of_date": candidate.get("as_of_date", ""),
+            "ticker": candidate.get("ticker", ""),
+            "direction": candidate.get("direction", ""),
+            "model_id": candidate.get("model_id", ""),
+            "candidate_status": candidate.get("candidate_status", ""),
+            "included_as_trade": False,
+            "audit_reason": "",
+        }
         if candidate.get("candidate_status") != "ACTIONABLE_PAPER_CANDIDATE":
+            audit["audit_reason"] = candidate.get("exclusion_reason", "candidate_rejected")
+            audit_rows.append(audit)
             continue
         signal_date = pd.Timestamp(candidate["as_of_date"])
         open_positions = [
@@ -256,21 +272,31 @@ def backtest_scanner_candidates(
         ticker = str(candidate["ticker"])
         symbol_open_count = sum(1 for position in open_positions if position["ticker"] == ticker)
         if symbol_open_count >= config.max_position_per_symbol:
+            audit["audit_reason"] = "max_position_per_symbol"
+            audit_rows.append(audit)
             continue
         if len(open_positions) >= config.max_concurrent_positions:
+            audit["audit_reason"] = "max_concurrent_positions"
+            audit_rows.append(audit)
             continue
         sector = str(candidate.get("sector", "unknown"))
         sector_count = sum(1 for position in open_positions if position.get("sector") == sector)
         if (sector_count + 1) / max(
             config.max_concurrent_positions, 1
         ) > config.max_sector_fraction:
+            audit["audit_reason"] = "sector_concentration_limit"
+            audit_rows.append(audit)
             continue
         frame = frames.get(ticker)
         if frame is None:
+            audit["audit_reason"] = "missing_symbol_frame"
+            audit_rows.append(audit)
             continue
         data = validate_ohlcv(frame)
         positions = np.where(data.index == signal_date)[0]
         if len(positions) == 0:
+            audit["audit_reason"] = "signal_date_not_in_frame"
+            audit_rows.append(audit)
             continue
         trade = _exit_trade(
             data,
@@ -279,6 +305,8 @@ def backtest_scanner_candidates(
             config=config,
         )
         if trade is None:
+            audit["audit_reason"] = "no_future_entry_or_exit_bar"
+            audit_rows.append(audit)
             continue
         weight = _position_weight(data, config)
         direction_sign = 1.0 if trade["direction"] == "Bullish" else -1.0
@@ -297,6 +325,8 @@ def backtest_scanner_candidates(
             projected_gross > config.max_gross_exposure
             or abs(projected_net) > config.max_net_exposure
         ):
+            audit["audit_reason"] = "exposure_limit"
+            audit_rows.append(audit)
             continue
         trade["ticker"] = ticker
         trade["model_id"] = candidate.get("model_id", "")
@@ -306,6 +336,12 @@ def backtest_scanner_candidates(
         trade["position_weight"] = weight
         trade["weighted_net_return"] = float(cast(float, trade["net_return"])) * weight
         trades.append(trade)
+        audit["included_as_trade"] = True
+        audit["audit_reason"] = "included"
+        audit["entry_date"] = trade["entry_date"]
+        audit["exit_date"] = trade["exit_date"]
+        audit["net_return"] = trade["net_return"]
+        audit_rows.append(audit)
         open_positions.append(
             {
                 "ticker": ticker,
@@ -318,7 +354,18 @@ def backtest_scanner_candidates(
 
     ledger = pd.DataFrame(trades)
     if ledger.empty:
-        return _empty_result()
+        empty = _empty_result()
+        return PortfolioBacktestResult(
+            empty.trades,
+            empty.equity,
+            empty.metrics,
+            empty.yearly_returns,
+            empty.regime_returns,
+            empty.sector_returns,
+            empty.symbol_returns,
+            empty.model_version_returns,
+            pd.DataFrame(audit_rows),
+        )
     returns = pd.to_numeric(ledger["net_return"], errors="coerce").fillna(0.0)
     weighted_returns = pd.to_numeric(ledger["weighted_net_return"], errors="coerce").fillna(0.0)
     equity = _daily_equity(ledger, frames)
@@ -376,5 +423,7 @@ def backtest_scanner_candidates(
         yearly,
         _group_returns(ledger, "regime", "regime"),
         _group_returns(ledger, "sector", "sector"),
+        _group_returns(ledger, "ticker", "ticker"),
         _group_returns(ledger, "model_version", "model_version"),
+        pd.DataFrame(audit_rows),
     )

@@ -1,5 +1,23 @@
 # Decision Log
 
+## 2026-06-20 — Scanner review mode uses newest candidate generation only
+
+Decision: When no champion exists and scanner review mode is explicitly enabled with `--include-challengers`, load only the newest `CANDIDATE`/`CHALLENGER` generation for the active feature-manifest hash. Keep older model artifacts registered for audit history, but do not mix them into the current scanner run.
+
+Reason: Multiple discovery runs can register immutable candidates against the same feature manifest. Scanner output should represent one coherent frozen model generation, not a blend of stale and current artifacts.
+
+## 2026-06-20 — Discovery models expose a formal plugin interface
+
+Decision: Model discovery now defines explicit `ModelPlugin` records containing classifier and regressor factories plus nonlinear-interaction metadata. Quality gates also include temporal-fold stability and exceptional-period concentration diagnostics.
+
+Reason: The scanner must be able to add or retire model families without hiding preprocessing or ranking behavior. Stability and concentration checks reduce dependence on one exceptional period.
+
+## 2026-06-20 — Drift and portfolio audit evidence are first-class outputs
+
+Decision: Drift reports include relationship/regime, realized-performance, and calibration deterioration metrics when the required inputs are available. Portfolio scanner backtests retain rejected candidate audit rows and symbol-level contribution output.
+
+Reason: Auto-adaptation must be evidence-driven and controlled. Rejected scanner candidates and unexplained drift are part of the research record and must not disappear from review.
+
 ## 2026-06-20 — Scanner uses only current feature-manifest model artifacts
 
 Decision: Live scanner and drift checks filter registered models to the latest feature-manifest hash before loading artifacts. Feature-family attribution now maps every generated feature column to a known registry family, with residual/unexplained retained as a model-contribution bucket rather than an accidental unknown category.
