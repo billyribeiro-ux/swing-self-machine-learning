@@ -40,7 +40,6 @@ def render_page() -> None:
     render_page_header("Data and Audit", "Download FMP daily bars and inspect raw CSV structure.")
 
     streamlit.subheader("Download Or Update")
-    use_end = streamlit.checkbox("Set end date", value=False, key="download_use_end")
     with streamlit.form("download_form"):
         ticker = (
             streamlit.text_input(
@@ -60,11 +59,15 @@ def render_page() -> None:
             autocomplete="off",
         )
         start = streamlit.date_input("Start date", value=_years_ago(10), key="download_start")
-        end = streamlit.date_input(
-            "End date",
-            value=date.today(),
-            disabled=not use_end,
-            key="download_end",
+        end = streamlit.date_input("End date", value=date.today(), key="download_end")
+        use_end = streamlit.checkbox(
+            "Use end date in download request",
+            value=True,
+            key="download_use_end",
+        )
+        streamlit.caption(
+            "The end date stays editable. Uncheck this only when the provider request should omit "
+            "an end date."
         )
         submitted = streamlit.form_submit_button(
             "Download/update", disabled=not status.fmp_configured
