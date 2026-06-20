@@ -24,6 +24,7 @@ from swing_rsi.backtest.engine import backtest_fixed_horizon
 from swing_rsi.config import ProjectPaths
 from swing_rsi.data.loader import load_ohlcv_csv, save_ohlcv_csv
 from swing_rsi.data.providers.fmp import download_fmp_daily
+from swing_rsi.engine.model_audit import audit_text, build_model_audit, export_model_audit
 from swing_rsi.features.labels import add_swing_labels
 from swing_rsi.features.price import build_price_features
 from swing_rsi.features.rsi import wilder_rsi
@@ -263,6 +264,21 @@ def command_model_registry(_: argparse.Namespace) -> int:
     return 0
 
 
+def command_model_audit(args: argparse.Namespace) -> int:
+    result = build_model_audit(
+        Path.cwd(),
+        generation=args.generation,
+        model_id=args.model_id,
+    )
+    print(audit_text(result))
+    if args.export_dir:
+        paths = export_model_audit(result, args.export_dir)
+        print("Exports:")
+        for path in paths:
+            print(f"- {path}")
+    return 0
+
+
 def command_promote_model(args: argparse.Namespace) -> int:
     promoted = promote_registered_model(Path.cwd(), args.model_id)
     print(f"Promoted champion model: {promoted.model_id}")
@@ -380,6 +396,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     registry = subparsers.add_parser("model-registry", help="List registered models")
     registry.set_defaults(handler=command_model_registry)
+
+    audit = subparsers.add_parser(
+        "model-audit",
+        help="Print and export canonical model evaluation gate audits",
+    )
+    audit.add_argument("--generation", default="latest")
+    audit.add_argument("--model-id", default=None)
+    audit.add_argument("--export-dir", default=None)
+    audit.set_defaults(handler=command_model_audit)
 
     promote = subparsers.add_parser("promote-model", help="Promote a passed challenger model")
     promote.add_argument("--model-id", required=True)
