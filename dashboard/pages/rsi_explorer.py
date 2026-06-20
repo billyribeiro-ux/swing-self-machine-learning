@@ -33,21 +33,44 @@ def render_page() -> None:
         return
 
     labels = {f"{dataset.ticker} - {dataset.path.name}": dataset for dataset in datasets}
-    selected_label = streamlit.selectbox("Ticker", options=tuple(labels.keys()))
+    selected_label = streamlit.selectbox(
+        "Ticker",
+        options=tuple(labels.keys()),
+        key="rsi_ticker",
+    )
     selected = labels[str(selected_label)]
 
-    start = streamlit.date_input("Window start", value=_years_ago(5))
-    end = streamlit.date_input("Window end", value=date.today())
-    length = streamlit.slider("RSI length", min_value=2, max_value=50, value=10)
-    lower_level = streamlit.slider("Lower reference level", min_value=5, max_value=60, value=35)
+    start = streamlit.date_input("Window start", value=_years_ago(5), key="rsi_window_start")
+    end = streamlit.date_input("Window end", value=date.today(), key="rsi_window_end")
+    length = streamlit.slider("RSI length", min_value=2, max_value=50, value=10, key="rsi_length")
+    lower_level = streamlit.slider(
+        "Lower reference level",
+        min_value=5,
+        max_value=60,
+        value=35,
+        key="rsi_lower_level",
+    )
     trigger_mode = streamlit.selectbox(
-        "Trigger mode", ("cross_above", "turn_up_below", "recent_reclaim")
+        "Trigger mode",
+        ("cross_above", "turn_up_below", "recent_reclaim"),
+        key="rsi_trigger_mode",
     )
-    slope_window = streamlit.selectbox("Slope window", (1, 2, 3, 5, 10), index=0)
+    slope_window = streamlit.selectbox(
+        "Slope window",
+        (1, 2, 3, 5, 10),
+        index=0,
+        key="rsi_slope_window",
+    )
     trend_filter = streamlit.selectbox(
-        "Trend filter", ("none", "above_sma_50", "above_sma_200", "sma_50_above_200")
+        "Trend filter",
+        ("none", "above_sma_50", "above_sma_200", "sma_50_above_200"),
+        key="rsi_trend_filter",
     )
-    compare_control = streamlit.checkbox("Compare with retail control RSI(14)/30", value=False)
+    compare_control = streamlit.checkbox(
+        "Compare with retail control RSI(14)/30",
+        value=False,
+        key="rsi_compare_control",
+    )
 
     try:
         frame = load_raw_dataset(selected.path)

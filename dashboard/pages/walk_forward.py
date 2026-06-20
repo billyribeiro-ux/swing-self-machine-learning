@@ -36,25 +36,57 @@ def render_page() -> None:
     labels = {f"{dataset.ticker} - {dataset.path.name}": dataset for dataset in datasets}
 
     with streamlit.form("walk_forward_form"):
-        selected_label = streamlit.selectbox("Ticker", options=tuple(labels.keys()))
+        selected_label = streamlit.selectbox(
+            "Ticker",
+            options=tuple(labels.keys()),
+            key="walk_forward_ticker",
+        )
         selected = labels[str(selected_label)]
-        start = streamlit.date_input("Research start", value=_years_ago(10))
-        end = streamlit.date_input("Research end", value=date.today())
-        holding_period = streamlit.number_input("Holding period", min_value=1, value=10, step=1)
+        start = streamlit.date_input(
+            "Research start",
+            value=_years_ago(10),
+            key="walk_forward_start",
+        )
+        end = streamlit.date_input(
+            "Research end",
+            value=date.today(),
+            key="walk_forward_end",
+        )
+        holding_period = streamlit.number_input(
+            "Holding period",
+            min_value=1,
+            value=10,
+            step=1,
+            key="walk_forward_holding_period",
+        )
         cost_bps = streamlit.number_input(
-            "Round-trip cost in basis points", min_value=0.0, value=5.0, step=0.5
+            "Round-trip cost in basis points",
+            min_value=0.0,
+            value=5.0,
+            step=0.5,
+            key="walk_forward_cost_bps",
         )
         minimum_training_trades = streamlit.number_input(
-            "Minimum training trades", min_value=1, value=20
+            "Minimum training trades",
+            min_value=1,
+            value=20,
+            key="walk_forward_minimum_training_trades",
         )
-        folds = streamlit.number_input("Number of folds", min_value=2, value=5)
-        gap = streamlit.number_input("Gap", min_value=0, value=1)
+        folds = streamlit.number_input(
+            "Number of folds",
+            min_value=2,
+            value=5,
+            key="walk_forward_folds",
+        )
+        gap = streamlit.number_input("Gap", min_value=0, value=1, key="walk_forward_gap")
         streamlit.caption(
             "Gap is the number of sessions left unused between training and test windows. "
             "Training trades that cannot enter and exit inside the training slice are skipped."
         )
         preset_label = streamlit.selectbox(
-            "Grid preset", ("Quick plumbing grid", "Standard research grid")
+            "Grid preset",
+            ("Quick plumbing grid", "Standard research grid"),
+            key="walk_forward_grid_preset",
         )
         preset = _preset_value(str(preset_label))
         candidates = candidate_rule_count(grid_for_preset(preset))  # type: ignore[arg-type]

@@ -51,6 +51,23 @@ def test_rsi_explorer_controls_smoke(demo_dashboard_root: Path) -> None:
     assert any(subheader.value == "Retail Control RSI(14)/30" for subheader in app.subheader)
 
 
+def test_data_audit_end_date_toggle_enables_end_date(
+    demo_dashboard_root: Path,
+) -> None:
+    app = AppTest.from_file("dashboard/pages/data_audit.py").run(timeout=30)
+    _assert_no_streamlit_exceptions(app)
+
+    end_date = next(widget for widget in app.date_input if widget.label == "End date")
+    assert end_date.disabled is True
+
+    app.checkbox[0].set_value(True)
+    app.run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    end_date = next(widget for widget in app.date_input if widget.label == "End date")
+    assert end_date.disabled is False
+
+
 def test_quick_research_submission_and_candidate_selection_smoke(
     demo_dashboard_root: Path,
 ) -> None:

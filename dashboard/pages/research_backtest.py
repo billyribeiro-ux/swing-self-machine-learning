@@ -47,17 +47,46 @@ def render_page() -> None:
     labels = {f"{dataset.ticker} - {dataset.path.name}": dataset for dataset in datasets}
 
     with streamlit.form("research_form"):
-        selected_label = streamlit.selectbox("Ticker", options=tuple(labels.keys()))
-        selected = labels[str(selected_label)]
-        start = streamlit.date_input("Research start", value=_years_ago(10))
-        end = streamlit.date_input("Research end", value=date.today())
-        holding_period = streamlit.number_input("Holding period", min_value=1, value=10, step=1)
-        cost_bps = streamlit.number_input(
-            "Round-trip cost in basis points", min_value=0.0, value=5.0, step=0.5
+        selected_label = streamlit.selectbox(
+            "Ticker",
+            options=tuple(labels.keys()),
+            key="research_input_ticker",
         )
-        minimum_trades = streamlit.number_input("Minimum trade count", min_value=1, value=30)
+        selected = labels[str(selected_label)]
+        start = streamlit.date_input(
+            "Research start",
+            value=_years_ago(10),
+            key="research_input_start",
+        )
+        end = streamlit.date_input(
+            "Research end",
+            value=date.today(),
+            key="research_input_end",
+        )
+        holding_period = streamlit.number_input(
+            "Holding period",
+            min_value=1,
+            value=10,
+            step=1,
+            key="research_input_holding_period",
+        )
+        cost_bps = streamlit.number_input(
+            "Round-trip cost in basis points",
+            min_value=0.0,
+            value=5.0,
+            step=0.5,
+            key="research_input_cost_bps",
+        )
+        minimum_trades = streamlit.number_input(
+            "Minimum trade count",
+            min_value=1,
+            value=30,
+            key="research_input_minimum_trades",
+        )
         preset_label = streamlit.selectbox(
-            "Grid preset", ("Quick plumbing grid", "Standard research grid")
+            "Grid preset",
+            ("Quick plumbing grid", "Standard research grid"),
+            key="research_input_grid_preset",
         )
         preset = _preset_value(str(preset_label))
         candidates = candidate_rule_count(grid_for_preset(preset))  # type: ignore[arg-type]
@@ -162,7 +191,11 @@ def render_page() -> None:
     streamlit.subheader("Top Candidate Table")
     streamlit.dataframe(run.results[columns].head(25), width="stretch")
 
-    selected_rule = streamlit.selectbox("Candidate row", tuple(run.results["rule_id"].head(100)))
+    selected_rule = streamlit.selectbox(
+        "Candidate row",
+        tuple(run.results["rule_id"].head(100)),
+        key="research_candidate_row",
+    )
     row = run.results[run.results["rule_id"] == selected_rule].iloc[0]
     source_path = streamlit.session_state["research_source_path"]
     frame = load_raw_dataset(source_path)

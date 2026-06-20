@@ -40,12 +40,32 @@ def render_page() -> None:
     render_page_header("Data and Audit", "Download FMP daily bars and inspect raw CSV structure.")
 
     streamlit.subheader("Download Or Update")
+    use_end = streamlit.checkbox("Set end date", value=False, key="download_use_end")
     with streamlit.form("download_form"):
-        ticker = streamlit.text_input("Ticker", value="AAPL").strip().upper()
-        streamlit.text_input("Provider", value="FMP", disabled=True)
-        start = streamlit.date_input("Start date", value=_years_ago(10))
-        use_end = streamlit.checkbox("Set end date", value=False)
-        end = streamlit.date_input("End date", value=date.today(), disabled=not use_end)
+        ticker = (
+            streamlit.text_input(
+                "Ticker",
+                value="AAPL",
+                key="download_ticker",
+                autocomplete="off",
+            )
+            .strip()
+            .upper()
+        )
+        streamlit.text_input(
+            "Provider",
+            value="FMP",
+            disabled=True,
+            key="download_provider",
+            autocomplete="off",
+        )
+        start = streamlit.date_input("Start date", value=_years_ago(10), key="download_start")
+        end = streamlit.date_input(
+            "End date",
+            value=date.today(),
+            disabled=not use_end,
+            key="download_end",
+        )
         submitted = streamlit.form_submit_button(
             "Download/update", disabled=not status.fmp_configured
         )
@@ -78,7 +98,11 @@ def render_page() -> None:
         return
 
     labels = {f"{dataset.ticker} - {dataset.path.name}": dataset for dataset in datasets}
-    selected_label = streamlit.selectbox("Raw CSV", options=tuple(labels.keys()))
+    selected_label = streamlit.selectbox(
+        "Raw CSV",
+        options=tuple(labels.keys()),
+        key="audit_raw_csv",
+    )
     selected = labels[str(selected_label)]
     streamlit.write(
         f"Raw-file coverage: {selected.first_date or 'n/a'} through "
@@ -86,11 +110,22 @@ def render_page() -> None:
     )
 
     preset = streamlit.selectbox(
-        "Research-window preset", ("3 years", "5 years", "10 years", "15 years", "custom"), index=2
+        "Research-window preset",
+        ("3 years", "5 years", "10 years", "15 years", "custom"),
+        index=2,
+        key="audit_window_preset",
     )
     if preset == "custom":
-        window_start = streamlit.date_input("Custom start", value=_years_ago(10))
-        window_end = streamlit.date_input("Custom end", value=date.today())
+        window_start = streamlit.date_input(
+            "Custom start",
+            value=_years_ago(10),
+            key="audit_custom_start",
+        )
+        window_end = streamlit.date_input(
+            "Custom end",
+            value=date.today(),
+            key="audit_custom_end",
+        )
     else:
         window_start = _window_start_from_preset(str(preset))
         window_end = date.today()
