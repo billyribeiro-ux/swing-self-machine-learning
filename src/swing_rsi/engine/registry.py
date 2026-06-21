@@ -10,6 +10,7 @@ from swing_rsi.engine.gates import (
     FINAL_HOLDOUT_PROMOTION_GATE_ID,
     GATE_VALUE_NOT_AVAILABLE,
     GateResult,
+    configuration_hash,
     gate_results_from_jsonable,
     gate_results_to_jsonable,
     holdout_status_allows_promotion,
@@ -18,6 +19,7 @@ from swing_rsi.engine.gates import (
     normalized_holdout_status,
     promotion_eligibility,
 )
+from swing_rsi.engine.manifest import hash_file
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
 ModelState = Literal["EXPERIMENTAL", "CANDIDATE", "CHALLENGER", "CHAMPION", "RETIRED", "REJECTED"]
@@ -211,6 +213,52 @@ def _registered_holdout_status(model: RegisteredModel) -> str:
     return normalized_holdout_status(gate.actual_value)
 
 
+def _model_ood_hash(model: RegisteredModel) -> str:
+    payload: dict[str, object] = {
+        key: value
+        for key, value in sorted(model.metrics.items())
+        if "ood" in key or key == "prediction_ood_governance_version"
+    }
+    return configuration_hash(payload)
+
+
+def _final_holdout_freeze_blocker(db_path: str | Path, model: RegisteredModel) -> str | None:
+    run_id = model.metrics.get("final_holdout_run_id")
+    evidence_hash = model.metrics.get("final_holdout_evidence_manifest_hash")
+    if not run_id or not evidence_hash:
+        return "missing final-holdout run ID or evidence manifest hash"
+    with engine_connection(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT artifact_path, artifact_hash, selection_policy_hash,
+                   calibration_governance_hash, ood_governance_hash, research_only
+            FROM final_holdout_models
+            WHERE run_id = ? AND model_id = ?
+            """,
+            (str(run_id), model.model_id),
+        ).fetchone()
+    if row is None:
+        return "missing final-holdout enrollment record"
+    if bool(row["research_only"]):
+        return "research-only final-holdout enrollment is not promotable"
+    artifact_path = Path(str(row["artifact_path"]))
+    if not artifact_path.exists():
+        return "frozen final-holdout artifact is missing"
+    if hash_file(artifact_path) != str(row["artifact_hash"]):
+        return "frozen final-holdout artifact hash changed"
+    if str(model.metrics.get("selection_policy_configuration_hash") or "") != str(
+        row["selection_policy_hash"]
+    ):
+        return "frozen final-holdout selection-policy hash changed"
+    if str(model.metrics.get("target_before_stop_calibration_manifest_hash") or "") != str(
+        row["calibration_governance_hash"]
+    ):
+        return "frozen final-holdout calibration-governance hash changed"
+    if _model_ood_hash(model) != str(row["ood_governance_hash"]):
+        return "frozen final-holdout OOD-governance hash changed"
+    return None
+
+
 def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
     models = list_models(db_path)
     selected = next((model for model in models if model.model_id == model_id), None)
@@ -229,6 +277,12 @@ def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
         raise ValueError(
             "Model cannot be promoted because mandatory gate results block promotion: "
             f"{list(eligibility.blocked_reasons)}"
+        )
+    freeze_blocker = _final_holdout_freeze_blocker(db_path, selected)
+    if freeze_blocker is not None:
+        raise ValueError(
+            "Model cannot be promoted because final-holdout evidence is not valid: "
+            f"{freeze_blocker}"
         )
 
     promoted_at = datetime.now(UTC).isoformat()
