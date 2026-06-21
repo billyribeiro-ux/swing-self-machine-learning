@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,10 +21,12 @@ from swing_rsi.engine.gates import (
     FINAL_HOLDOUT_PROMOTION_GATE_ID,
     FINAL_HOLDOUT_STATUS,
     GATE_VALUE_NOT_AVAILABLE,
+    configuration_hash,
     make_gate,
     promotion_eligibility,
 )
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
+from swing_rsi.engine.manifest import hash_file
 from swing_rsi.engine.models import (
     TARGET_BEFORE_STOP_HEAD,
     BaseRateClassifier,
@@ -250,9 +252,47 @@ def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> Registered
 
 def test_model_registry_is_immutable_and_promotion_is_explicit(tmp_path: Path) -> None:
     db = tmp_path / "engine.sqlite3"
+    artifact = tmp_path / "artifact.joblib"
+    artifact.write_text("synthetic frozen artifact", encoding="utf-8")
+    run_id = "synthetic-final-holdout-run"
     model = _registered_model("model-a")
+    model = replace(
+        model,
+        artifact_path=str(artifact),
+        metrics={
+            **model.metrics,
+            "final_holdout_run_id": run_id,
+            "final_holdout_evidence_manifest_hash": "synthetic-evidence",
+        },
+    )
 
     register_model(db, model)
+    with engine_connection(db) as connection:
+        connection.execute(
+            """
+            INSERT INTO final_holdout_models (
+                run_id, model_id, generation_id, artifact_path, artifact_hash,
+                model_state_at_enrollment, development_gate_eligible, research_only,
+                selection_policy_hash, calibration_governance_hash, ood_governance_hash,
+                enrollment_blockers_json, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                model.model_id,
+                model.created_at_utc,
+                model.artifact_path,
+                hash_file(model.artifact_path),
+                model.state,
+                1,
+                0,
+                "",
+                "",
+                configuration_hash({}),
+                "[]",
+                "{}",
+            ),
+        )
     with pytest.raises(ValueError):
         register_model(db, model)
     promoted = promote_model(db, "model-a")
