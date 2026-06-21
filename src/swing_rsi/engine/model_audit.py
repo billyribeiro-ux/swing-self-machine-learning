@@ -27,6 +27,7 @@ class ModelAuditResult:
     portfolio_daily_equity: pd.DataFrame
     selected_candidate_ledger: pd.DataFrame
     trade_ledger: pd.DataFrame
+    feature_screens: pd.DataFrame
 
 
 def _safe_json_records(value: object) -> list[dict[str, Any]]:
@@ -39,6 +40,16 @@ def _safe_json_records(value: object) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict)]
+
+
+def _safe_json_dict(value: object) -> dict[str, Any]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _machine_value(value: object) -> object:
@@ -84,6 +95,8 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
         eligibility = promotion_eligibility(model.gate_results)
         metrics = model.metrics
         calibration = model.calibration_metrics
+        head_columns = _safe_json_dict(metrics.get("head_feature_columns_json"))
+        primary_columns = head_columns.get("primary_positive_return", [])
         row = {
             "model_id": model.model_id,
             "generation": model.created_at_utc,
@@ -108,6 +121,18 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "portfolio_max_drawdown": metrics.get("portfolio_max_drawdown"),
             "portfolio_exposure": metrics.get("portfolio_exposure"),
             "portfolio_turnover": metrics.get("portfolio_turnover"),
+            "primary_selected_feature_count": len(primary_columns)
+            if isinstance(primary_columns, list)
+            else 0,
+            "target_before_stop_selected_feature_count": metrics.get(
+                "target_before_stop_selected_feature_count"
+            ),
+            "target_before_stop_screening_target": metrics.get(
+                "target_before_stop_screening_target"
+            ),
+            "target_before_stop_screening_manifest_hash": metrics.get(
+                "target_before_stop_screening_manifest_hash"
+            ),
             "model_brier": calibration.get("holdout_brier"),
             "naive_brier": calibration.get("naive_brier"),
             "absolute_brier_improvement": calibration.get("absolute_brier_improvement"),
@@ -246,6 +271,74 @@ def _records_frame(
     return pd.DataFrame(rows)
 
 
+def _feature_screen_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for model in models:
+        metrics = model.metrics
+        head_columns: dict[str, object] = {}
+        parsed = _safe_json_dict(metrics.get("head_feature_columns_json"))
+        head_columns = parsed
+        primary = head_columns.get("primary_positive_return", [])
+        target = head_columns.get("target_before_stop", [])
+        primary_set = set(primary if isinstance(primary, list) else [])
+        target_set = set(target if isinstance(target, list) else [])
+        overlap = len(primary_set & target_set)
+        union = len(primary_set | target_set)
+        metadata_records = _safe_json_records(
+            metrics.get("target_before_stop_top_25_train_mi_features_json")
+        )
+        audit_records = _safe_json_records(
+            metrics.get("target_before_stop_feature_screen_audit_json")
+        )
+        if not audit_records:
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "head": "target_before_stop",
+                    "reason": "target_before_stop_feature_screen_not_persisted_for_legacy_artifact",
+                    "primary_feature_count": len(primary_set),
+                    "target_before_stop_feature_count": len(target_set),
+                    "primary_target_overlap_count": overlap,
+                    "primary_target_jaccard": overlap / union if union else 0.0,
+                    "selected_feature_manifest_hash": metrics.get(
+                        "target_before_stop_screening_manifest_hash"
+                    ),
+                    "screen_configuration_hash": metrics.get(
+                        "target_before_stop_screening_configuration_hash"
+                    ),
+                }
+            )
+            continue
+        top_rank_by_feature = {
+            str(record.get("feature")): int(record.get("rank") or 0) for record in metadata_records
+        }
+        for record in audit_records:
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "direction": model.direction,
+                    "family": model.family,
+                    "horizon": model.horizon,
+                    "head": "target_before_stop",
+                    "primary_feature_count": len(primary_set),
+                    "target_before_stop_feature_count": len(target_set),
+                    "primary_target_overlap_count": overlap,
+                    "primary_target_jaccard": overlap / union if union else 0.0,
+                    "selected_feature_manifest_hash": metrics.get(
+                        "target_before_stop_screening_manifest_hash"
+                    ),
+                    "screen_configuration_hash": metrics.get(
+                        "target_before_stop_screening_configuration_hash"
+                    ),
+                    "top_25_train_mi_rank": top_rank_by_feature.get(str(record.get("feature")), ""),
+                    **record,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def build_model_audit(
     root: str | Path,
     *,
@@ -271,6 +364,7 @@ def build_model_audit(
         "portfolio_trade_ledger_json",
         missing_reason="portfolio_trade_ledger_not_persisted_for_legacy_artifact",
     )
+    feature_screens = _feature_screen_frame(models)
     return ModelAuditResult(
         generation_id=generation_id,
         models=models,
@@ -280,6 +374,7 @@ def build_model_audit(
         portfolio_daily_equity=portfolio_daily,
         selected_candidate_ledger=selected_ledger,
         trade_ledger=trade_ledger,
+        feature_screens=feature_screens,
     )
 
 
@@ -293,6 +388,7 @@ def export_model_audit(result: ModelAuditResult, export_dir: str | Path) -> tupl
         "portfolio_daily_equity.csv": result.portfolio_daily_equity,
         "selected_candidate_ledger.csv": result.selected_candidate_ledger,
         "portfolio_trade_ledger.csv": result.trade_ledger,
+        "feature_screen_audit.csv": result.feature_screens,
     }
     written: list[Path] = []
     for name, frame in paths.items():
@@ -305,6 +401,12 @@ def export_model_audit(result: ModelAuditResult, export_dir: str | Path) -> tupl
         encoding="utf-8",
     )
     written.append(gate_json)
+    feature_screen_json = output / "feature_screen_audit.json"
+    feature_screen_json.write_text(
+        json.dumps(result.feature_screens.to_dict(orient="records"), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    written.append(feature_screen_json)
     return tuple(written)
 
 

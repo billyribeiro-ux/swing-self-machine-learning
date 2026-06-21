@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 from dashboard.ui.components import render_page_header, repository_root, st
@@ -56,6 +58,7 @@ def render_page() -> None:
         streamlit.info("No model registry entries yet.")
         return
     rows: list[dict[str, object]] = []
+    screen_rows: list[dict[str, object]] = []
     for model in models:
         eligibility = promotion_eligibility(model.gate_results)
         rows.append(
@@ -113,11 +116,48 @@ def render_page() -> None:
                 "promotion_eligible": eligibility.eligible,
             }
         )
-    streamlit.dataframe(
-        display_frame(pd.DataFrame(rows)),
-        width="stretch",
-        hide_index=True,
-    )
+        family_counts: dict[str, object] = {}
+        raw_counts = model.metrics.get("target_before_stop_selected_feature_family_counts_json")
+        if isinstance(raw_counts, str) and raw_counts.strip():
+            try:
+                parsed = json.loads(raw_counts)
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                family_counts = parsed
+        screen_rows.append(
+            {
+                "model_id": model.model_id,
+                "direction": model.direction,
+                "horizon": model.horizon,
+                "family": model.family,
+                "target": model.metrics.get("target_before_stop_screening_target"),
+                "screen_schema": model.metrics.get(
+                    "target_before_stop_feature_screen_schema_version"
+                ),
+                "selected_features": model.metrics.get("target_before_stop_selected_feature_count"),
+                "selected_families": ", ".join(
+                    f"{family}:{count}" for family, count in sorted(family_counts.items())
+                ),
+                "manifest_hash": model.metrics.get("target_before_stop_screening_manifest_hash"),
+                "configuration_hash": model.metrics.get(
+                    "target_before_stop_screening_configuration_hash"
+                ),
+            }
+        )
+    tabs = streamlit.tabs(["Model Metrics", "Target-Before-Stop Feature Screen"])
+    with tabs[0]:
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(rows)),
+            width="stretch",
+            hide_index=True,
+        )
+    with tabs[1]:
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(screen_rows)),
+            width="stretch",
+            hide_index=True,
+        )
 
 
 if __name__ == "__main__":

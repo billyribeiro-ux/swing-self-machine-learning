@@ -197,6 +197,16 @@ def _json_records(value: object) -> pd.DataFrame:
     return pd.DataFrame([item for item in payload if isinstance(item, dict)])
 
 
+def _safe_parse_dict(value: object) -> dict[str, object]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _metric_subset(model: RegisteredModel, patterns: tuple[str, ...]) -> pd.DataFrame:
     rows = []
     for group, values in (("Metrics", model.metrics), ("Calibration", model.calibration_metrics)):
@@ -324,6 +334,7 @@ def render_page() -> None:
                 "Portfolio Holdout",
                 "Stability",
                 "Feature Diagnostics",
+                "Target-Before-Stop Screen",
                 "Prediction Sanity",
                 "Artifact Metadata",
             ]
@@ -437,6 +448,49 @@ def render_page() -> None:
             streamlit.dataframe(display_frame(feature_counts), width="stretch", hide_index=True)
             streamlit.dataframe(display_frame(diagnostics), width="stretch", hide_index=True)
         with tabs[6]:
+            screen_metadata = _json_records(
+                selected_model.metrics.get("target_before_stop_feature_screen_audit_json")
+            )
+            top_mi = _json_records(
+                selected_model.metrics.get("target_before_stop_top_25_train_mi_features_json")
+            )
+            tbs_feature_counts = _json_records(
+                selected_model.metrics.get("target_before_stop_selected_feature_family_counts_json")
+            )
+            if tbs_feature_counts.empty:
+                parsed = _safe_parse_dict(
+                    selected_model.metrics.get(
+                        "target_before_stop_selected_feature_family_counts_json"
+                    )
+                )
+                tbs_feature_counts = pd.DataFrame(
+                    [
+                        {"Family": family, "Selected Features": count}
+                        for family, count in parsed.items()
+                    ]
+                )
+            screen_summary = _metric_subset(
+                selected_model,
+                (
+                    "target_before_stop_feature_screen",
+                    "target_before_stop_screening",
+                    "target_before_stop_selected_feature",
+                    "target_before_stop_top_25",
+                    "target_before_stop_permutation",
+                ),
+            )
+            streamlit.dataframe(display_frame(screen_summary), width="stretch", hide_index=True)
+            streamlit.dataframe(display_frame(tbs_feature_counts), width="stretch", hide_index=True)
+            streamlit.dataframe(display_frame(top_mi), width="stretch", hide_index=True)
+            streamlit.dataframe(
+                display_frame(screen_metadata.head(500)), width="stretch", hide_index=True
+            )
+            _download_frame(
+                "Export target-before-stop feature screen",
+                screen_metadata,
+                f"{selected_model.model_id}_target_before_stop_feature_screen.csv",
+            )
+        with tabs[7]:
             sanity = _metric_subset(
                 selected_model,
                 (
@@ -449,7 +503,7 @@ def render_page() -> None:
                 ),
             )
             streamlit.dataframe(display_frame(sanity), width="stretch", hide_index=True)
-        with tabs[7]:
+        with tabs[8]:
             streamlit.dataframe(
                 display_frame(_detail_rows(selected_model)),
                 width="stretch",

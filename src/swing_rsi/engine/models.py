@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -26,6 +26,11 @@ from sklearn.metrics import brier_score_loss, log_loss, mean_absolute_error, mea
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from swing_rsi.engine.feature_screen import (
+    FEATURE_SCREEN_SCHEMA_VERSION,
+    FeatureScreenResult,
+    screen_features_for_target,
+)
 from swing_rsi.engine.features import numeric_feature_columns, reject_label_columns
 from swing_rsi.engine.gates import (
     GATE_VALUE_NOT_AVAILABLE,
@@ -90,6 +95,10 @@ class ModelBundle:
     metrics: dict[str, float | int | str | bool | None]
     calibration_metrics: dict[str, float | int | str | bool | None]
     gate_results: tuple[GateResult, ...] = ()
+    head_feature_columns: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    head_feature_manifests: dict[str, str] = field(default_factory=dict)
+    feature_screen_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
+    feature_screen_records: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -119,6 +128,41 @@ class DiscoveryConfig:
     selection_per_date_limit: int | None = 5
     selection_minimum_dollar_volume: float | None = 5_000_000.0
     selection_rate_max: float | None = 0.20
+
+
+PRIMARY_HEAD = "primary_positive_return"
+TARGET_BEFORE_STOP_HEAD = "target_before_stop"
+EXPECTED_RETURN_HEAD = "expected_return"
+MFE_HEAD = "mfe"
+MAE_HEAD = "mae"
+
+
+def bundle_head_feature_columns(bundle: ModelBundle, head: str) -> tuple[str, ...]:
+    head_columns = getattr(bundle, "head_feature_columns", {}) or {}
+    columns = head_columns.get(head)
+    if columns:
+        return tuple(str(column) for column in columns)
+    return tuple(bundle.feature_columns)
+
+
+def bundle_head_feature_manifest(bundle: ModelBundle, head: str) -> str:
+    manifests = getattr(bundle, "head_feature_manifests", {}) or {}
+    value = manifests.get(head)
+    return str(value) if value else "legacy_shared_feature_screen"
+
+
+def bundle_feature_screen_metadata(bundle: ModelBundle, head: str) -> dict[str, object]:
+    metadata = getattr(bundle, "feature_screen_metadata", {}) or {}
+    value = metadata.get(head)
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def bundle_feature_screen_records(bundle: ModelBundle, head: str) -> tuple[dict[str, object], ...]:
+    records = getattr(bundle, "feature_screen_records", {}) or {}
+    value = records.get(head)
+    if not value:
+        return ()
+    return tuple(dict(record) for record in value if isinstance(record, dict))
 
 
 def selection_policy_from_config(config: DiscoveryConfig) -> SelectionPolicy:
@@ -670,6 +714,72 @@ def _permutation_importance_summary(
             importances.append((column, delta))
     top = sorted(importances, key=lambda item: item[1], reverse=True)[:8]
     return "; ".join(f"{column}={value:.6f}" for column, value in top)
+
+
+def _permutation_importance_by_family(
+    *,
+    classifier: Any,
+    calibrator: Any,
+    holdout: pd.DataFrame,
+    feature_columns: tuple[str, ...],
+    feature_family_by_column: dict[str, str],
+    target: str,
+    baseline_brier: float,
+    seed: int,
+) -> list[dict[str, float | int | str]]:
+    rng = np.random.default_rng(seed)
+    family_records: dict[str, dict[str, float | int | str]] = {}
+    for column in feature_columns:
+        permuted = holdout[list(feature_columns)].copy()
+        values = permuted[column].to_numpy(copy=True)
+        rng.shuffle(values)
+        permuted[column] = values
+        raw = _positive_class_probability(classifier, permuted)
+        probability = np.asarray(calibrator.predict(raw), dtype=float)
+        delta = float(brier_score_loss(holdout[target].astype(int), probability) - baseline_brier)
+        if not math.isfinite(delta):
+            continue
+        family = feature_family_by_column.get(column, "unknown")
+        record = family_records.setdefault(
+            family,
+            {
+                "family": family,
+                "features": 0,
+                "sum_delta_brier": 0.0,
+                "positive_sum_delta_brier": 0.0,
+                "top_feature": "",
+                "top_delta_brier": -math.inf,
+            },
+        )
+        record["features"] = int(record["features"]) + 1
+        record["sum_delta_brier"] = float(record["sum_delta_brier"]) + delta
+        record["positive_sum_delta_brier"] = float(record["positive_sum_delta_brier"]) + max(
+            0.0, delta
+        )
+        if delta > float(record["top_delta_brier"]):
+            record["top_delta_brier"] = delta
+            record["top_feature"] = column
+    return sorted(family_records.values(), key=lambda item: str(item["family"]))
+
+
+def _screen_top_features(
+    screen: FeatureScreenResult,
+    *,
+    limit: int = 25,
+) -> list[dict[str, object]]:
+    rows = [
+        record.to_jsonable()
+        for record in screen.records
+        if record.mutual_information_score is not None
+    ]
+    rows = sorted(
+        rows,
+        key=lambda record: (
+            -float(cast(float | int, record["mutual_information_score"] or 0.0)),
+            str(record["feature"]),
+        ),
+    )
+    return rows[:limit]
 
 
 def _feature_stability_summary(
@@ -1594,20 +1704,38 @@ def _train_family(
     holdout_raw = _positive_class_probability(classifier, holdout[feature_columns])
     holdout_probability = np.asarray(calibrator.predict(holdout_raw), dtype=float)
 
+    target_train = split.train.dropna(subset=required).copy()
+    target_screen = screen_features_for_target(
+        target_train,
+        target_train[target_before_stop],
+        target_name=target_before_stop,
+        task_type="classification",
+        feature_family_by_column=feature_family_by_column,
+        max_selected_features=config.mutual_information_top_k,
+        random_seed=config.random_seed,
+        missingness_threshold=0.40,
+        variance_threshold=1e-12,
+        correlation_threshold=config.correlation_threshold,
+    )
+    target_feature_columns = target_screen.selected_features
+    if not target_feature_columns:
+        raise ValueError("Target-before-stop feature screen selected no features")
     target_classifier = clone(classifier)
-    target_y = train[target_before_stop].astype(int)
+    target_y = target_train[target_before_stop].astype(int)
     if target_y.nunique() < 2:
         target_classifier = BaseRateClassifier()
-    target_classifier.fit(x_train, target_y)
+    target_classifier.fit(target_train[list(target_feature_columns)], target_y)
     target_calibration_raw = _positive_class_probability(
-        target_classifier, calibration[feature_columns]
+        target_classifier, calibration[list(target_feature_columns)]
     )
     target_calibrator = IsotonicRegression(out_of_bounds="clip")
     target_calibrator.fit(target_calibration_raw, calibration[target_before_stop].astype(int))
     target_calibration_probability = np.asarray(
         target_calibrator.predict(target_calibration_raw), dtype=float
     )
-    target_holdout_raw = _positive_class_probability(target_classifier, holdout[feature_columns])
+    target_holdout_raw = _positive_class_probability(
+        target_classifier, holdout[list(target_feature_columns)]
+    )
     target_holdout_probability = np.asarray(
         target_calibrator.predict(target_holdout_raw), dtype=float
     )
@@ -1682,6 +1810,27 @@ def _train_family(
         baseline_brier=holdout_brier,
         seed=config.random_seed,
         limit=config.permutation_feature_limit,
+    )
+    target_before_stop_brier = float(
+        brier_score_loss(holdout[target_before_stop].astype(int), target_holdout_probability)
+    )
+    target_before_stop_permutation_by_family = _permutation_importance_by_family(
+        classifier=target_classifier,
+        calibrator=target_calibrator,
+        holdout=holdout,
+        feature_columns=target_feature_columns,
+        feature_family_by_column=feature_family_by_column,
+        target=target_before_stop,
+        baseline_brier=target_before_stop_brier,
+        seed=config.random_seed,
+    )
+    target_before_stop_permutation_top = "; ".join(
+        f"{record['family']}={float(record['positive_sum_delta_brier']):.6f}"
+        for record in sorted(
+            target_before_stop_permutation_by_family,
+            key=lambda item: float(item["positive_sum_delta_brier"]),
+            reverse=True,
+        )[:8]
     )
     feature_stability_mean, feature_stability_top = _feature_stability_summary(
         train,
@@ -1868,6 +2017,37 @@ def _train_family(
         selected_feature_family_counts[family_name] = (
             selected_feature_family_counts.get(family_name, 0) + 1
         )
+    target_feature_family_counts = target_screen.selected_feature_families
+    head_feature_columns = {
+        PRIMARY_HEAD: tuple(feature_columns),
+        TARGET_BEFORE_STOP_HEAD: tuple(target_feature_columns),
+        EXPECTED_RETURN_HEAD: tuple(feature_columns),
+        MFE_HEAD: tuple(feature_columns),
+        MAE_HEAD: tuple(feature_columns),
+    }
+    head_feature_manifests = {
+        PRIMARY_HEAD: configuration_hash(
+            {
+                "head": PRIMARY_HEAD,
+                "features": list(feature_columns),
+                "legacy_screen": "primary_positive_return_existing_v1",
+            }
+        ),
+        TARGET_BEFORE_STOP_HEAD: target_screen.selected_feature_manifest_hash,
+        EXPECTED_RETURN_HEAD: configuration_hash(
+            {"head": EXPECTED_RETURN_HEAD, "features": list(feature_columns)}
+        ),
+        MFE_HEAD: configuration_hash({"head": MFE_HEAD, "features": list(feature_columns)}),
+        MAE_HEAD: configuration_hash({"head": MAE_HEAD, "features": list(feature_columns)}),
+    }
+    feature_screen_metadata = {
+        TARGET_BEFORE_STOP_HEAD: {
+            **target_screen.metadata(),
+            "direction": direction,
+            "horizon": horizon,
+        }
+    }
+    feature_screen_records = {TARGET_BEFORE_STOP_HEAD: tuple(target_screen.audit_records())}
     portfolio_policy_hash = configuration_hash(asdict(portfolio_config))
     selection_policy_hash = configuration_hash(asdict(selection_policy))
     config_hash = configuration_hash(
@@ -1925,10 +2105,40 @@ def _train_family(
         "selection_rate_ceiling": selection_policy.selected_rate_ceiling,
         "portfolio_policy_json": _json_dumps(asdict(portfolio_config)),
         "portfolio_policy_configuration_hash": portfolio_policy_hash,
-        "holdout_target_before_stop_brier": float(
-            brier_score_loss(holdout[target_before_stop].astype(int), target_holdout_probability)
-        ),
+        "holdout_target_before_stop_brier": target_before_stop_brier,
         "holdout_target_before_stop_probability_mean": float(np.mean(target_holdout_probability)),
+        "target_before_stop_feature_screen_schema_version": FEATURE_SCREEN_SCHEMA_VERSION,
+        "target_before_stop_screening_target": target_before_stop,
+        "target_before_stop_screening_task_type": "classification",
+        "target_before_stop_screening_manifest_hash": target_screen.selected_feature_manifest_hash,
+        "target_before_stop_screening_configuration_hash": target_screen.spec.configuration_hash,
+        "target_before_stop_selected_feature_count": len(target_feature_columns),
+        "target_before_stop_selected_features_json": _json_dumps(list(target_feature_columns)),
+        "target_before_stop_selected_feature_family_counts_json": _json_dumps(
+            target_feature_family_counts
+        ),
+        "target_before_stop_selected_feature_scores_json": _json_dumps(
+            target_screen.selected_scores
+        ),
+        "target_before_stop_feature_screen_metadata_json": _json_dumps(
+            {
+                **target_screen.metadata(),
+                "direction": direction,
+                "horizon": horizon,
+            }
+        ),
+        "target_before_stop_feature_screen_audit_json": _json_dumps(target_screen.audit_records()),
+        "target_before_stop_top_25_train_mi_features_json": _json_dumps(
+            _screen_top_features(target_screen, limit=25)
+        ),
+        "target_before_stop_permutation_importance_by_family_json": _json_dumps(
+            target_before_stop_permutation_by_family
+        ),
+        "target_before_stop_permutation_importance_top": target_before_stop_permutation_top,
+        "head_feature_columns_json": _json_dumps(
+            {head: list(columns) for head, columns in head_feature_columns.items()}
+        ),
+        "head_feature_manifest_hashes_json": _json_dumps(head_feature_manifests),
         "holdout_double_cost_lcb_90": double_cost_lcb,
         "selected_mean_mfe": selected_mean_mfe,
         "selected_mean_mae": selected_mean_mae,
@@ -2048,6 +2258,10 @@ def _train_family(
         metrics=metrics,
         calibration_metrics=calibration_metrics,
         gate_results=gate_results,
+        head_feature_columns=head_feature_columns,
+        head_feature_manifests=head_feature_manifests,
+        feature_screen_metadata=feature_screen_metadata,
+        feature_screen_records=feature_screen_records,
     )
     return bundle
 
@@ -2056,6 +2270,14 @@ def load_model_bundle(path: str | Path) -> ModelBundle:
     loaded = joblib.load(path)
     if not isinstance(loaded, ModelBundle):
         raise ValueError("Model artifact is not a trusted autonomous scanner bundle")
+    if not hasattr(loaded, "head_feature_columns"):
+        object.__setattr__(loaded, "head_feature_columns", {})
+    if not hasattr(loaded, "head_feature_manifests"):
+        object.__setattr__(loaded, "head_feature_manifests", {})
+    if not hasattr(loaded, "feature_screen_metadata"):
+        object.__setattr__(loaded, "feature_screen_metadata", {})
+    if not hasattr(loaded, "feature_screen_records"):
+        object.__setattr__(loaded, "feature_screen_records", {})
     return loaded
 
 
@@ -2184,6 +2406,10 @@ def discover_models(
                     metrics=bundle.metrics,
                     calibration_metrics=bundle.calibration_metrics,
                     gate_results=bundle.gate_results,
+                    head_feature_columns=bundle.head_feature_columns,
+                    head_feature_manifests=bundle.head_feature_manifests,
+                    feature_screen_metadata=bundle.feature_screen_metadata,
+                    feature_screen_records=bundle.feature_screen_records,
                 )
                 artifact_path = Path(artifact_dir) / f"{model_id}.joblib"
                 save_model_bundle(bundle, artifact_path)
@@ -2239,10 +2465,25 @@ def discover_models(
 
 
 def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
-    missing = [column for column in bundle.feature_columns if column not in frame.columns]
+    primary_features = bundle_head_feature_columns(bundle, PRIMARY_HEAD)
+    target_before_stop_features = bundle_head_feature_columns(bundle, TARGET_BEFORE_STOP_HEAD)
+    expected_return_features = bundle_head_feature_columns(bundle, EXPECTED_RETURN_HEAD)
+    mfe_features = bundle_head_feature_columns(bundle, MFE_HEAD)
+    mae_features = bundle_head_feature_columns(bundle, MAE_HEAD)
+    required_non_target = tuple(
+        dict.fromkeys(
+            [
+                *primary_features,
+                *expected_return_features,
+                *mfe_features,
+                *mae_features,
+            ]
+        )
+    )
+    missing = [column for column in required_non_target if column not in frame.columns]
     if missing:
         raise ValueError(f"Feature frame is missing required model columns: {missing[:5]}")
-    x = frame[list(bundle.feature_columns)]
+    x = frame[list(primary_features)]
     raw = _positive_class_probability(bundle.classifier, x)
     probability = np.asarray(bundle.calibrator.predict(raw), dtype=float)
     output = frame[["Date", "symbol"]].copy()
@@ -2250,10 +2491,28 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     output["horizon"] = bundle.horizon
     output["model_id"] = bundle.model_id
     output["calibrated_probability"] = probability
-    target_raw = _positive_class_probability(bundle.target_before_stop_model, x)
-    output["target_before_stop_probability"] = np.asarray(
-        bundle.target_before_stop_calibrator.predict(target_raw), dtype=float
+    output["primary_feature_manifest_hash"] = bundle_head_feature_manifest(bundle, PRIMARY_HEAD)
+    output["target_before_stop_feature_manifest_hash"] = bundle_head_feature_manifest(
+        bundle, TARGET_BEFORE_STOP_HEAD
     )
+    output["target_before_stop_feature_screen_schema"] = str(
+        bundle_feature_screen_metadata(bundle, TARGET_BEFORE_STOP_HEAD).get(
+            "screening_schema_version", "legacy_shared_feature_screen"
+        )
+    )
+    missing_target_features = [
+        column for column in target_before_stop_features if column not in frame.columns
+    ]
+    output["target_before_stop_required_feature_missing"] = bool(missing_target_features)
+    output["target_before_stop_missing_features"] = ";".join(missing_target_features[:10])
+    if missing_target_features:
+        output["target_before_stop_probability"] = np.full(len(frame), math.nan)
+    else:
+        target_x = frame[list(target_before_stop_features)]
+        target_raw = _positive_class_probability(bundle.target_before_stop_model, target_x)
+        output["target_before_stop_probability"] = np.asarray(
+            bundle.target_before_stop_calibrator.predict(target_raw), dtype=float
+        )
 
     def add_regression_prediction(
         output_column: str,
@@ -2303,7 +2562,19 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         else:
             output[f"{output_column}_sign_contract_valid"] = True
 
-    add_regression_prediction("expected_return", "return", bundle.return_model.predict(x))
-    add_regression_prediction("expected_mfe", "mfe", bundle.mfe_model.predict(x))
-    add_regression_prediction("expected_mae", "mae", bundle.mae_model.predict(x))
+    add_regression_prediction(
+        "expected_return",
+        "return",
+        bundle.return_model.predict(frame[list(expected_return_features)]),
+    )
+    add_regression_prediction(
+        "expected_mfe",
+        "mfe",
+        bundle.mfe_model.predict(frame[list(mfe_features)]),
+    )
+    add_regression_prediction(
+        "expected_mae",
+        "mae",
+        bundle.mae_model.predict(frame[list(mae_features)]),
+    )
     return output
