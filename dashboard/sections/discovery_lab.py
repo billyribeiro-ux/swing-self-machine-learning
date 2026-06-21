@@ -59,6 +59,7 @@ def render_page() -> None:
         return
     rows: list[dict[str, object]] = []
     screen_rows: list[dict[str, object]] = []
+    calibration_rows: list[dict[str, object]] = []
     for model in models:
         eligibility = promotion_eligibility(model.gate_results)
         rows.append(
@@ -145,7 +146,45 @@ def render_page() -> None:
                 ),
             }
         )
-    tabs = streamlit.tabs(["Model Metrics", "Target-Before-Stop Feature Screen"])
+        candidate_results: list[dict[str, object]] = []
+        raw_candidates = model.metrics.get("target_before_stop_calibration_candidate_results_json")
+        if isinstance(raw_candidates, str) and raw_candidates.strip():
+            try:
+                parsed_candidates = json.loads(raw_candidates)
+            except json.JSONDecodeError:
+                parsed_candidates = []
+            if isinstance(parsed_candidates, list):
+                candidate_results = [item for item in parsed_candidates if isinstance(item, dict)]
+        selected_method = model.metrics.get("target_before_stop_calibration_method")
+        for candidate in candidate_results or [{}]:
+            calibration_rows.append(
+                {
+                    "model_id": model.model_id,
+                    "direction": model.direction,
+                    "horizon": model.horizon,
+                    "family": model.family,
+                    "selected_method": selected_method,
+                    "candidate_method": candidate.get("method", ""),
+                    "mean_fold_brier": candidate.get("mean_brier_score", ""),
+                    "brier_standard_error": candidate.get("brier_standard_error", ""),
+                    "one_standard_error_boundary": model.metrics.get(
+                        "target_before_stop_calibration_one_standard_error_boundary"
+                    ),
+                    "selection_reason": model.metrics.get(
+                        "target_before_stop_calibration_selection_reason"
+                    ),
+                    "manifest_hash": model.metrics.get(
+                        "target_before_stop_calibration_manifest_hash"
+                    ),
+                }
+            )
+    tabs = streamlit.tabs(
+        [
+            "Model Metrics",
+            "Target-Before-Stop Feature Screen",
+            "Target-Before-Stop Calibration",
+        ]
+    )
     with tabs[0]:
         streamlit.dataframe(
             display_frame(pd.DataFrame(rows)),
@@ -155,6 +194,15 @@ def render_page() -> None:
     with tabs[1]:
         streamlit.dataframe(
             display_frame(pd.DataFrame(screen_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+    with tabs[2]:
+        streamlit.warning(
+            "Current holdout metrics are DEVELOPMENT HOLDOUT DIAGNOSTICS, not final validation."
+        )
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(calibration_rows)),
             width="stretch",
             hide_index=True,
         )

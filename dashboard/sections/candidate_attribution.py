@@ -78,6 +78,27 @@ def render_page() -> None:
         width="stretch",
         hide_index=True,
     )
+    streamlit.subheader("Target-Before-Stop Calibration")
+    calibration_fields = [
+        "target_before_stop_raw_probability",
+        "target_before_stop_probability",
+        "target_before_stop_calibration_governance_schema",
+        "target_before_stop_calibration_method",
+        "target_before_stop_calibration_manifest_hash",
+        "target_before_stop_calibrator_artifact_hash",
+        "target_before_stop_calibration_metadata_missing",
+        "target_before_stop_feature_screen_schema",
+        "target_before_stop_feature_manifest_hash",
+    ]
+    streamlit.dataframe(
+        display_frame(
+            pd.DataFrame(
+                [{"Metric": field, "Value": row.get(field, "")} for field in calibration_fields]
+            )
+        ),
+        width="stretch",
+        hide_index=True,
+    )
     streamlit.subheader("Historical Analogs")
     try:
         analogs = pd.DataFrame(json.loads(str(row.get("historical_analogs", "[]"))))
@@ -98,7 +119,13 @@ def render_page() -> None:
                         "feature_snapshot_hash": row.get("feature_snapshot_hash"),
                         "candidate_status": row.get("candidate_status"),
                         "exclusion_reason": row.get("exclusion_reason"),
+                        "target_before_stop_raw_probability": row.get(
+                            "target_before_stop_raw_probability"
+                        ),
                         "target_before_stop_probability": row.get("target_before_stop_probability"),
+                        "target_before_stop_calibration_method": row.get(
+                            "target_before_stop_calibration_method"
+                        ),
                         "expected_mfe": row.get("expected_mfe"),
                         "expected_mae": row.get("expected_mae"),
                     }

@@ -28,6 +28,12 @@ class ModelAuditResult:
     selected_candidate_ledger: pd.DataFrame
     trade_ledger: pd.DataFrame
     feature_screens: pd.DataFrame
+    calibration_method_comparison: pd.DataFrame
+    calibration_fold_metrics: pd.DataFrame
+    calibration_probability_audit: pd.DataFrame
+    isotonic_step_support: pd.DataFrame
+    calibration_threshold_utility: pd.DataFrame
+    calibration_governance: pd.DataFrame
 
 
 def _safe_json_records(value: object) -> list[dict[str, Any]]:
@@ -339,6 +345,183 @@ def _feature_screen_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _calibration_method_comparison_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for model in models:
+        records = _safe_json_records(
+            model.metrics.get("target_before_stop_calibration_candidate_results_json")
+        )
+        if not records:
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "reason": "target_before_stop_calibration_governance_not_persisted",
+                }
+            )
+            continue
+        selected_method = model.metrics.get("target_before_stop_calibration_method")
+        boundary = model.metrics.get("target_before_stop_calibration_one_standard_error_boundary")
+        reason = model.metrics.get("target_before_stop_calibration_selection_reason")
+        for record in records:
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "direction": model.direction,
+                    "family": model.family,
+                    "horizon": model.horizon,
+                    "selected_method": selected_method,
+                    "one_standard_error_boundary": boundary,
+                    "selection_reason": reason,
+                    **record,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _calibration_fold_metrics_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for model in models:
+        records = _safe_json_records(
+            model.metrics.get("target_before_stop_calibration_fold_results_json")
+        )
+        if not records:
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "reason": "target_before_stop_calibration_fold_metrics_not_persisted",
+                }
+            )
+            continue
+        for record in records:
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "direction": model.direction,
+                    "family": model.family,
+                    "horizon": model.horizon,
+                    **record,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _calibration_step_support_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for model in models:
+        records = _safe_json_records(model.metrics.get("target_before_stop_step_support_json"))
+        if not records:
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "reason": "target_before_stop_step_support_not_persisted",
+                }
+            )
+            continue
+        for record in records:
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "direction": model.direction,
+                    "family": model.family,
+                    "horizon": model.horizon,
+                    **record,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _read_csv_artifact_records(
+    models: tuple[RegisteredModel, ...],
+    metric_name: str,
+    *,
+    missing_reason: str,
+) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    missing_rows: list[dict[str, object]] = []
+    for model in models:
+        value = model.metrics.get(metric_name)
+        path = Path(str(value)) if value else None
+        if path is None or not path.exists():
+            missing_rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "reason": missing_reason,
+                }
+            )
+            continue
+        frame = pd.read_csv(path)
+        frame.insert(0, "generation", model.created_at_utc)
+        rows.append(frame)
+    if rows:
+        return pd.concat(rows, ignore_index=True)
+    return pd.DataFrame(missing_rows)
+
+
+def _read_probability_audit(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    missing_rows: list[dict[str, object]] = []
+    for model in models:
+        value = model.metrics.get("target_before_stop_calibration_audit_probability_path")
+        path = Path(str(value)) if value else None
+        if path is None or not path.exists():
+            missing_rows.append(
+                {
+                    "model_id": model.model_id,
+                    "generation": model.created_at_utc,
+                    "reason": "target_before_stop_probability_audit_not_persisted",
+                }
+            )
+            continue
+        frame = pd.read_parquet(path)
+        frame.insert(0, "generation", model.created_at_utc)
+        rows.append(frame)
+    if rows:
+        return pd.concat(rows, ignore_index=True)
+    return pd.DataFrame(missing_rows)
+
+
+def _calibration_governance_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for model in models:
+        metadata = _safe_json_dict(
+            model.metrics.get("target_before_stop_calibration_governance_json")
+        )
+        if not metadata:
+            metadata = {
+                "calibration_governance_schema": model.metrics.get(
+                    "target_before_stop_calibration_governance_schema"
+                ),
+                "selected_method": model.metrics.get("target_before_stop_calibration_method"),
+                "selection_reason": model.metrics.get(
+                    "target_before_stop_calibration_selection_reason"
+                ),
+                "calibration_manifest_hash": model.metrics.get(
+                    "target_before_stop_calibration_manifest_hash"
+                ),
+                "calibrator_artifact_hash": model.metrics.get(
+                    "target_before_stop_calibrator_artifact_hash"
+                ),
+            }
+        rows.append(
+            {
+                "model_id": model.model_id,
+                "generation": model.created_at_utc,
+                "direction": model.direction,
+                "family": model.family,
+                "horizon": model.horizon,
+                **metadata,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def build_model_audit(
     root: str | Path,
     *,
@@ -365,6 +548,16 @@ def build_model_audit(
         missing_reason="portfolio_trade_ledger_not_persisted_for_legacy_artifact",
     )
     feature_screens = _feature_screen_frame(models)
+    calibration_method_comparison = _calibration_method_comparison_frame(models)
+    calibration_fold_metrics = _calibration_fold_metrics_frame(models)
+    calibration_probability_audit = _read_probability_audit(models)
+    isotonic_step_support = _calibration_step_support_frame(models)
+    calibration_threshold_utility = _read_csv_artifact_records(
+        models,
+        "target_before_stop_calibration_threshold_utility_path",
+        missing_reason="target_before_stop_calibration_threshold_utility_not_persisted",
+    )
+    calibration_governance = _calibration_governance_frame(models)
     return ModelAuditResult(
         generation_id=generation_id,
         models=models,
@@ -375,6 +568,12 @@ def build_model_audit(
         selected_candidate_ledger=selected_ledger,
         trade_ledger=trade_ledger,
         feature_screens=feature_screens,
+        calibration_method_comparison=calibration_method_comparison,
+        calibration_fold_metrics=calibration_fold_metrics,
+        calibration_probability_audit=calibration_probability_audit,
+        isotonic_step_support=isotonic_step_support,
+        calibration_threshold_utility=calibration_threshold_utility,
+        calibration_governance=calibration_governance,
     )
 
 
@@ -389,6 +588,10 @@ def export_model_audit(result: ModelAuditResult, export_dir: str | Path) -> tupl
         "selected_candidate_ledger.csv": result.selected_candidate_ledger,
         "portfolio_trade_ledger.csv": result.trade_ledger,
         "feature_screen_audit.csv": result.feature_screens,
+        "calibration_method_comparison.csv": result.calibration_method_comparison,
+        "calibration_fold_metrics.csv": result.calibration_fold_metrics,
+        "isotonic_step_support.csv": result.isotonic_step_support,
+        "calibration_threshold_utility.csv": result.calibration_threshold_utility,
     }
     written: list[Path] = []
     for name, frame in paths.items():
@@ -407,6 +610,17 @@ def export_model_audit(result: ModelAuditResult, export_dir: str | Path) -> tupl
         encoding="utf-8",
     )
     written.append(feature_screen_json)
+    probability_audit = output / "calibration_probability_audit.parquet"
+    result.calibration_probability_audit.to_parquet(probability_audit, index=False)
+    written.append(probability_audit)
+    calibration_governance_json = output / "calibration_governance.json"
+    calibration_governance_json.write_text(
+        json.dumps(
+            result.calibration_governance.to_dict(orient="records"), indent=2, sort_keys=True
+        ),
+        encoding="utf-8",
+    )
+    written.append(calibration_governance_json)
     return tuple(written)
 
 

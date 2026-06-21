@@ -16,6 +16,7 @@ from swing_rsi.engine.models import (
     ModelBundle,
     bundle_feature_screen_metadata,
     bundle_head_feature_manifest,
+    bundle_tbs_calibration_metadata,
     predict_bundle,
 )
 from swing_rsi.engine.ood import (
@@ -36,8 +37,8 @@ from swing_rsi.engine.selection import (
 )
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 4
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v4-target-head-features"
+SCANNER_IDENTITY_SCHEMA_VERSION = 5
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v5-tbs-calibration-governance"
 
 
 @dataclass(frozen=True)
@@ -171,8 +172,15 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
     target_missing = bool(item.get("target_before_stop_required_feature_missing", False))
     if target_missing:
         rejection_reasons.append("target_before_stop_required_feature_missing")
+    target_calibration_missing = bool(
+        item.get("target_before_stop_calibration_metadata_missing", False)
+    )
+    if target_calibration_missing:
+        rejection_reasons.append("target_before_stop_calibration_metadata_missing")
     for key in ("calibrated_probability", "target_before_stop_probability"):
-        if key == "target_before_stop_probability" and target_missing:
+        if key == "target_before_stop_probability" and (
+            target_missing or target_calibration_missing
+        ):
             continue
         probability = _finite_float(item.get(key))
         if not math.isfinite(probability) or probability < 0.0 or probability > 1.0:
@@ -237,6 +245,7 @@ def _build_scan_execution_identity(
     effective_policies: dict[str, SelectionPolicy],
     model_ood_metadata: dict[str, dict[str, object]],
     model_target_before_stop_feature_metadata: dict[str, dict[str, object]],
+    model_target_before_stop_calibration_metadata: dict[str, dict[str, object]],
     scanner_config: ScannerConfig,
     universe_snapshot_id: str,
     feature_manifest_hash: str,
@@ -265,6 +274,11 @@ def _build_scan_execution_identity(
         for model_id in model_ids
     }
     tbs_feature_metadata_hash = _stable_hash(tbs_feature_metadata_payload)
+    tbs_calibration_metadata_payload = {
+        model_id: model_target_before_stop_calibration_metadata.get(model_id, {})
+        for model_id in model_ids
+    }
+    tbs_calibration_metadata_hash = _stable_hash(tbs_calibration_metadata_payload)
     identity_payload: dict[str, object] = {
         "scanner_identity_schema_version": SCANNER_IDENTITY_SCHEMA_VERSION,
         "scanner_implementation_version": SCANNER_IMPLEMENTATION_VERSION,
@@ -294,6 +308,8 @@ def _build_scan_execution_identity(
         "model_ood_governance_metadata_hash": ood_metadata_hash,
         "target_before_stop_feature_metadata": tbs_feature_metadata_payload,
         "target_before_stop_feature_metadata_hash": tbs_feature_metadata_hash,
+        "target_before_stop_calibration_metadata": tbs_calibration_metadata_payload,
+        "target_before_stop_calibration_metadata_hash": tbs_calibration_metadata_hash,
         "effective_selection_policies": effective_policy_payload,
         "raw_scanner_config": raw_config,
         "raw_scanner_config_hash": raw_config_hash,
@@ -311,6 +327,8 @@ def _build_scan_execution_identity(
         "model_ood_governance_metadata_hash": ood_metadata_hash,
         "target_before_stop_feature_metadata_json": dumps(tbs_feature_metadata_payload),
         "target_before_stop_feature_metadata_hash": tbs_feature_metadata_hash,
+        "target_before_stop_calibration_metadata_json": dumps(tbs_calibration_metadata_payload),
+        "target_before_stop_calibration_metadata_hash": tbs_calibration_metadata_hash,
         "effective_model_policy_json": dumps(effective_policy_payload),
         "effective_policy_bundle_hash": effective_policy_bundle_hash,
         "canonical_scan_execution_identity": identity_payload,
@@ -352,6 +370,8 @@ def _metadata_matches_scan_identity(
         == expected_metadata["model_ood_governance_metadata_hash"]
         and metadata.get("target_before_stop_feature_metadata_hash")
         == expected_metadata["target_before_stop_feature_metadata_hash"]
+        and metadata.get("target_before_stop_calibration_metadata_hash")
+        == expected_metadata["target_before_stop_calibration_metadata_hash"]
         and metadata.get("feature_manifest_hash") == expected_metadata["feature_manifest_hash"]
         and metadata.get("universe_snapshot_id") == expected_metadata["universe_snapshot_id"]
         and metadata.get("model_generation_ids") == expected_metadata["model_generation_ids"]
@@ -517,6 +537,9 @@ def run_scanner(
         }
         for model_id in model_ids
     }
+    normalized_tbs_calibration_metadata = {
+        model_id: bundle_tbs_calibration_metadata(bundles_by_id[model_id]) for model_id in model_ids
+    }
     identity, metadata = _build_scan_execution_identity(
         as_of_date=as_of.date().isoformat(),
         model_ids=model_ids,
@@ -526,6 +549,7 @@ def run_scanner(
         effective_policies=effective_policies,
         model_ood_metadata=normalized_ood_metadata,
         model_target_before_stop_feature_metadata=normalized_tbs_feature_metadata,
+        model_target_before_stop_calibration_metadata=normalized_tbs_calibration_metadata,
         scanner_config=config,
         universe_snapshot_id=universe_snapshot_id,
         feature_manifest_hash=feature_manifest_hash,
@@ -698,6 +722,9 @@ def run_scanner(
                 "expected_mae_ood_bound_high": item.get("expected_mae_ood_bound_high"),
                 "expected_mae_ood_severity_limit": item.get("expected_mae_ood_severity_limit"),
                 "target_before_stop_probability": target_before_stop_probability,
+                "target_before_stop_raw_probability": item.get(
+                    "target_before_stop_raw_probability"
+                ),
                 "target_before_stop_feature_screen_schema": item.get(
                     "target_before_stop_feature_screen_schema", ""
                 ),
@@ -713,6 +740,21 @@ def run_scanner(
                 ),
                 "target_before_stop_missing_features": item.get(
                     "target_before_stop_missing_features", ""
+                ),
+                "target_before_stop_calibration_governance_schema": item.get(
+                    "target_before_stop_calibration_governance_schema", ""
+                ),
+                "target_before_stop_calibration_method": item.get(
+                    "target_before_stop_calibration_method", ""
+                ),
+                "target_before_stop_calibration_manifest_hash": item.get(
+                    "target_before_stop_calibration_manifest_hash", ""
+                ),
+                "target_before_stop_calibrator_artifact_hash": item.get(
+                    "target_before_stop_calibrator_artifact_hash", ""
+                ),
+                "target_before_stop_calibration_metadata_missing": bool(
+                    item.get("target_before_stop_calibration_metadata_missing", False)
                 ),
                 "ood_warning": bool(prediction_integrity["ood_warning"]),
                 "ood_affected_heads": ";".join(
