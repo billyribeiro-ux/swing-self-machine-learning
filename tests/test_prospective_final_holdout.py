@@ -12,14 +12,17 @@ import pytest
 from swing_rsi.engine.calibration_governance import TBS_CALIBRATION_GOVERNANCE_SCHEMA_VERSION
 from swing_rsi.engine.final_holdout import (
     FINAL_HOLDOUT_EVENT_PREFIX,
+    FINAL_HOLDOUT_SAMPLE_POLICY_VERSION,
     FINAL_HOLDOUT_SCHEMA_VERSION,
     SHADOW_FINAL_HOLDOUT_MODE,
     evaluate_final_holdout_run,
     final_holdout_events,
+    final_holdout_sample_states,
     final_holdout_status_frame,
     initialize_final_holdout_run,
     list_final_holdout_models,
     list_final_holdout_runs,
+    load_final_holdout_sample_policy,
     process_final_holdout_update,
     reconstruct_final_holdout_state,
 )
@@ -29,8 +32,10 @@ from swing_rsi.engine.gates import (
     FINAL_HOLDOUT_PROMOTION_GATE_ID,
     FINAL_HOLDOUT_STATUS,
     configuration_hash,
+    gate_results_to_jsonable,
     make_gate,
     promotion_eligibility,
+    quality_gate_bool_map,
 )
 from swing_rsi.engine.manifest import hash_file
 from swing_rsi.engine.models import ModelBundle, save_model_bundle
@@ -328,6 +333,442 @@ def _mutate_model_metrics(root: Path, model_id: str, updates: dict[str, object])
         )
 
 
+def _write_sample_policy(
+    root: Path,
+    *,
+    matured: int = 100,
+    distinct_dates: int = 60,
+    sessions: int = 126,
+    months: int = 4,
+    positive: int = 20,
+    negative: int = 20,
+    early_matured: int = 30,
+    early_dates: int = 20,
+) -> None:
+    path = root / "configs" / "governance" / "prospective_final_holdout_v1.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                f"schema_version: {FINAL_HOLDOUT_SAMPLE_POLICY_VERSION}",
+                f"matured_outcomes_minimum: {matured}",
+                f"distinct_signal_dates_minimum: {distinct_dates}",
+                f"observation_sessions_minimum: {sessions}",
+                f"calendar_months_minimum: {months}",
+                f"positive_class_minimum: {positive}",
+                f"negative_class_minimum: {negative}",
+                f"early_diagnostic_matured_outcomes_minimum: {early_matured}",
+                f"early_diagnostic_distinct_signal_dates_minimum: {early_dates}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _set_processed_sessions(root: Path, run_id: str, count: int = 126) -> None:
+    sessions = [pd.Timestamp("2026-06-19") + pd.offsets.BDay(index) for index in range(count)]
+    session_values = [pd.Timestamp(value).date().isoformat() for value in sessions]
+    db = root / "state" / "engine.sqlite3"
+    with engine_connection(db) as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM final_holdout_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        metadata = dict(loads(str(row["metadata_json"])))
+        metadata["processed_sessions"] = session_values
+        connection.execute(
+            """
+            UPDATE final_holdout_runs
+            SET metadata_json = ?, first_eligible_future_signal_date = ?,
+                latest_processed_market_date = ?
+            WHERE run_id = ?
+            """,
+            (dumps(metadata), session_values[0], session_values[-1], run_id),
+        )
+
+
+def _append_final_holdout_outcomes(
+    root: Path,
+    *,
+    run_id: str,
+    model_id: str,
+    count: int,
+    distinct_dates: int | None = None,
+    positive_count: int = 20,
+    provenance: bool = True,
+    invalidated_indices: set[int] | None = None,
+    start_index: int = 0,
+) -> None:
+    db = root / "state" / "engine.sqlite3"
+    distinct_dates = distinct_dates or count
+    signal_dates = [
+        pd.Timestamp("2026-06-19") + pd.offsets.BDay(index) for index in range(distinct_dates)
+    ]
+    invalidated_indices = invalidated_indices or set()
+    for offset in range(count):
+        index = start_index + offset
+        signal_date = pd.Timestamp(signal_dates[index % distinct_dates]).date().isoformat()
+        entry_date = (pd.Timestamp(signal_date) + pd.offsets.BDay(1)).date().isoformat()
+        exit_date = (pd.Timestamp(signal_date) + pd.offsets.BDay(5)).date().isoformat()
+        exit_reason = "target" if offset < positive_count else "stop"
+        pending = append_forward_event(
+            db,
+            event_type="FINAL_HOLDOUT_ENTRY_PENDING",
+            market_as_of_date=signal_date,
+            ticker="AAPL",
+            direction="bull",
+            model_id=model_id,
+            scanner_snapshot_id="scan-final-holdout-test",
+            feature_snapshot_hash="test-feature-manifest",
+            payload={
+                "run_id": run_id,
+                "mode": SHADOW_FINAL_HOLDOUT_MODE,
+                "signal_as_of_date": signal_date,
+                "horizon": 10,
+                "prospective_provenance_valid": provenance,
+                "entry_rule": "next_completed_session_open",
+                "planned_round_trip_cost_bps": 5.0,
+            },
+            unique_suffix=f"{run_id}|{index}|pending",
+        )
+        append_forward_event(
+            db,
+            event_type="FINAL_HOLDOUT_ENTRY_FILLED",
+            market_as_of_date=entry_date,
+            ticker="AAPL",
+            direction="bull",
+            model_id=model_id,
+            scanner_snapshot_id="scan-final-holdout-test",
+            feature_snapshot_hash="test-feature-manifest",
+            payload={
+                "run_id": run_id,
+                "source_pending_event_id": pending.event_id,
+                "signal_as_of_date": signal_date,
+                "entry_date": entry_date,
+                "entry_price": 100.0,
+                "horizon": 10,
+            },
+            unique_suffix=f"{run_id}|{index}|fill",
+        )
+        append_forward_event(
+            db,
+            event_type="FINAL_HOLDOUT_EXIT_FILLED",
+            market_as_of_date=exit_date,
+            ticker="AAPL",
+            direction="bull",
+            model_id=model_id,
+            scanner_snapshot_id="scan-final-holdout-test",
+            feature_snapshot_hash="test-feature-manifest",
+            payload={
+                "run_id": run_id,
+                "source_pending_event_id": pending.event_id,
+                "signal_as_of_date": signal_date,
+                "entry_date": entry_date,
+                "exit_date": exit_date,
+                "exit_reason": exit_reason,
+                "mfe": 0.04,
+                "mae": -0.02,
+                "realized_return": 0.02 if exit_reason == "target" else -0.01,
+                "net_realized_return": 0.019 if exit_reason == "target" else -0.011,
+                "costs": 0.001,
+            },
+            unique_suffix=f"{run_id}|{index}|exit",
+        )
+        if index in invalidated_indices:
+            append_forward_event(
+                db,
+                event_type="FINAL_HOLDOUT_DATA_INVALIDATED",
+                market_as_of_date=exit_date,
+                ticker="AAPL",
+                direction="bull",
+                model_id=model_id,
+                scanner_snapshot_id="scan-final-holdout-test",
+                feature_snapshot_hash="test-feature-manifest",
+                payload={
+                    "run_id": run_id,
+                    "source_pending_event_id": pending.event_id,
+                    "reason": "test data invalidated",
+                },
+                unique_suffix=f"{run_id}|{index}|invalidated",
+            )
+
+
+def _append_rejected_signal(root: Path, *, run_id: str, model_id: str) -> None:
+    append_forward_event(
+        root / "state" / "engine.sqlite3",
+        event_type="FINAL_HOLDOUT_SIGNAL_REJECTED",
+        market_as_of_date="2026-06-19",
+        ticker="AAPL",
+        direction="bull",
+        model_id=model_id,
+        scanner_snapshot_id="scan-final-holdout-test",
+        feature_snapshot_hash="test-feature-manifest",
+        payload={"run_id": run_id, "reason": "test rejected signal"},
+        unique_suffix=f"{run_id}|rejected",
+    )
+
+
+def _sample_state(root: Path, run_id: str, model_id: str):
+    return next(
+        state for state in final_holdout_sample_states(root, run_id) if state.model_id == model_id
+    )
+
+
+def _prepare_sample_run(
+    root: Path,
+    *,
+    model: RegisteredModel | None = None,
+    matured: int = 100,
+    distinct_dates: int = 60,
+    processed_sessions: int = 126,
+    positive: int = 20,
+    provenance: bool = True,
+    invalidated_indices: set[int] | None = None,
+):
+    model = model or _registered_model(root)
+    _register(root, model)
+    report = initialize_final_holdout_run(
+        root,
+        generation="latest",
+        feature_panel=_feature_panel(["2026-06-18"]),
+    )
+    assert report.run is not None
+    _set_processed_sessions(root, report.run.run_id, processed_sessions)
+    _append_final_holdout_outcomes(
+        root,
+        run_id=report.run.run_id,
+        model_id=model.model_id,
+        count=matured,
+        distinct_dates=distinct_dates,
+        positive_count=positive,
+        provenance=provenance,
+        invalidated_indices=invalidated_indices,
+    )
+    return report
+
+
+def test_sample_policy_config_loads_deterministically_and_hash_is_stable(
+    tmp_path: Path,
+) -> None:
+    _write_sample_policy(tmp_path)
+
+    first = load_final_holdout_sample_policy(tmp_path)
+    second = load_final_holdout_sample_policy(tmp_path)
+
+    assert first.normalized() == second.normalized()
+    assert first.policy_hash == second.policy_hash
+    assert first.schema_version == FINAL_HOLDOUT_SAMPLE_POLICY_VERSION
+
+
+def test_sample_policy_is_frozen_at_run_creation(tmp_path: Path) -> None:
+    _write_sample_policy(tmp_path, matured=100)
+    model = _registered_model(tmp_path)
+    _register(tmp_path, model)
+
+    report = initialize_final_holdout_run(
+        tmp_path,
+        generation="latest",
+        feature_panel=_feature_panel(["2026-06-18"]),
+    )
+    assert report.run is not None
+    frozen_hash = report.run.sample_policy_hash
+    _write_sample_policy(tmp_path, matured=200)
+
+    stored = list_final_holdout_runs(tmp_path / "state" / "engine.sqlite3")[0]
+
+    assert stored.sample_policy["matured_outcomes_minimum"] == 100
+    assert stored.sample_policy_hash == frozen_hash
+    assert load_final_holdout_sample_policy(tmp_path).matured_outcomes_minimum == 200
+
+
+@pytest.mark.parametrize(
+    ("matured", "expected_status"),
+    [(99, "FAIL"), (100, "PASS")],
+)
+def test_matured_outcome_minimum_gate(
+    tmp_path: Path,
+    matured: int,
+    expected_status: str,
+) -> None:
+    report = _prepare_sample_run(tmp_path, matured=matured)
+    state = _sample_state(tmp_path, report.run.run_id, "model-final-holdout-a")
+    gate = next(
+        item for item in state.gates if item.gate_id == "final_holdout_matured_outcomes_min_100"
+    )
+
+    assert gate.status == expected_status
+
+
+@pytest.mark.parametrize(
+    ("dates", "expected_status"),
+    [(59, "FAIL"), (60, "PASS")],
+)
+def test_distinct_signal_dates_minimum_gate(
+    tmp_path: Path,
+    dates: int,
+    expected_status: str,
+) -> None:
+    report = _prepare_sample_run(tmp_path, distinct_dates=dates)
+    state = _sample_state(tmp_path, report.run.run_id, "model-final-holdout-a")
+    gate = next(
+        item for item in state.gates if item.gate_id == "final_holdout_distinct_signal_dates_min_60"
+    )
+
+    assert gate.status == expected_status
+
+
+@pytest.mark.parametrize(
+    ("sessions", "expected_status"),
+    [(125, "FAIL"), (126, "PASS")],
+)
+def test_observation_session_minimum_gate(
+    tmp_path: Path,
+    sessions: int,
+    expected_status: str,
+) -> None:
+    report = _prepare_sample_run(tmp_path, processed_sessions=sessions)
+    state = _sample_state(tmp_path, report.run.run_id, "model-final-holdout-a")
+    gate = next(
+        item for item in state.gates if item.gate_id == "final_holdout_observation_sessions_min_126"
+    )
+
+    assert gate.status == expected_status
+
+
+@pytest.mark.parametrize(
+    ("policy_months", "expected_status"),
+    [(5, "FAIL"), (4, "PASS")],
+)
+def test_calendar_month_minimum_gate(
+    tmp_path: Path,
+    policy_months: int,
+    expected_status: str,
+) -> None:
+    _write_sample_policy(tmp_path, months=policy_months)
+    report = _prepare_sample_run(tmp_path)
+    state = _sample_state(tmp_path, report.run.run_id, "model-final-holdout-a")
+    gate = next(
+        item for item in state.gates if item.gate_id == "final_holdout_calendar_months_min_4"
+    )
+
+    assert gate.status == expected_status
+
+
+@pytest.mark.parametrize(
+    ("positive", "gate_id", "expected_status"),
+    [
+        (19, "final_holdout_positive_class_min_20", "FAIL"),
+        (20, "final_holdout_positive_class_min_20", "PASS"),
+        (81, "final_holdout_negative_class_min_20", "FAIL"),
+        (80, "final_holdout_negative_class_min_20", "PASS"),
+    ],
+)
+def test_target_before_stop_class_support_gates(
+    tmp_path: Path,
+    positive: int,
+    gate_id: str,
+    expected_status: str,
+) -> None:
+    report = _prepare_sample_run(tmp_path, positive=positive)
+    state = _sample_state(tmp_path, report.run.run_id, "model-final-holdout-a")
+    gate = next(item for item in state.gates if item.gate_id == gate_id)
+
+    assert gate.status == expected_status
+
+
+def test_pending_rejected_and_invalidated_events_do_not_count_as_matured(
+    tmp_path: Path,
+) -> None:
+    model = _registered_model(tmp_path)
+    _register(tmp_path, model)
+    report = initialize_final_holdout_run(
+        tmp_path,
+        generation="latest",
+        feature_panel=_feature_panel(["2026-06-18"]),
+    )
+    assert report.run is not None
+    _set_processed_sessions(tmp_path, report.run.run_id, 126)
+    _append_rejected_signal(tmp_path, run_id=report.run.run_id, model_id=model.model_id)
+    _append_final_holdout_outcomes(
+        tmp_path,
+        run_id=report.run.run_id,
+        model_id=model.model_id,
+        count=1,
+        invalidated_indices={0},
+    )
+    append_forward_event(
+        tmp_path / "state" / "engine.sqlite3",
+        event_type="FINAL_HOLDOUT_ENTRY_PENDING",
+        market_as_of_date="2026-06-20",
+        ticker="AAPL",
+        direction="bull",
+        model_id=model.model_id,
+        scanner_snapshot_id="scan-final-holdout-test",
+        feature_snapshot_hash="test-feature-manifest",
+        payload={
+            "run_id": report.run.run_id,
+            "signal_as_of_date": "2026-06-20",
+            "prospective_provenance_valid": True,
+        },
+        unique_suffix=f"{report.run.run_id}|still-pending",
+    )
+
+    state = _sample_state(tmp_path, report.run.run_id, model.model_id)
+
+    assert state.matured_outcomes == 0
+    assert state.pending_entries == 1
+    assert state.invalidated_outcomes == 1
+
+
+def test_backfill_missing_provenance_and_artifact_drift_block_sufficiency(
+    tmp_path: Path,
+) -> None:
+    report = _prepare_sample_run(tmp_path)
+    assert report.run is not None
+    db = tmp_path / "state" / "engine.sqlite3"
+    append_forward_event(
+        db,
+        event_type="FINAL_HOLDOUT_DATA_INVALIDATED",
+        market_as_of_date="2026-06-19",
+        ticker="RUN",
+        direction="n/a",
+        model_id="run",
+        scanner_snapshot_id=None,
+        feature_snapshot_hash=report.run.feature_manifest_hash,
+        payload={
+            "run_id": report.run.run_id,
+            "reason": "FINAL_HOLDOUT_BACKFILL_BLOCKED: test",
+        },
+        unique_suffix=f"{report.run.run_id}|blocked-backfill",
+    )
+    state = _sample_state(tmp_path, report.run.run_id, "model-final-holdout-a")
+
+    assert not state.sample_sufficient
+    assert state.blocked_backfills == 1
+
+    missing_provenance_report = _prepare_sample_run(
+        tmp_path / "missing-provenance",
+        provenance=False,
+    )
+    missing_state = _sample_state(
+        tmp_path / "missing-provenance",
+        missing_provenance_report.run.run_id,
+        "model-final-holdout-a",
+    )
+    assert not missing_state.sample_sufficient
+    assert missing_state.provenance_failures == 100
+
+    drift_root = tmp_path / "artifact-drift"
+    model = _registered_model(drift_root)
+    drift_report = _prepare_sample_run(drift_root, model=model)
+    Path(model.artifact_path).write_bytes(Path(model.artifact_path).read_bytes() + b"drift")
+    drift_state = _sample_state(drift_root, drift_report.run.run_id, model.model_id)
+    assert not drift_state.sample_sufficient
+    assert not drift_state.artifact_integrity_passed
+
+
 def test_initialization_freezes_models_artifact_hashes_and_baseline(tmp_path: Path) -> None:
     model = _registered_model(tmp_path)
     _register(tmp_path, model)
@@ -347,6 +788,8 @@ def test_initialization_freezes_models_artifact_hashes_and_baseline(tmp_path: Pa
     assert enrolled[0].artifact_hash == hash_file(model.artifact_path)
     assert enrolled[0].selection_policy_hash == "policy-hash-a"
     assert enrolled[0].calibration_governance_hash == "calibration-manifest-a"
+    assert report.run.sample_policy_version == FINAL_HOLDOUT_SAMPLE_POLICY_VERSION
+    assert report.run.sample_policy_hash == load_final_holdout_sample_policy(tmp_path).policy_hash
 
 
 def test_default_enrollment_excludes_naive_and_development_gate_ineligible_models(
@@ -622,12 +1065,17 @@ def test_research_only_enrollment_cannot_become_promotion_eligible(tmp_path: Pat
         feature_panel=_feature_panel(["2026-06-18"]),
     )
     assert report.run is not None
-
-    evaluation = evaluate_final_holdout_run(
+    _set_processed_sessions(tmp_path, report.run.run_id, 126)
+    _append_final_holdout_outcomes(
         tmp_path,
         run_id=report.run.run_id,
-        minimum_matured_outcomes=0,
+        model_id=blocked.model_id,
+        count=100,
+        distinct_dates=60,
+        positive_count=20,
     )
+
+    evaluation = evaluate_final_holdout_run(tmp_path, run_id=report.run.run_id)
 
     gates = evaluation.gates_by_model["model-research-only"]
     assert any(gate.gate_id == "final_holdout_research_only_not_promotable" for gate in gates)
@@ -650,13 +1098,108 @@ def test_final_holdout_status_requires_evaluation_and_does_not_imply_pass(
     with pytest.raises(ValueError, match="holdout status blocks promotion"):
         before(tmp_path / "state" / "engine.sqlite3", model.model_id)
 
+    with pytest.raises(ValueError, match="sample sufficiency"):
+        evaluate_final_holdout_run(tmp_path, run_id=report.run.run_id)
+
+    _set_processed_sessions(tmp_path, report.run.run_id, 30)
+    _append_final_holdout_outcomes(
+        tmp_path,
+        run_id=report.run.run_id,
+        model_id=model.model_id,
+        count=30,
+        distinct_dates=20,
+        positive_count=10,
+    )
+    diagnostic = evaluate_final_holdout_run(
+        tmp_path,
+        run_id=report.run.run_id,
+        diagnostic_only=True,
+    )
+    assert diagnostic.metrics_by_model[model.model_id]["final_holdout_diagnostic_status"] == (
+        "EARLY_DIAGNOSTIC_AVAILABLE"
+    )
+    with engine_connection(tmp_path / "state" / "engine.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT metrics_json FROM models WHERE model_id = ?",
+            (model.model_id,),
+        ).fetchone()
+    assert row is not None
+    assert dict(loads(str(row["metrics_json"])))["holdout_status"] == DEVELOPMENT_HOLDOUT_STATUS
+    with pytest.raises(ValueError, match="holdout status blocks promotion"):
+        promote_model(tmp_path / "state" / "engine.sqlite3", model.model_id)
+
+    _append_final_holdout_outcomes(
+        tmp_path,
+        run_id=report.run.run_id,
+        model_id=model.model_id,
+        count=70,
+        distinct_dates=60,
+        positive_count=10,
+        start_index=30,
+    )
+    _set_processed_sessions(tmp_path, report.run.run_id, 126)
     evaluation = evaluate_final_holdout_run(tmp_path, run_id=report.run.run_id)
     metrics = evaluation.metrics_by_model[model.model_id]
     gates = evaluation.gates_by_model[model.model_id]
 
     assert metrics["holdout_status"] == FINAL_HOLDOUT_STATUS
-    assert any(gate.status == "NOT_CONFIGURED" for gate in gates)
-    assert not promotion_eligibility(gates).eligible
+    assert all(gate.status == "PASS" for gate in gates if gate.gate_id.startswith("final_holdout_"))
+    assert promotion_eligibility(gates).eligible
+
+
+def test_final_holdout_status_does_not_override_failed_performance_gate(
+    tmp_path: Path,
+) -> None:
+    model = _registered_model(tmp_path)
+    _register(tmp_path, model)
+    report = initialize_final_holdout_run(
+        tmp_path,
+        generation="latest",
+        feature_panel=_feature_panel(["2026-06-18"]),
+    )
+    assert report.run is not None
+    failed_gate = make_gate(
+        gate_id="synthetic_performance_gate_failed",
+        gate_name="Synthetic Performance Gate Failed",
+        category="model quality",
+        scope="model",
+        metric_name="synthetic_performance",
+        threshold=True,
+        comparator="is true",
+        actual_value=False,
+        status="FAIL",
+        mandatory=True,
+        evidence_source="test",
+        reason="Synthetic performance gate failed.",
+        configuration_hash_value="test-config",
+    )
+    mutated_gates = (*model.gate_results, failed_gate)
+    with engine_connection(tmp_path / "state" / "engine.sqlite3") as connection:
+        connection.execute(
+            """
+            UPDATE models
+            SET gate_results_json = ?, quality_gates_json = ?
+            WHERE model_id = ?
+            """,
+            (
+                dumps(gate_results_to_jsonable(mutated_gates)),
+                dumps(quality_gate_bool_map(mutated_gates)),
+                model.model_id,
+            ),
+        )
+    _set_processed_sessions(tmp_path, report.run.run_id, 126)
+    _append_final_holdout_outcomes(
+        tmp_path,
+        run_id=report.run.run_id,
+        model_id=model.model_id,
+        count=100,
+        distinct_dates=60,
+        positive_count=20,
+    )
+
+    evaluation = evaluate_final_holdout_run(tmp_path, run_id=report.run.run_id)
+
+    assert evaluation.metrics_by_model[model.model_id]["holdout_status"] == FINAL_HOLDOUT_STATUS
     with pytest.raises(ValueError, match="mandatory gate results block promotion"):
         promote_model(tmp_path / "state" / "engine.sqlite3", model.model_id)
 
@@ -700,12 +1243,17 @@ def test_manual_promotion_remains_required_after_passing_final_holdout_gates(
         feature_panel=_feature_panel(["2026-06-18"]),
     )
     assert report.run is not None
-
-    evaluation = evaluate_final_holdout_run(
+    _set_processed_sessions(tmp_path, report.run.run_id, 126)
+    _append_final_holdout_outcomes(
         tmp_path,
         run_id=report.run.run_id,
-        minimum_matured_outcomes=0,
+        model_id=model.model_id,
+        count=100,
+        distinct_dates=60,
+        positive_count=20,
     )
+
+    evaluation = evaluate_final_holdout_run(tmp_path, run_id=report.run.run_id)
 
     assert evaluation.status == "EVALUATED_PASS"
     with engine_connection(tmp_path / "state" / "engine.sqlite3") as connection:

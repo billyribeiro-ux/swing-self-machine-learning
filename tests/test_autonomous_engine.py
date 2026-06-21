@@ -39,7 +39,12 @@ from swing_rsi.engine.models import (
 )
 from swing_rsi.engine.ood import PREDICTION_OOD_GOVERNANCE_VERSION
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
-from swing_rsi.engine.registry import RegisteredModel, promote_model, register_model
+from swing_rsi.engine.registry import (
+    FINAL_HOLDOUT_SAMPLE_GATE_IDS,
+    RegisteredModel,
+    promote_model,
+    register_model,
+)
 from swing_rsi.engine.scanner import ScannerConfig, latest_common_session, run_scanner
 from swing_rsi.engine.selection import SelectionPolicy
 from swing_rsi.engine.splits import chronological_train_calibration_holdout_split
@@ -220,6 +225,25 @@ def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> Registered
         reason="Synthetic registry fixture uses a final holdout.",
         configuration_hash_value="test",
     )
+    sample_gates = tuple(
+        make_gate(
+            gate_id=gate_id,
+            gate_name=gate_id.replace("_", " ").title(),
+            category="final holdout sample governance",
+            scope="model",
+            metric_name=gate_id,
+            threshold=True,
+            comparator="is true",
+            actual_value=True,
+            status="PASS",
+            mandatory=True,
+            evidence_source="synthetic-test",
+            reason="Synthetic final-holdout sample gate passed.",
+            configuration_hash_value="synthetic-sample-policy",
+        )
+        for gate_id in FINAL_HOLDOUT_SAMPLE_GATE_IDS
+    )
+    gates = (final_holdout_gate, *sample_gates)
     return RegisteredModel(
         model_id=model_id,
         task="swing_direction_probability",
@@ -242,8 +266,8 @@ def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> Registered
             "holdout_status": FINAL_HOLDOUT_STATUS,
         },
         calibration_metrics={"holdout_brier": 0.2},
-        quality_gates={final_holdout_gate.gate_id: True},
-        gate_results=(final_holdout_gate,),
+        quality_gates={gate.gate_id: gate.status == "PASS" for gate in gates},
+        gate_results=gates,
         artifact_path="artifact.joblib",
         code_commit_hash=None,
         created_at_utc=datetime.now(UTC).isoformat(),
@@ -270,6 +294,41 @@ def test_model_registry_is_immutable_and_promotion_is_explicit(tmp_path: Path) -
     with engine_connection(db) as connection:
         connection.execute(
             """
+            INSERT INTO final_holdout_runs (
+                run_id, schema_version, created_at_utc, creation_git_commit,
+                baseline_market_date, first_eligible_future_signal_date, universe_snapshot_id,
+                feature_manifest_hash, generation_id, model_ids_json, scanner_identity_version,
+                execution_policy_hash, sample_policy_version, sample_policy_hash,
+                sample_policy_json, horizon, direction, status, invalidation_reason,
+                latest_processed_market_date, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                "prospective_final_holdout_v1",
+                model.created_at_utc,
+                None,
+                "2026-06-18",
+                "2026-06-19",
+                model.universe_snapshot_id,
+                model.feature_manifest_hash,
+                model.created_at_utc,
+                json.dumps([model.model_id]),
+                1,
+                "synthetic-execution-policy",
+                "prospective_final_holdout_sample_v1",
+                "synthetic-sample-policy",
+                json.dumps({"schema_version": "prospective_final_holdout_sample_v1"}),
+                model.horizon,
+                model.direction,
+                "EVALUATED_PASS",
+                None,
+                "2026-12-18",
+                "{}",
+            ),
+        )
+        connection.execute(
+            """
             INSERT INTO final_holdout_models (
                 run_id, model_id, generation_id, artifact_path, artifact_hash,
                 model_state_at_enrollment, development_gate_eligible, research_only,
@@ -290,7 +349,13 @@ def test_model_registry_is_immutable_and_promotion_is_explicit(tmp_path: Path) -
                 "",
                 configuration_hash({}),
                 "[]",
-                "{}",
+                json.dumps(
+                    {
+                        "feature_manifest_hash": model.feature_manifest_hash,
+                        "calibrator_artifact_hash": "",
+                        "execution_policy_hash": "synthetic-execution-policy",
+                    }
+                ),
             ),
         )
     with pytest.raises(ValueError):
