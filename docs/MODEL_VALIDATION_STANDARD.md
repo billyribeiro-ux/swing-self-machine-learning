@@ -50,6 +50,16 @@ Each prediction head that owns a distinct target must use a train-only feature s
 
 The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
 
+## Target-before-stop calibration governance
+
+New target-before-stop heads use calibration governance schema `tbs_calibration_governance_v1`. Each model family, direction, horizon, and prediction head selects its own calibrator independently; calibrators are never shared across bull/bear, model families, horizons, or heads.
+
+Only the chronological calibration slice may select the target-before-stop calibration method. The current calibration period is split into three deterministic forward-chaining internal folds when possible. For each internal fold, calibrator fit rows strictly precede evaluation rows; evaluation labels, holdout labels, and future calibration rows cannot enter calibrator fitting for an earlier fold.
+
+The only supported candidates are `identity`, `sigmoid`, and `isotonic`. Candidate selection uses mean chronological-fold Brier score with a precommitted one-standard-error rule: find the lowest mean Brier, add that candidate's Brier standard error, then choose the simplest method within that boundary using `identity < sigmoid < isotonic`. At least two evaluable chronological folds are required to select a learned calibrator; otherwise identity is selected with reason `insufficient_calibration_folds_for_learned_calibrator`.
+
+After selection, the chosen calibrator is refit on the complete calibration slice only. Development holdout metrics are persisted and displayed only as `DEVELOPMENT HOLDOUT DIAGNOSTIC`; they must not select calibrators, optimize thresholds, promote models, or support final out-of-sample claims.
+
 ## Prediction OOD governance V2
 
 Autonomous model artifacts created under `prediction_ood_governance_v2` no longer require zero predictions outside the training `q01` / `q99` reference envelope. The `q01` / `q99` range remains the out-of-distribution reference envelope, but it is not an absolute mathematical domain. Requiring zero exceedances across thousands of holdout predictions makes one ordinary tail estimate fail an otherwise auditable model, so the old `prediction_out_of_distribution_absent` gate is deprecated for new artifacts.

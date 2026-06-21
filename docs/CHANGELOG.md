@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added Target-Before-Stop Calibration Governance V1: target-before-stop heads now evaluate identity, sigmoid, and isotonic calibrators on chronological calibration-only folds and select with a precommitted one-standard-error rule before refitting the chosen calibrator on the full calibration slice.
+- Persisted target-before-stop calibration governance metadata, calibration/audit artifact paths, method-comparison and fold diagnostics, plateau/step-support summaries, calibration manifest hashes, raw/calibrated probability audit exports, and development-holdout diagnostic labels.
+- Updated scanner target-before-stop handling to use the frozen head-specific calibrator, reject new-schema artifacts missing calibration governance metadata, and include calibration method/manifest hashes in scanner cache identity.
+- Added model-audit exports and dashboard review tabs for target-before-stop calibration method comparison, chronological fold metrics, step support, calibration-only threshold utility, and candidate-level calibration identity.
+- Added regression coverage for chronological calibration-fold isolation, one-standard-error method selection, identity/sigmoid/isotonic probability contracts, holdout exclusion from selection, frozen scanner calibrator use, scanner identity changes from calibration metadata, missing-governance rejection, legacy readability, and audit exports.
 - Added target-specific train-only feature screening for the target-before-stop head, including per-head feature manifests, screen audit metadata and hashes, scanner feature-manifest identity, model-audit exports, and dashboard review tabs.
 - Added regression coverage for target-specific label use, full eligible-universe scoring before the feature cap, train-only missingness/variance/imputation/correlation pruning, deterministic column-order behavior, scanner missing-feature rejection, and legacy artifact readability.
 - Documented target-specific screening requirements across model validation, governance, autonomous discovery, feature registry, and scanner specifications.

@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-21 — Target-before-stop calibrator selection is governed by calibration-only folds
+
+Decision: Target-before-stop heads now use calibration governance schema `tbs_calibration_governance_v1`. Each model family, direction, horizon, and target-before-stop head independently evaluates exactly `identity`, `sigmoid`, and `isotonic` calibrators on forward-chaining chronological folds inside the existing calibration slice. Selection uses mean fold Brier with the precommitted one-standard-error rule and simplicity order `identity < sigmoid < isotonic`. The selected method is then refit on the complete calibration slice only and persisted with fold diagnostics, candidate diagnostics, plateau/step-support records, raw/calibrated probability audit paths, and calibration manifest hashes.
+
+Reason: The calibration diagnosis found no implementation leakage but did find large isotonic plateaus, sparse step support, occasional unsupported extremes, temporal/product-class instability, and weak raw signal. Calibrator choice must therefore be governed by calibration data only instead of assuming isotonic is always appropriate. The repeatedly inspected holdout is now a development holdout and cannot select calibrators, optimize thresholds, promote models, or support final out-of-sample claims.
+
 ## 2026-06-21 — Target-before-stop uses its own train-only feature screen
 
 Decision: The target-before-stop classifier now owns a separate train-only feature screen keyed to `label_{direction}_target_before_stop_{horizon}`. The primary positive-return classifier, target-before-stop classifier, expected-return head, MFE head, and MAE head persist separate head feature manifests, with legacy artifacts labeled as shared-screen artifacts when target-specific metadata is absent.
