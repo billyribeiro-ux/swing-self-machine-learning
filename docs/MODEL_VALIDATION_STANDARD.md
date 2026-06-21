@@ -44,6 +44,12 @@ The current autonomous default research start is `2016-06-20`.
 
 Every classifier is compared against the matching naive control on the exact same holdout rows. Store model Brier, naive Brier, absolute Brier improvement, relative Brier improvement, and Brier skill score. A model with worse holdout Brier than the matching naive control fails the mandatory predictive-skill gate.
 
+## Target-specific feature screening
+
+Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. It must not reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
+
+The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
+
 ## Prediction OOD governance V2
 
 Autonomous model artifacts created under `prediction_ood_governance_v2` no longer require zero predictions outside the training `q01` / `q99` reference envelope. The `q01` / `q99` range remains the out-of-distribution reference envelope, but it is not an absolute mathematical domain. Requiring zero exceedances across thousands of holdout predictions makes one ordinary tail estimate fail an otherwise auditable model, so the old `prediction_out_of_distribution_absent` gate is deprecated for new artifacts.

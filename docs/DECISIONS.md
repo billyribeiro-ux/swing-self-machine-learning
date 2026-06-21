@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-21 — Target-before-stop uses its own train-only feature screen
+
+Decision: The target-before-stop classifier now owns a separate train-only feature screen keyed to `label_{direction}_target_before_stop_{horizon}`. The primary positive-return classifier, target-before-stop classifier, expected-return head, MFE head, and MAE head persist separate head feature manifests, with legacy artifacts labeled as shared-screen artifacts when target-specific metadata is absent.
+
+Reason: Positive-return classification and target-before-stop classification are different prediction tasks. Reusing the primary classifier's selected columns for target-before-stop can exclude eligible families before they receive a fair target-specific score. The correction is target-specific screening without changing labels, thresholds, calibration, model families, target/stop multiples, or OOD Governance V2.
+
 ## 2026-06-21 — Temporal-fold stability separates evidence availability from threshold comparison
 
 Decision: Temporal-fold stability now persists a mandatory learned-model evidence-availability gate separately from the `temporal_fold_stability_min_050` threshold gate. The existing three chronological fold layout and 0.50 positive-fold threshold remain unchanged. If selected-row evidence is missing, nonfinite, zero-selection, or insufficient to populate all requested folds, the evidence gate fails for learned models and the threshold gate is `NOT_APPLICABLE`; naive zero-selection controls mark both temporal-fold gates `NOT_APPLICABLE` and remain blocked by `not_naive_control`.

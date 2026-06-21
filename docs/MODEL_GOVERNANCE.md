@@ -61,6 +61,8 @@ The current vertical slice gates on:
 
 Registered metrics also retain feature-stability summaries, bounded holdout permutation-importance summaries, target-before-stop calibration, positive year/regime/sector fractions, symbol/sector concentration, double-cost lower bound, prediction turnover, temporal-fold positive fraction, exceptional-period concentration, model plugin metadata, and naive/RSI-control availability for review. Those diagnostics do not override failed gates.
 
+New model artifacts persist head-specific feature manifests. The target-before-stop head stores its own screening schema version, target label, selected features, selected-feature-family counts, full audit records, screen configuration hash, and selected-feature manifest hash. Legacy artifacts without this metadata remain readable and are labeled as using shared legacy feature screening; they are not equivalent to new target-specific artifacts.
+
 The configured default candidate-selection policy is persisted with each model artifact and registry row. It requires probability at least `0.55`, expected return at least `0.001` decimal return, target-before-stop probability at least `0.50`, dollar volume at least `5,000,000`, no more than five selected candidates per date, no more than 5,000 selected holdout rows globally, and selected holdout coverage no greater than `20%`. These defaults are methodology controls, not tuned approvals for any current model.
 
 The selection evaluator is canonical for holdout model evaluation and scanner actionability. Missing or non-finite required policy metrics fail safely, and the scanner cannot relax persisted policy thresholds.

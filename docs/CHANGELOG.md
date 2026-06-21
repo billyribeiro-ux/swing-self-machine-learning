@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added target-specific train-only feature screening for the target-before-stop head, including per-head feature manifests, screen audit metadata and hashes, scanner feature-manifest identity, model-audit exports, and dashboard review tabs.
+- Added regression coverage for target-specific label use, full eligible-universe scoring before the feature cap, train-only missingness/variance/imputation/correlation pruning, deterministic column-order behavior, scanner missing-feature rejection, and legacy artifact readability.
+- Documented target-specific screening requirements across model validation, governance, autonomous discovery, feature registry, and scanner specifications.
 - Corrected temporal-fold stability gate evidence semantics: new artifacts now persist a separate temporal-fold evidence-availability gate, fold evidence details, and a threshold gate that becomes `NOT_APPLICABLE` when evidence is unavailable instead of passing missing evidence.
 - Corrected canonical quality-gate evidence semantics for profit factor and concentration gates: positive-infinity profit factor now passes minimum thresholds when selected returns have gains and no losses, unavailable profit factor is represented explicitly instead of as infinity, concentration failure reasons now match status/threshold evidence, and dashboard/model-audit exports distinguish `Infinity` from `NOT_AVAILABLE`.
 - Implemented `prediction_ood_governance_v2`: deprecated the old zero-exceedance OOD promotion rule for new artifacts, added per-head calibration-derived OOD rate/severity gates, hard prediction-integrity gates, training-only OOD bounds, scanner OOD warnings/rejections, OOD-aware scanner identity metadata, and model-audit export fields.

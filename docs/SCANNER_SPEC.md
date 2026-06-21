@@ -39,6 +39,7 @@ Snapshots include:
 - expected return;
 - expected MFE and MAE;
 - target-before-stop probability from the separate target-before-stop classifier;
+- target-before-stop feature-screen schema and selected-feature manifest hash;
 - composite utility score;
 - liquidity score;
 - regime;
@@ -60,3 +61,7 @@ Compact analog records include directional forward return, MFE, MAE, and target-
 Scanner predictions are candidates, not trades. Only rows from a `CHAMPION` or `CHALLENGER` whose persisted canonical gate results are promotion-eligible can become actionable paper candidates. Candidate-generation review rows remain visible, but they are rejected for paper trading with explicit exclusion reasons.
 
 Runtime scanner configuration may make a model's persisted selection policy stricter, but never looser. Minimum thresholds use `max(persisted_threshold, runtime_threshold)`. Maximum caps use `min(persisted_cap, runtime_cap)` when both values are configured. Missing persisted selection policy rejects the row with `persisted_selection_policy_missing`.
+
+The target-before-stop probability must be generated from the target-before-stop head's own frozen selected-feature manifest. The scanner must not substitute the primary positive-return feature matrix for that head. If a required target-before-stop feature is missing from the latest snapshot, the candidate is rejected with `target_before_stop_required_feature_missing`, and the missing feature names remain auditable in the snapshot.
+
+Scanner cache identity includes the target-before-stop screening schema and selected-feature manifest hash for every loaded model. Artifacts without target-specific target-before-stop screening metadata are legacy audit artifacts and are not treated as equivalent to new target-specific artifacts.
