@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 
 import pandas as pd
 
-from swing_rsi.config import ProjectPaths
+from swing_rsi.config import ProjectPaths, load_yaml
 from swing_rsi.data.loader import load_ohlcv_csv
 from swing_rsi.engine.forward import (
     advance_forward_positions,
@@ -40,12 +40,14 @@ from swing_rsi.engine.scanner import (
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
 FINAL_HOLDOUT_SCHEMA_VERSION = "prospective_final_holdout_v1"
+FINAL_HOLDOUT_SAMPLE_POLICY_VERSION = "prospective_final_holdout_sample_v1"
 SHADOW_FINAL_HOLDOUT_MODE = "SHADOW_FINAL_HOLDOUT"
 FINAL_HOLDOUT_EVENT_PREFIX = "FINAL_HOLDOUT_"
 
 RunStatus = Literal[
     "CREATED",
     "COLLECTING",
+    "EARLY_DIAGNOSTIC_AVAILABLE",
     "READY_FOR_EVALUATION",
     "EVALUATED_PASS",
     "EVALUATED_FAIL",
@@ -68,6 +70,9 @@ class FinalHoldoutRun:
     model_ids: tuple[str, ...]
     scanner_identity_version: int
     execution_policy_hash: str
+    sample_policy_version: str
+    sample_policy_hash: str
+    sample_policy: dict[str, object]
     horizon: int
     direction: str
     status: RunStatus
@@ -118,8 +123,95 @@ class FinalHoldoutEvaluationResult:
     evidence_manifest_hashes: dict[str, str]
 
 
+@dataclass(frozen=True)
+class FinalHoldoutSamplePolicy:
+    schema_version: str = FINAL_HOLDOUT_SAMPLE_POLICY_VERSION
+    matured_outcomes_minimum: int = 100
+    distinct_signal_dates_minimum: int = 60
+    observation_sessions_minimum: int = 126
+    calendar_months_minimum: int = 4
+    positive_class_minimum: int = 20
+    negative_class_minimum: int = 20
+    early_diagnostic_matured_outcomes_minimum: int = 30
+    early_diagnostic_distinct_signal_dates_minimum: int = 20
+
+    def normalized(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "matured_outcomes_minimum": self.matured_outcomes_minimum,
+            "distinct_signal_dates_minimum": self.distinct_signal_dates_minimum,
+            "observation_sessions_minimum": self.observation_sessions_minimum,
+            "calendar_months_minimum": self.calendar_months_minimum,
+            "positive_class_minimum": self.positive_class_minimum,
+            "negative_class_minimum": self.negative_class_minimum,
+            "early_diagnostic_matured_outcomes_minimum": (
+                self.early_diagnostic_matured_outcomes_minimum
+            ),
+            "early_diagnostic_distinct_signal_dates_minimum": (
+                self.early_diagnostic_distinct_signal_dates_minimum
+            ),
+        }
+
+    @property
+    def policy_hash(self) -> str:
+        return configuration_hash(self.normalized())
+
+
+@dataclass(frozen=True)
+class FinalHoldoutSampleState:
+    run_id: str
+    model_id: str
+    status: str
+    matured_outcomes: int
+    distinct_signal_dates: int
+    observation_sessions: int
+    calendar_months: int
+    positive_outcomes: int
+    negative_outcomes: int
+    pending_entries: int
+    open_positions: int
+    provenance_failures: int
+    blocked_backfills: int
+    invalidated_outcomes: int
+    artifact_integrity_passed: bool
+    artifact_integrity_reason: str
+    sample_sufficient: bool
+    early_diagnostic_available: bool
+    estimated_remaining_requirement: str
+    gates: tuple[GateResult, ...]
+
+
 def _stable_hash(value: object, *, length: int = 24) -> str:
     return hashlib.sha256(dumps(value).encode("utf-8")).hexdigest()[:length]
+
+
+def _sample_policy_path(root: Path) -> Path:
+    return root / "configs" / "governance" / "prospective_final_holdout_v1.yaml"
+
+
+def load_final_holdout_sample_policy(root: str | Path) -> FinalHoldoutSamplePolicy:
+    path = _sample_policy_path(Path(root))
+    if not path.exists():
+        path = _sample_policy_path(Path(__file__).resolve().parents[3])
+    values = load_yaml(path)
+    schema_version = str(values.get("schema_version", FINAL_HOLDOUT_SAMPLE_POLICY_VERSION))
+    if schema_version != FINAL_HOLDOUT_SAMPLE_POLICY_VERSION:
+        raise ValueError(f"Unsupported prospective final-holdout sample policy: {schema_version}")
+    return FinalHoldoutSamplePolicy(
+        schema_version=schema_version,
+        matured_outcomes_minimum=int(values.get("matured_outcomes_minimum", 100)),
+        distinct_signal_dates_minimum=int(values.get("distinct_signal_dates_minimum", 60)),
+        observation_sessions_minimum=int(values.get("observation_sessions_minimum", 126)),
+        calendar_months_minimum=int(values.get("calendar_months_minimum", 4)),
+        positive_class_minimum=int(values.get("positive_class_minimum", 20)),
+        negative_class_minimum=int(values.get("negative_class_minimum", 20)),
+        early_diagnostic_matured_outcomes_minimum=int(
+            values.get("early_diagnostic_matured_outcomes_minimum", 30)
+        ),
+        early_diagnostic_distinct_signal_dates_minimum=int(
+            values.get("early_diagnostic_distinct_signal_dates_minimum", 20)
+        ),
+    )
 
 
 def _latest_feature_path(root: Path) -> Path:
@@ -166,6 +258,9 @@ def _row_to_run(row: Any) -> FinalHoldoutRun:
         model_ids=tuple(str(value) for value in cast(list[object], loads(item["model_ids_json"]))),
         scanner_identity_version=int(item["scanner_identity_version"]),
         execution_policy_hash=str(item["execution_policy_hash"]),
+        sample_policy_version=str(item["sample_policy_version"]),
+        sample_policy_hash=str(item["sample_policy_hash"]),
+        sample_policy=cast(dict[str, object], loads(str(item["sample_policy_json"]))),
         horizon=int(item["horizon"]),
         direction=str(item["direction"]),
         status=cast(RunStatus, str(item["status"])),
@@ -240,6 +335,10 @@ def _calibration_hash(model: RegisteredModel) -> str:
     return str(model.metrics.get("target_before_stop_calibration_manifest_hash") or "")
 
 
+def _calibrator_artifact_hash(model: RegisteredModel) -> str:
+    return str(model.metrics.get("target_before_stop_calibrator_artifact_hash") or "")
+
+
 def _ood_hash(model: RegisteredModel) -> str:
     payload: dict[str, object] = {
         key: value
@@ -247,6 +346,17 @@ def _ood_hash(model: RegisteredModel) -> str:
         if "ood" in key or key == "prediction_ood_governance_version"
     }
     return configuration_hash(payload)
+
+
+def _execution_policy_hash() -> str:
+    return configuration_hash(
+        {
+            "mode": SHADOW_FINAL_HOLDOUT_MODE,
+            "event_prefix": FINAL_HOLDOUT_EVENT_PREFIX,
+            "round_trip_cost_bps": 5.0,
+            "entry": "next_completed_session_open",
+        }
+    )
 
 
 def _development_gate_blockers(model: RegisteredModel) -> tuple[str, ...]:
@@ -314,6 +424,7 @@ def initialize_final_holdout_run(
     )
     baseline = _latest_session(feature_frame)
     models = _select_generation(list_models(paths.engine_db), generation)
+    sample_policy = load_final_holdout_sample_policy(project_root)
     blockers_by_model: dict[str, tuple[str, ...]] = {
         model.model_id: _development_gate_blockers(model) for model in models
     }
@@ -338,14 +449,7 @@ def initialize_final_holdout_run(
     direction_values = sorted({model.direction for model in eligible})
     horizon_values = sorted({model.horizon for model in eligible})
     model_ids = tuple(sorted(model.model_id for model in eligible))
-    execution_policy_hash = configuration_hash(
-        {
-            "mode": SHADOW_FINAL_HOLDOUT_MODE,
-            "event_prefix": FINAL_HOLDOUT_EVENT_PREFIX,
-            "round_trip_cost_bps": 5.0,
-            "entry": "next_completed_session_open",
-        }
-    )
+    execution_policy_hash = _execution_policy_hash()
     run_id = _stable_hash(
         {
             "created_at": created_at,
@@ -368,6 +472,9 @@ def initialize_final_holdout_run(
         model_ids=model_ids,
         scanner_identity_version=SCANNER_IDENTITY_SCHEMA_VERSION,
         execution_policy_hash=execution_policy_hash,
+        sample_policy_version=sample_policy.schema_version,
+        sample_policy_hash=sample_policy.policy_hash,
+        sample_policy=sample_policy.normalized(),
         horizon=horizon_values[0],
         direction="mixed" if len(direction_values) > 1 else direction_values[0],
         status="CREATED",
@@ -388,9 +495,10 @@ def initialize_final_holdout_run(
                 run_id, schema_version, created_at_utc, creation_git_commit,
                 baseline_market_date, first_eligible_future_signal_date, universe_snapshot_id,
                 feature_manifest_hash, generation_id, model_ids_json, scanner_identity_version,
-                execution_policy_hash, horizon, direction, status, invalidation_reason,
+                execution_policy_hash, sample_policy_version, sample_policy_hash,
+                sample_policy_json, horizon, direction, status, invalidation_reason,
                 latest_processed_market_date, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.run_id,
@@ -405,6 +513,9 @@ def initialize_final_holdout_run(
                 dumps(run.model_ids),
                 run.scanner_identity_version,
                 run.execution_policy_hash,
+                run.sample_policy_version,
+                run.sample_policy_hash,
+                dumps(run.sample_policy),
                 run.horizon,
                 run.direction,
                 run.status,
@@ -430,7 +541,14 @@ def initialize_final_holdout_run(
                 calibration_governance_hash=_calibration_hash(model),
                 ood_governance_hash=_ood_hash(model),
                 enrollment_blockers=blockers_by_model[model.model_id],
-                metadata={"family": model.family, "direction": model.direction},
+                metadata={
+                    "family": model.family,
+                    "direction": model.direction,
+                    "feature_manifest_hash": model.feature_manifest_hash,
+                    "calibrator_artifact_hash": _calibrator_artifact_hash(model),
+                    "code_commit_hash": model.code_commit_hash,
+                    "execution_policy_hash": execution_policy_hash,
+                },
             )
             enrolled.append(item)
             connection.execute(
@@ -470,7 +588,8 @@ def _active_runs(db_path: str | Path) -> tuple[FinalHoldoutRun, ...]:
     return tuple(
         run
         for run in list_final_holdout_runs(db_path)
-        if run.status in {"CREATED", "COLLECTING", "READY_FOR_EVALUATION"}
+        if run.status
+        in {"CREATED", "COLLECTING", "EARLY_DIAGNOSTIC_AVAILABLE", "READY_FOR_EVALUATION"}
     )
 
 
@@ -570,11 +689,478 @@ def _append_run_event(
     return int(event.inserted)
 
 
+def _sample_policy_from_run(run: FinalHoldoutRun) -> FinalHoldoutSamplePolicy:
+    def policy_int(key: str, default: int) -> int:
+        return int(str(run.sample_policy.get(key, default)))
+
+    if run.sample_policy:
+        return FinalHoldoutSamplePolicy(
+            schema_version=str(
+                run.sample_policy.get("schema_version", FINAL_HOLDOUT_SAMPLE_POLICY_VERSION)
+            ),
+            matured_outcomes_minimum=policy_int("matured_outcomes_minimum", 100),
+            distinct_signal_dates_minimum=policy_int("distinct_signal_dates_minimum", 60),
+            observation_sessions_minimum=policy_int("observation_sessions_minimum", 126),
+            calendar_months_minimum=policy_int("calendar_months_minimum", 4),
+            positive_class_minimum=policy_int("positive_class_minimum", 20),
+            negative_class_minimum=policy_int("negative_class_minimum", 20),
+            early_diagnostic_matured_outcomes_minimum=policy_int(
+                "early_diagnostic_matured_outcomes_minimum",
+                30,
+            ),
+            early_diagnostic_distinct_signal_dates_minimum=policy_int(
+                "early_diagnostic_distinct_signal_dates_minimum",
+                20,
+            ),
+        )
+    return FinalHoldoutSamplePolicy()
+
+
+def _sample_gate(
+    gate_id: str,
+    name: str,
+    metric_name: str,
+    threshold: object,
+    comparator: str,
+    actual: object,
+    status: str,
+    reason: str,
+    policy: FinalHoldoutSamplePolicy,
+) -> GateResult:
+    return make_gate(
+        gate_id=gate_id,
+        gate_name=name,
+        category="final holdout sample governance",
+        scope="prospective_shadow_validation",
+        metric_name=metric_name,
+        threshold=cast(str | float | int | bool | None, threshold),
+        comparator=comparator,
+        actual_value=cast(str | float | int | bool | None, actual),
+        status=cast(Literal["PASS", "FAIL", "NOT_APPLICABLE", "NOT_CONFIGURED"], status),
+        mandatory=True,
+        evidence_source=policy.schema_version,
+        reason=f"{reason} Policy version: {policy.schema_version}.",
+        configuration_hash_value=policy.policy_hash,
+    )
+
+
+def _pass_fail(value: int, threshold: int) -> str:
+    return "PASS" if value >= threshold else "FAIL"
+
+
+def _threshold_reason(label: str, value: int, threshold: int) -> str:
+    if value >= threshold:
+        return f"{label} {value} meets the minimum {threshold}."
+    return f"{label} {value} is below the minimum {threshold}."
+
+
+def _processed_sessions(run: FinalHoldoutRun, events: pd.DataFrame) -> tuple[str, ...]:
+    raw = run.metadata.get("processed_sessions")
+    if isinstance(raw, list):
+        values = tuple(sorted({str(value) for value in raw}))
+        if values:
+            return values
+    if events.empty:
+        return ()
+    observed = events.loc[
+        events["event_type"].isin({"FINAL_HOLDOUT_SIGNAL_CREATED", "FINAL_HOLDOUT_SIGNAL_REJECTED"})
+    ]
+    return tuple(sorted({str(value) for value in observed["market_as_of_date"].tolist()}))
+
+
+def _target_before_stop_class(exit_reason: str) -> int:
+    return 1 if exit_reason == "target" else 0
+
+
+def _event_payloads_by_id(events: pd.DataFrame, event_type: str) -> dict[str, dict[str, object]]:
+    if events.empty:
+        return {}
+    rows = events.loc[events["event_type"] == event_type]
+    return {str(row["event_id"]): dict(row["payload"]) for _, row in rows.iterrows()}
+
+
+def _matured_exit_rows(events: pd.DataFrame, model_id: str) -> pd.DataFrame:
+    if events.empty:
+        return events
+    return events.loc[
+        (events["model_id"] == model_id) & (events["event_type"] == "FINAL_HOLDOUT_EXIT_FILLED")
+    ].copy()
+
+
+def _estimate_remaining(deficits: dict[str, int]) -> str:
+    pending = {name: value for name, value in deficits.items() if value > 0}
+    if not pending:
+        return "ready"
+    return "; ".join(f"{name}:{value}" for name, value in sorted(pending.items()))
+
+
+def _sample_state_for_model(
+    root: str | Path,
+    run: FinalHoldoutRun,
+    enrolled: FinalHoldoutModel,
+    events: pd.DataFrame,
+    policy: FinalHoldoutSamplePolicy,
+) -> FinalHoldoutSampleState:
+    run_events = (
+        events.loc[
+            events["payload"].apply(lambda payload: dict(payload).get("run_id") == run.run_id)
+        ]
+        if not events.empty
+        else events
+    )
+    model_events = (
+        run_events.loc[run_events["model_id"] == enrolled.model_id]
+        if not run_events.empty
+        else run_events
+    )
+    pending_payloads = _event_payloads_by_id(model_events, "FINAL_HOLDOUT_ENTRY_PENDING")
+    filled_payloads = _event_payloads_by_id(model_events, "FINAL_HOLDOUT_ENTRY_FILLED")
+    filled_source_ids = {
+        str(dict(payload).get("source_pending_event_id"))
+        for payload in filled_payloads.values()
+        if dict(payload).get("source_pending_event_id")
+    }
+    exit_rows = _matured_exit_rows(run_events, enrolled.model_id)
+    invalidated = (
+        run_events.loc[run_events["event_type"] == "FINAL_HOLDOUT_DATA_INVALIDATED"]
+        if not run_events.empty
+        else run_events
+    )
+    invalidated_source_ids = (
+        {
+            str(dict(payload).get("source_pending_event_id"))
+            for payload in invalidated["payload"].tolist()
+            if dict(payload).get("source_pending_event_id")
+        }
+        if not invalidated.empty
+        else set()
+    )
+    valid_exits: list[dict[str, object]] = []
+    provenance_failures = 0
+    for _, row in exit_rows.iterrows():
+        payload = dict(row["payload"])
+        source_id = str(payload.get("source_pending_event_id", ""))
+        if not source_id or source_id in invalidated_source_ids:
+            continue
+        pending_payload = pending_payloads.get(source_id, {})
+        required_fields = (
+            "entry_date",
+            "exit_date",
+            "exit_reason",
+            "mfe",
+            "mae",
+            "realized_return",
+        )
+        if not all(field in payload for field in required_fields):
+            continue
+        if source_id not in filled_source_ids:
+            continue
+        if pending_payload.get("prospective_provenance_valid") is not True:
+            provenance_failures += 1
+        valid_exits.append(payload)
+    matured = len(valid_exits)
+    signal_dates = {
+        str(payload.get("signal_as_of_date"))
+        for payload in valid_exits
+        if payload.get("signal_as_of_date")
+    }
+    months = {
+        pd.Timestamp(str(payload.get("exit_date"))).strftime("%Y-%m")
+        for payload in valid_exits
+        if payload.get("exit_date")
+    }
+    classes = [
+        _target_before_stop_class(str(payload.get("exit_reason", ""))) for payload in valid_exits
+    ]
+    positive = sum(classes)
+    negative = len(classes) - positive
+    processed_sessions = _processed_sessions(run, run_events)
+    pending_entries = len(
+        set(pending_payloads)
+        - {
+            str(dict(payload).get("source_pending_event_id"))
+            for payload in filled_payloads.values()
+            if dict(payload).get("source_pending_event_id")
+        }
+    )
+    exit_source_ids = {
+        str(payload.get("source_pending_event_id"))
+        for payload in valid_exits
+        if payload.get("source_pending_event_id")
+    }
+    open_positions = len(
+        {
+            str(dict(payload).get("source_pending_event_id"))
+            for payload in filled_payloads.values()
+            if dict(payload).get("source_pending_event_id")
+        }
+        - exit_source_ids
+    )
+    blocked_backfills = (
+        int(
+            invalidated["payload"]
+            .apply(
+                lambda payload: (
+                    "FINAL_HOLDOUT_BACKFILL_BLOCKED" in str(dict(payload).get("reason", ""))
+                )
+            )
+            .sum()
+        )
+        if not invalidated.empty
+        else 0
+    )
+    invalidated_outcomes = (
+        len(invalidated_source_ids) if invalidated_source_ids else len(invalidated)
+    )
+    ok, artifact_reason, _, _ = _verify_frozen_models(root, ProjectPaths(Path(root)).engine_db, run)
+    policy_configured = (
+        run.sample_policy_version == policy.schema_version
+        and run.sample_policy_hash == policy.policy_hash
+    )
+    gates: list[GateResult] = [
+        _sample_gate(
+            "final_holdout_policy_configured",
+            "Final Holdout Policy Configured",
+            "sample_policy_hash",
+            policy.policy_hash,
+            "equals",
+            run.sample_policy_hash,
+            "PASS" if policy_configured else "FAIL",
+            "Frozen sample policy matches the configured schema and hash."
+            if policy_configured
+            else "Frozen sample policy is missing or does not match the configured hash.",
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_matured_outcomes_min_100",
+            "Final Holdout Matured Outcomes Minimum",
+            "matured_outcomes",
+            policy.matured_outcomes_minimum,
+            ">=",
+            matured,
+            _pass_fail(matured, policy.matured_outcomes_minimum),
+            _threshold_reason("Matured outcomes", matured, policy.matured_outcomes_minimum),
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_distinct_signal_dates_min_60",
+            "Final Holdout Distinct Signal Dates Minimum",
+            "distinct_signal_dates",
+            policy.distinct_signal_dates_minimum,
+            ">=",
+            len(signal_dates),
+            _pass_fail(len(signal_dates), policy.distinct_signal_dates_minimum),
+            _threshold_reason(
+                "Distinct signal dates", len(signal_dates), policy.distinct_signal_dates_minimum
+            ),
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_observation_sessions_min_126",
+            "Final Holdout Observation Sessions Minimum",
+            "observation_sessions",
+            policy.observation_sessions_minimum,
+            ">=",
+            len(processed_sessions),
+            _pass_fail(len(processed_sessions), policy.observation_sessions_minimum),
+            _threshold_reason(
+                "Observation sessions", len(processed_sessions), policy.observation_sessions_minimum
+            ),
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_calendar_months_min_4",
+            "Final Holdout Calendar Months Minimum",
+            "calendar_months",
+            policy.calendar_months_minimum,
+            ">=",
+            len(months),
+            _pass_fail(len(months), policy.calendar_months_minimum),
+            _threshold_reason("Calendar months", len(months), policy.calendar_months_minimum),
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_positive_class_min_20",
+            "Final Holdout Positive Class Minimum",
+            "positive_outcomes",
+            policy.positive_class_minimum,
+            ">=",
+            positive,
+            _pass_fail(positive, policy.positive_class_minimum),
+            _threshold_reason("Positive outcomes", positive, policy.positive_class_minimum),
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_negative_class_min_20",
+            "Final Holdout Negative Class Minimum",
+            "negative_outcomes",
+            policy.negative_class_minimum,
+            ">=",
+            negative,
+            _pass_fail(negative, policy.negative_class_minimum),
+            _threshold_reason("Negative outcomes", negative, policy.negative_class_minimum),
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_provenance_valid",
+            "Final Holdout Provenance Valid",
+            "provenance_failures",
+            0,
+            "==",
+            provenance_failures,
+            "PASS" if provenance_failures == 0 else "FAIL",
+            "Every included prediction has prospective ingestion provenance."
+            if provenance_failures == 0
+            else "At least one included prediction lacks prospective ingestion provenance.",
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_backfill_absent",
+            "Final Holdout Backfill Absent",
+            "blocked_backfills",
+            0,
+            "==",
+            blocked_backfills,
+            "PASS" if blocked_backfills == 0 else "FAIL",
+            "No blocked backfill events are included."
+            if blocked_backfills == 0
+            else "At least one blocked backfill event exists.",
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_data_integrity_valid",
+            "Final Holdout Data Integrity Valid",
+            "invalidated_outcomes",
+            0,
+            "==",
+            invalidated_outcomes,
+            "PASS" if invalidated_outcomes == 0 else "FAIL",
+            "Data-integrity event count is zero."
+            if invalidated_outcomes == 0
+            else "At least one unresolved data-invalidated event is included.",
+            policy,
+        ),
+        _sample_gate(
+            "final_holdout_frozen_artifacts_unchanged",
+            "Final Holdout Frozen Artifacts Unchanged",
+            "artifact_integrity_passed",
+            True,
+            "is true",
+            ok,
+            "PASS" if ok else "FAIL",
+            "Frozen artifact, feature, policy, calibrator, OOD, execution, and code hashes match enrollment."
+            if ok
+            else artifact_reason,
+            policy,
+        ),
+    ]
+    sample_sufficient = all(gate.status == "PASS" for gate in gates)
+    gates.append(
+        _sample_gate(
+            "final_holdout_sample_sufficient",
+            "Final Holdout Sample Sufficient",
+            "sample_sufficient",
+            True,
+            "is true",
+            sample_sufficient,
+            "PASS" if sample_sufficient else "FAIL",
+            "Every mandatory sample, provenance, and integrity gate passes."
+            if sample_sufficient
+            else "At least one mandatory sample, provenance, or integrity gate fails.",
+            policy,
+        )
+    )
+    early = (
+        matured >= policy.early_diagnostic_matured_outcomes_minimum
+        and len(signal_dates) >= policy.early_diagnostic_distinct_signal_dates_minimum
+    )
+    deficits = {
+        "matured": policy.matured_outcomes_minimum - matured,
+        "signal_dates": policy.distinct_signal_dates_minimum - len(signal_dates),
+        "observation_sessions": policy.observation_sessions_minimum - len(processed_sessions),
+        "calendar_months": policy.calendar_months_minimum - len(months),
+        "positive": policy.positive_class_minimum - positive,
+        "negative": policy.negative_class_minimum - negative,
+    }
+    status = (
+        "READY_FOR_EVALUATION"
+        if sample_sufficient
+        else "EARLY_DIAGNOSTIC_AVAILABLE"
+        if early
+        else "COLLECTING"
+    )
+    return FinalHoldoutSampleState(
+        run_id=run.run_id,
+        model_id=enrolled.model_id,
+        status=status,
+        matured_outcomes=matured,
+        distinct_signal_dates=len(signal_dates),
+        observation_sessions=len(processed_sessions),
+        calendar_months=len(months),
+        positive_outcomes=positive,
+        negative_outcomes=negative,
+        pending_entries=pending_entries,
+        open_positions=open_positions,
+        provenance_failures=provenance_failures,
+        blocked_backfills=blocked_backfills,
+        invalidated_outcomes=invalidated_outcomes,
+        artifact_integrity_passed=ok,
+        artifact_integrity_reason=artifact_reason,
+        sample_sufficient=sample_sufficient,
+        early_diagnostic_available=early,
+        estimated_remaining_requirement=_estimate_remaining(deficits),
+        gates=tuple(gates),
+    )
+
+
+def final_holdout_sample_states(
+    root: str | Path,
+    run_id: str | None = None,
+) -> tuple[FinalHoldoutSampleState, ...]:
+    paths = ProjectPaths(Path(root))
+    events = final_holdout_events(paths.engine_db)
+    states: list[FinalHoldoutSampleState] = []
+    for run in list_final_holdout_runs(paths.engine_db):
+        if run_id is not None and run.run_id != run_id:
+            continue
+        policy = _sample_policy_from_run(run)
+        for enrolled in list_final_holdout_models(paths.engine_db, run.run_id):
+            states.append(_sample_state_for_model(root, run, enrolled, events, policy))
+    return tuple(states)
+
+
+def _refresh_run_status(root: str | Path, run: FinalHoldoutRun) -> None:
+    if run.status in {"EVALUATED_PASS", "EVALUATED_FAIL", "INVALIDATED", "CLOSED"}:
+        return
+    states = final_holdout_sample_states(root, run.run_id)
+    if not states:
+        return
+    next_status: RunStatus
+    if all(state.sample_sufficient for state in states):
+        next_status = "READY_FOR_EVALUATION"
+    elif any(state.early_diagnostic_available for state in states):
+        next_status = "EARLY_DIAGNOSTIC_AVAILABLE"
+    elif run.latest_processed_market_date is not None:
+        next_status = "COLLECTING"
+    else:
+        next_status = "CREATED"
+    with engine_connection(ProjectPaths(Path(root)).engine_db) as connection:
+        connection.execute(
+            "UPDATE final_holdout_runs SET status = ? WHERE run_id = ?",
+            (next_status, run.run_id),
+        )
+
+
 def _verify_frozen_models(
-    db_path: str | Path, run: FinalHoldoutRun
+    root: str | Path, db_path: str | Path, run: FinalHoldoutRun
 ) -> tuple[bool, str, tuple[RegisteredModel, ...], tuple[FinalHoldoutModel, ...]]:
     enrolled = list_final_holdout_models(db_path, run.run_id)
     current = {model.model_id: model for model in list_models(db_path)}
+    current_commit = current_commit_hash(root)
+    if run.creation_git_commit and current_commit != run.creation_git_commit:
+        return False, "code commit hash changed since enrollment", (), enrolled
+    if run.execution_policy_hash != _execution_policy_hash():
+        return False, "execution policy hash changed since enrollment", (), enrolled
     selected: list[RegisteredModel] = []
     for frozen in enrolled:
         model = current.get(frozen.model_id)
@@ -584,14 +1170,23 @@ def _verify_frozen_models(
             return False, f"artifact missing: {frozen.model_id}", (), enrolled
         if hash_file(frozen.artifact_path) != frozen.artifact_hash:
             return False, f"artifact hash changed: {frozen.model_id}", (), enrolled
+        if model.feature_manifest_hash != str(frozen.metadata.get("feature_manifest_hash") or ""):
+            return False, f"feature manifest hash changed: {frozen.model_id}", (), enrolled
         if str(model.metrics.get("selection_policy_configuration_hash") or "") != (
             frozen.selection_policy_hash
         ):
             return False, f"selection policy hash changed: {frozen.model_id}", (), enrolled
         if _calibration_hash(model) != frozen.calibration_governance_hash:
             return False, f"calibration governance hash changed: {frozen.model_id}", (), enrolled
+        if _calibrator_artifact_hash(model) != str(
+            frozen.metadata.get("calibrator_artifact_hash") or ""
+        ):
+            return False, f"calibrator artifact hash changed: {frozen.model_id}", (), enrolled
         if _ood_hash(model) != frozen.ood_governance_hash:
             return False, f"OOD governance hash changed: {frozen.model_id}", (), enrolled
+        frozen_code_hash = frozen.metadata.get("code_commit_hash")
+        if frozen_code_hash and model.code_commit_hash != str(frozen_code_hash):
+            return False, f"model code hash changed: {frozen.model_id}", (), enrolled
         selected.append(model)
     return True, "ok", tuple(selected), enrolled
 
@@ -649,7 +1244,7 @@ def process_final_holdout_update(
                     unique_suffix=session,
                 )
                 continue
-            ok, drift_reason, models, _ = _verify_frozen_models(paths.engine_db, run)
+            ok, drift_reason, models, _ = _verify_frozen_models(project_root, paths.engine_db, run)
             if not ok:
                 blocked[session] = drift_reason
                 inserted += _append_run_event(
@@ -707,20 +1302,44 @@ def process_final_holdout_update(
                     "generation_id": run.generation_id,
                     "mode": SHADOW_FINAL_HOLDOUT_MODE,
                     "not_live_trade_recommendation": True,
+                    "prospective_provenance_valid": True,
+                    "provenance_source": "final_holdout_run_session_availability",
                 },
                 include_row_payload=True,
             )
+            metadata = dict(run.metadata)
+            raw_processed = metadata.get("processed_sessions", [])
+            existing_processed = (
+                {str(value) for value in raw_processed}
+                if isinstance(raw_processed, list)
+                else set()
+            )
+            processed_sessions = sorted({*existing_processed, session})
+            metadata["processed_sessions"] = processed_sessions
             status: RunStatus = "COLLECTING"
             with engine_connection(paths.engine_db) as connection:
                 connection.execute(
                     """
                     UPDATE final_holdout_runs
                     SET status = ?, latest_processed_market_date = ?,
-                        first_eligible_future_signal_date = COALESCE(first_eligible_future_signal_date, ?)
+                        first_eligible_future_signal_date = COALESCE(first_eligible_future_signal_date, ?),
+                        metadata_json = ?
                     WHERE run_id = ?
                     """,
-                    (status, session, session, run.run_id),
+                    (status, session, session, dumps(metadata), run.run_id),
                 )
+            refreshed_run = FinalHoldoutRun(
+                **{
+                    **run.__dict__,
+                    "status": status,
+                    "latest_processed_market_date": session,
+                    "first_eligible_future_signal_date": (
+                        run.first_eligible_future_signal_date or session
+                    ),
+                    "metadata": metadata,
+                }
+            )
+            _refresh_run_status(project_root, refreshed_run)
             report_path = paths.reports / "final_holdout" / f"{run.run_id}_{session}.json"
             report_path.parent.mkdir(parents=True, exist_ok=True)
             if not report_path.exists():
@@ -813,7 +1432,7 @@ def evaluate_final_holdout_run(
     root: str | Path,
     *,
     run_id: str,
-    minimum_matured_outcomes: int | None = None,
+    diagnostic_only: bool = False,
 ) -> FinalHoldoutEvaluationResult:
     project_root = Path(root)
     paths = ProjectPaths(project_root)
@@ -823,21 +1442,32 @@ def evaluate_final_holdout_run(
         raise ValueError(f"Unknown final-holdout run: {run_id}")
     models = list_final_holdout_models(paths.engine_db, run_id)
     events = final_holdout_events(paths.engine_db, run_id)
+    sample_states = {state.model_id: state for state in final_holdout_sample_states(root, run_id)}
+    if not diagnostic_only and any(not state.sample_sufficient for state in sample_states.values()):
+        raise ValueError(
+            "Final-holdout evaluation requires complete sample sufficiency. "
+            "Use --diagnostic-only for non-promotable early diagnostics."
+        )
+    if diagnostic_only and not any(
+        state.early_diagnostic_available or state.sample_sufficient
+        for state in sample_states.values()
+    ):
+        raise ValueError(
+            "Diagnostic-only final-holdout evaluation requires early diagnostic evidence."
+        )
     metrics_by_model: dict[str, dict[str, object]] = {}
     gates_by_model: dict[str, tuple[GateResult, ...]] = {}
     manifest_by_model: dict[str, str] = {}
     current_models = {model.model_id: model for model in list_models(paths.engine_db)}
-    invalidated = bool(
-        not events.empty and (events["event_type"] == "FINAL_HOLDOUT_DATA_INVALIDATED").any()
-    )
     config_hash = configuration_hash(
         {
             "schema": FINAL_HOLDOUT_SCHEMA_VERSION,
-            "minimum_matured_outcomes": minimum_matured_outcomes,
+            "diagnostic_only": diagnostic_only,
         }
     )
     all_pass = True
     for enrolled in models:
+        sample_state = sample_states[enrolled.model_id]
         model_events = (
             events.loc[events["model_id"] == enrolled.model_id] if not events.empty else events
         )
@@ -846,7 +1476,7 @@ def evaluate_final_holdout_run(
             if not model_events.empty
             else model_events
         )
-        matured = len(exits)
+        matured = sample_state.matured_outcomes
         returns = (
             [
                 float(dict(payload).get("net_realized_return", 0.0))
@@ -865,11 +1495,8 @@ def evaluate_final_holdout_run(
             },
             length=16,
         )
-        sample_status = (
-            "NOT_CONFIGURED"
-            if minimum_matured_outcomes is None
-            else ("PASS" if matured >= minimum_matured_outcomes else "FAIL")
-        )
+        final_gate_status: Literal["PASS", "FAIL"] = "FAIL" if diagnostic_only else "PASS"
+        final_gate_actual = sample_state.status if diagnostic_only else FINAL_HOLDOUT_STATUS
         final_gates: tuple[GateResult, ...] = (
             make_gate(
                 gate_id=FINAL_HOLDOUT_PROMOTION_GATE_ID,
@@ -879,41 +1506,16 @@ def evaluate_final_holdout_run(
                 metric_name="holdout_status",
                 threshold=FINAL_HOLDOUT_STATUS,
                 comparator="equals",
-                actual_value=FINAL_HOLDOUT_STATUS,
-                status="PASS",
+                actual_value=final_gate_actual,
+                status=final_gate_status,
                 mandatory=True,
                 evidence_source=FINAL_HOLDOUT_SCHEMA_VERSION,
-                reason="Prospective final-holdout evaluation completed for this model.",
+                reason="Diagnostic-only evaluation cannot set FINAL_HOLDOUT."
+                if diagnostic_only
+                else "Prospective final-holdout evaluation completed for this model.",
                 configuration_hash_value=config_hash,
             ),
-            _final_gate(
-                "final_holdout_provenance_valid",
-                "Final Holdout Provenance Valid",
-                "final_holdout_backfill_events",
-                0,
-                "==",
-                int(invalidated),
-                "FAIL" if invalidated else "PASS",
-                "Prospective provenance passed; zero blocked backfill events were observed."
-                if not invalidated
-                else "At least one backfill or invalidation event exists.",
-                config_hash,
-            ),
-            _final_gate(
-                "final_holdout_sample_threshold_configured",
-                "Final Holdout Sample Threshold Configured",
-                "matured_outcomes",
-                minimum_matured_outcomes if minimum_matured_outcomes is not None else "configured",
-                ">=",
-                matured,
-                sample_status,
-                "Final-holdout minimum matured-outcome threshold is not configured."
-                if minimum_matured_outcomes is None
-                else "Matured outcomes meet the configured minimum."
-                if matured >= minimum_matured_outcomes
-                else "Matured outcomes are below the configured minimum.",
-                config_hash,
-            ),
+            *sample_state.gates,
         )
         if enrolled.research_only:
             final_gates = (
@@ -931,7 +1533,6 @@ def evaluate_final_holdout_run(
                 ),
             )
         metrics = {
-            "holdout_status": FINAL_HOLDOUT_STATUS,
             "final_holdout_run_id": run_id,
             "final_holdout_evidence_manifest_hash": evidence_manifest,
             "final_holdout_matured_outcomes": matured,
@@ -939,14 +1540,20 @@ def evaluate_final_holdout_run(
                 float(pd.Series(returns).mean()) if returns else GATE_VALUE_NOT_AVAILABLE
             ),
             "final_holdout_schema_version": FINAL_HOLDOUT_SCHEMA_VERSION,
+            "final_holdout_sample_policy_version": run.sample_policy_version,
+            "final_holdout_sample_policy_hash": run.sample_policy_hash,
         }
+        if not diagnostic_only:
+            metrics["holdout_status"] = FINAL_HOLDOUT_STATUS
+        else:
+            metrics["final_holdout_diagnostic_status"] = sample_state.status
         metrics_by_model[enrolled.model_id] = metrics
         gates_by_model[enrolled.model_id] = final_gates
         manifest_by_model[enrolled.model_id] = evidence_manifest
         if not promotion_eligibility(final_gates).eligible:
             all_pass = False
         model = current_models.get(enrolled.model_id)
-        if model is not None:
+        if model is not None and not diagnostic_only:
             updated_metrics = {**model.metrics, **metrics}
             existing = [
                 gate
@@ -977,12 +1584,15 @@ def evaluate_final_holdout_run(
                     """,
                     (dumps(model_meta), run_id, enrolled.model_id),
                 )
-    status: RunStatus = "EVALUATED_PASS" if all_pass else "EVALUATED_FAIL"
-    with engine_connection(paths.engine_db) as connection:
-        connection.execute(
-            "UPDATE final_holdout_runs SET status = ? WHERE run_id = ?",
-            (status, run_id),
-        )
+    status: RunStatus = (
+        run.status if diagnostic_only else ("EVALUATED_PASS" if all_pass else "EVALUATED_FAIL")
+    )
+    if not diagnostic_only:
+        with engine_connection(paths.engine_db) as connection:
+            connection.execute(
+                "UPDATE final_holdout_runs SET status = ? WHERE run_id = ?",
+                (status, run_id),
+            )
     append_forward_event(
         paths.engine_db,
         event_type="FINAL_HOLDOUT_EVALUATED",
@@ -996,9 +1606,10 @@ def evaluate_final_holdout_run(
             "run_id": run_id,
             "mode": SHADOW_FINAL_HOLDOUT_MODE,
             "status": status,
+            "diagnostic_only": diagnostic_only,
             "evidence_manifest_hashes": manifest_by_model,
         },
-        unique_suffix=run_id,
+        unique_suffix=f"{run_id}|diagnostic={diagnostic_only}",
     )
     return FinalHoldoutEvaluationResult(
         run_id=run_id,
@@ -1013,6 +1624,8 @@ def final_holdout_status_frame(root: str | Path) -> pd.DataFrame:
     paths = ProjectPaths(Path(root))
     rows: list[dict[str, object]] = []
     events = final_holdout_events(paths.engine_db)
+    states = {(state.run_id, state.model_id): state for state in final_holdout_sample_states(root)}
+    registry_models = {model.model_id: model for model in list_models(paths.engine_db)}
     for run in list_final_holdout_runs(paths.engine_db):
         current_run_id = run.run_id
         run_events = (
@@ -1025,29 +1638,61 @@ def final_holdout_status_frame(root: str | Path) -> pd.DataFrame:
             else events
         )
         models = list_final_holdout_models(paths.engine_db, run.run_id)
-        rows.append(
-            {
-                "run_id": run.run_id,
-                "status": run.status,
-                "baseline_market_date": run.baseline_market_date,
-                "first_eligible_future_signal_date": run.first_eligible_future_signal_date,
-                "latest_processed_market_date": run.latest_processed_market_date,
-                "model_count": len(models),
-                "event_count": len(run_events),
-                "signals": int((run_events["event_type"] == "FINAL_HOLDOUT_SIGNAL_CREATED").sum())
-                if not run_events.empty
-                else 0,
-                "rejected_signals": int(
-                    (run_events["event_type"] == "FINAL_HOLDOUT_SIGNAL_REJECTED").sum()
+        policy = _sample_policy_from_run(run)
+        for model in models:
+            state = states[(run.run_id, model.model_id)]
+            registered = registry_models.get(model.model_id)
+            if registered is None:
+                promotion_eligible = False
+            else:
+                promotion_eligible = (
+                    not model.research_only
+                    and registered.metrics.get("holdout_status") == FINAL_HOLDOUT_STATUS
+                    and promotion_eligibility(registered.gate_results).eligible
                 )
-                if not run_events.empty
-                else 0,
-                "backfill_blocked_events": int(
-                    (run_events["event_type"] == "FINAL_HOLDOUT_DATA_INVALIDATED").sum()
-                )
-                if not run_events.empty
-                else 0,
-                "label": "Prospective shadow validation. Not a live trade recommendation.",
-            }
-        )
+            rows.append(
+                {
+                    "run_id": run.run_id,
+                    "model_id": model.model_id,
+                    "run_status": run.status,
+                    "model_status": state.status,
+                    "baseline_market_date": run.baseline_market_date,
+                    "first_eligible_future_signal_date": run.first_eligible_future_signal_date,
+                    "latest_processed_market_date": run.latest_processed_market_date,
+                    "matured_outcomes": state.matured_outcomes,
+                    "matured_outcomes_required": policy.matured_outcomes_minimum,
+                    "distinct_signal_dates": state.distinct_signal_dates,
+                    "distinct_signal_dates_required": policy.distinct_signal_dates_minimum,
+                    "observation_sessions": state.observation_sessions,
+                    "observation_sessions_required": policy.observation_sessions_minimum,
+                    "calendar_months": state.calendar_months,
+                    "calendar_months_required": policy.calendar_months_minimum,
+                    "positive_outcomes": state.positive_outcomes,
+                    "positive_outcomes_required": policy.positive_class_minimum,
+                    "negative_outcomes": state.negative_outcomes,
+                    "negative_outcomes_required": policy.negative_class_minimum,
+                    "pending_entries": state.pending_entries,
+                    "open_positions": state.open_positions,
+                    "provenance_failures": state.provenance_failures,
+                    "blocked_backfills": state.blocked_backfills,
+                    "invalidated_outcomes": state.invalidated_outcomes,
+                    "artifact_integrity_status": (
+                        "PASS" if state.artifact_integrity_passed else "FAIL"
+                    ),
+                    "estimated_remaining_requirement": state.estimated_remaining_requirement,
+                    "promotion_eligible": promotion_eligible,
+                    "event_count": len(run_events),
+                    "signals": int(
+                        (run_events["event_type"] == "FINAL_HOLDOUT_SIGNAL_CREATED").sum()
+                    )
+                    if not run_events.empty
+                    else 0,
+                    "rejected_signals": int(
+                        (run_events["event_type"] == "FINAL_HOLDOUT_SIGNAL_REJECTED").sum()
+                    )
+                    if not run_events.empty
+                    else 0,
+                    "label": "Prospective shadow validation. Not a live trade recommendation.",
+                }
+            )
     return pd.DataFrame(rows)

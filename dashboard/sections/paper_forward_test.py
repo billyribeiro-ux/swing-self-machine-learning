@@ -44,6 +44,10 @@ def render_page() -> None:
     if final_status.empty:
         streamlit.info("No prospective final-holdout run is collecting yet.")
         return
+    streamlit.caption(
+        "Sample-governance progress is shown as actual counts with required-count columns. "
+        "These prospective metrics are separate from development-holdout diagnostics."
+    )
     streamlit.dataframe(display_frame(final_status), width="stretch", hide_index=True)
     final_events = final_holdout_event_history(root)
     if not final_events.empty:

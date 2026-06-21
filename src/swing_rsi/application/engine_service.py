@@ -476,12 +476,12 @@ def evaluate_final_holdout(
     root: str | Path,
     *,
     run_id: str,
-    minimum_matured_outcomes: int | None = None,
+    diagnostic_only: bool = False,
 ) -> FinalHoldoutEvaluationResult:
     return evaluate_final_holdout_run(
         root,
         run_id=run_id,
-        minimum_matured_outcomes=minimum_matured_outcomes,
+        diagnostic_only=diagnostic_only,
     )
 
 

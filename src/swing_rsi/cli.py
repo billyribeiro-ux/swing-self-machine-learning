@@ -374,6 +374,7 @@ def command_final_holdout_evaluate(args: argparse.Namespace) -> int:
     result = evaluate_final_holdout(
         Path.cwd(),
         run_id=args.run_id,
+        diagnostic_only=args.diagnostic_only,
     )
     print(f"Run ID: {result.run_id}")
     print(f"Status: {result.status}")
@@ -531,6 +532,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evaluate a prospective final-holdout run without promotion",
     )
     final_evaluate.add_argument("--run-id", required=True)
+    final_evaluate.add_argument(
+        "--diagnostic-only",
+        action="store_true",
+        help="Allow non-promotable early diagnostics before sample sufficiency is complete",
+    )
     final_evaluate.set_defaults(handler=command_final_holdout_evaluate)
 
     daily = subparsers.add_parser("daily-cycle", help="Run the local daily scanner cycle")

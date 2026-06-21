@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS final_holdout_runs (
     model_ids_json TEXT NOT NULL,
     scanner_identity_version INTEGER NOT NULL,
     execution_policy_hash TEXT NOT NULL,
+    sample_policy_version TEXT NOT NULL DEFAULT '',
+    sample_policy_hash TEXT NOT NULL DEFAULT '',
+    sample_policy_json TEXT NOT NULL DEFAULT '{}',
     horizon INTEGER NOT NULL,
     direction TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -188,6 +191,24 @@ def initialize_engine_db(path: str | Path) -> Path:
             "TEXT NOT NULL DEFAULT '[]'",
         )
         _migrate_scanner_candidates_primary_key(connection)
+        _add_missing_column(
+            connection,
+            "final_holdout_runs",
+            "sample_policy_version",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        _add_missing_column(
+            connection,
+            "final_holdout_runs",
+            "sample_policy_hash",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        _add_missing_column(
+            connection,
+            "final_holdout_runs",
+            "sample_policy_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
     return db_path
 
 
