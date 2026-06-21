@@ -167,8 +167,21 @@ def promotion_eligibility(results: tuple[GateResult, ...]) -> PromotionEligibili
         f"{result.gate_id}: {result.reason}"
         for result in (*failed, *not_configured, *not_applicable)
     ]
+    prediction_gate_ids = {
+        result.gate_id for result in results if result.category == "prediction sanity"
+    }
+    has_legacy_ood_gate = "prediction_out_of_distribution_absent" in prediction_gate_ids
+    has_v2_ood_schema_gate = "prediction_ood_governance_schema_version" in prediction_gate_ids
+    if has_legacy_ood_gate and not has_v2_ood_schema_gate:
+        blocked.append(
+            "prediction_ood_governance_schema_version: legacy OOD artifacts lack V2 "
+            "canonical prediction gates"
+        )
     return PromotionEligibility(
-        eligible=not failed and not not_configured and not not_applicable,
+        eligible=not failed
+        and not not_configured
+        and not not_applicable
+        and not (has_legacy_ood_gate and not has_v2_ood_schema_gate),
         mandatory_passed=len(passed),
         mandatory_failed=len(failed),
         not_configured=len(not_configured),

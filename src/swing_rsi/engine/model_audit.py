@@ -75,47 +75,78 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
         eligibility = promotion_eligibility(model.gate_results)
         metrics = model.metrics
         calibration = model.calibration_metrics
-        rows.append(
-            {
-                "model_id": model.model_id,
-                "generation": model.created_at_utc,
-                "state": model.state,
-                "direction": model.direction,
-                "horizon": model.horizon,
-                "family": model.family,
-                "research_start": metrics.get("research_start"),
-                "research_end": metrics.get("research_end"),
-                "train_start": model.training_start,
-                "train_end": model.training_end,
-                "calibration_start": model.validation_start,
-                "calibration_end": model.validation_end,
-                "holdout_start": model.holdout_start,
-                "holdout_end": model.holdout_end,
-                "holdout_samples": metrics.get("holdout_samples"),
-                "selected_samples": metrics.get("selected_holdout_samples"),
-                "selected_rate": metrics.get("selected_observation_rate"),
-                "selected_row_sequence_drawdown": metrics.get("selected_row_sequence_drawdown"),
-                "portfolio_total_return": metrics.get("portfolio_total_return"),
-                "portfolio_annualized_return": metrics.get("portfolio_annualized_return"),
-                "portfolio_max_drawdown": metrics.get("portfolio_max_drawdown"),
-                "portfolio_exposure": metrics.get("portfolio_exposure"),
-                "portfolio_turnover": metrics.get("portfolio_turnover"),
-                "model_brier": calibration.get("holdout_brier"),
-                "naive_brier": calibration.get("naive_brier"),
-                "absolute_brier_improvement": calibration.get("absolute_brier_improvement"),
-                "relative_brier_improvement": calibration.get("relative_brier_improvement"),
-                "brier_skill_score": calibration.get("brier_skill_score"),
-                "mean_selected_return": metrics.get("holdout_mean_net_return"),
-                "lower_confidence_bound": metrics.get("holdout_mean_return_lcb_90"),
-                "profit_factor": metrics.get("holdout_profit_factor"),
-                "mandatory_gates_passed": eligibility.mandatory_passed,
-                "mandatory_gates_failed": eligibility.mandatory_failed,
-                "mandatory_gates_not_configured": eligibility.not_configured,
-                "mandatory_gates_not_applicable": eligibility.not_applicable,
-                "promotion_eligible": eligibility.eligible,
-                "promotion_blocked_reason": " | ".join(eligibility.blocked_reasons),
-            }
-        )
+        row = {
+            "model_id": model.model_id,
+            "generation": model.created_at_utc,
+            "state": model.state,
+            "direction": model.direction,
+            "horizon": model.horizon,
+            "family": model.family,
+            "research_start": metrics.get("research_start"),
+            "research_end": metrics.get("research_end"),
+            "train_start": model.training_start,
+            "train_end": model.training_end,
+            "calibration_start": model.validation_start,
+            "calibration_end": model.validation_end,
+            "holdout_start": model.holdout_start,
+            "holdout_end": model.holdout_end,
+            "holdout_samples": metrics.get("holdout_samples"),
+            "selected_samples": metrics.get("selected_holdout_samples"),
+            "selected_rate": metrics.get("selected_observation_rate"),
+            "selected_row_sequence_drawdown": metrics.get("selected_row_sequence_drawdown"),
+            "portfolio_total_return": metrics.get("portfolio_total_return"),
+            "portfolio_annualized_return": metrics.get("portfolio_annualized_return"),
+            "portfolio_max_drawdown": metrics.get("portfolio_max_drawdown"),
+            "portfolio_exposure": metrics.get("portfolio_exposure"),
+            "portfolio_turnover": metrics.get("portfolio_turnover"),
+            "model_brier": calibration.get("holdout_brier"),
+            "naive_brier": calibration.get("naive_brier"),
+            "absolute_brier_improvement": calibration.get("absolute_brier_improvement"),
+            "relative_brier_improvement": calibration.get("relative_brier_improvement"),
+            "brier_skill_score": calibration.get("brier_skill_score"),
+            "mean_selected_return": metrics.get("holdout_mean_net_return"),
+            "lower_confidence_bound": metrics.get("holdout_mean_return_lcb_90"),
+            "profit_factor": metrics.get("holdout_profit_factor"),
+            "prediction_ood_governance_version": metrics.get("prediction_ood_governance_version"),
+            "prediction_values_finite": metrics.get("prediction_values_finite"),
+            "prediction_probability_contract_valid": metrics.get(
+                "prediction_probability_contract_valid"
+            ),
+            "prediction_head_bound_mapping_valid": metrics.get(
+                "prediction_head_bound_mapping_valid"
+            ),
+            "prediction_bounds_training_only": metrics.get("prediction_bounds_training_only"),
+            "prediction_path_metric_sign_valid": metrics.get("prediction_path_metric_sign_valid"),
+            "mandatory_gates_passed": eligibility.mandatory_passed,
+            "mandatory_gates_failed": eligibility.mandatory_failed,
+            "mandatory_gates_not_configured": eligibility.not_configured,
+            "mandatory_gates_not_applicable": eligibility.not_applicable,
+            "promotion_eligible": eligibility.eligible,
+            "promotion_blocked_reason": " | ".join(eligibility.blocked_reasons),
+        }
+        for head in ("return", "mfe", "mae"):
+            row.update(
+                {
+                    f"{head}_training_q01": metrics.get(f"{head}_train_target_q01"),
+                    f"{head}_training_q99": metrics.get(f"{head}_train_target_q99"),
+                    f"{head}_calibration_ood_count": metrics.get(f"{head}_calibration_ood_count"),
+                    f"{head}_calibration_ood_rate": metrics.get(f"{head}_calibration_ood_rate"),
+                    f"{head}_frozen_ood_rate_limit": metrics.get(
+                        f"{head}_calibration_ood_rate_limit"
+                    ),
+                    f"{head}_holdout_ood_count": metrics.get(f"{head}_holdout_ood_count"),
+                    f"{head}_holdout_ood_rate": metrics.get(f"{head}_holdout_ood_rate"),
+                    f"{head}_calibration_q99_severity": metrics.get(
+                        f"{head}_calibration_ood_q99_severity"
+                    ),
+                    f"{head}_frozen_q99_severity_limit": metrics.get(
+                        f"{head}_ood_severity_q99_limit"
+                    ),
+                    f"{head}_holdout_q99_severity": metrics.get(f"{head}_holdout_ood_q99_severity"),
+                    f"{head}_holdout_max_severity": metrics.get(f"{head}_holdout_ood_max_severity"),
+                }
+            )
+        rows.append(row)
     return pd.DataFrame(rows)
 
 

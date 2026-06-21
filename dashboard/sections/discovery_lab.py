@@ -80,6 +80,12 @@ def render_page() -> None:
                 "selected_row_sequence_drawdown": model.metrics.get(
                     "selected_row_sequence_drawdown"
                 ),
+                "ood_governance": model.metrics.get("prediction_ood_governance_version"),
+                "prediction_ood_total": model.metrics.get("prediction_sanity_ood_total"),
+                "prediction_values_finite": model.metrics.get("prediction_values_finite"),
+                "probability_contract_valid": model.metrics.get(
+                    "prediction_probability_contract_valid"
+                ),
                 "mandatory_gates_failed": eligibility.mandatory_failed,
                 "mandatory_gates_not_configured": eligibility.not_configured,
                 "promotion_eligible": eligibility.eligible,

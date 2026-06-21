@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
 from swing_rsi.engine.attribution import explain_candidate
 from swing_rsi.engine.models import ModelBundle, predict_bundle
+from swing_rsi.engine.ood import (
+    HEAD_OUTPUT_COLUMNS,
+    PREDICTION_OOD_GOVERNANCE_VERSION,
+    REGRESSION_HEADS,
+    bundle_ood_identity,
+)
 from swing_rsi.engine.selection import (
     CANONICAL_CANDIDATE_ORDER,
     CANONICAL_CANDIDATE_TIE_BREAKING_RULE,
@@ -23,8 +30,8 @@ from swing_rsi.engine.selection import (
 )
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 2
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v2"
+SCANNER_IDENTITY_SCHEMA_VERSION = 3
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v3-ood-governance"
 
 
 @dataclass(frozen=True)
@@ -143,6 +150,72 @@ def _bundle_metric_string(bundle: ModelBundle, key: str) -> str:
     return str(value) if value not in {None, ""} else ""
 
 
+def _finite_float(value: object) -> float:
+    try:
+        numeric = float(str(value))
+    except (TypeError, ValueError):
+        return math.nan
+    return numeric if math.isfinite(numeric) else math.nan
+
+
+def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
+    rejection_reasons: list[str] = []
+    warning_heads: list[str] = []
+    warning_details: list[dict[str, object]] = []
+    for key in ("calibrated_probability", "target_before_stop_probability"):
+        probability = _finite_float(item.get(key))
+        if not math.isfinite(probability) or probability < 0.0 or probability > 1.0:
+            rejection_reasons.append("prediction_probability_contract_failed")
+            break
+    max_severity = 0.0
+    for head in REGRESSION_HEADS:
+        output_column = HEAD_OUTPUT_COLUMNS[head]
+        value = _finite_float(item.get(output_column))
+        metadata_missing = bool(item.get(f"{output_column}_ood_metadata_missing", False))
+        severity = _finite_float(item.get(f"{output_column}_ood_severity"))
+        severity_limit = _finite_float(item.get(f"{output_column}_ood_severity_limit"))
+        is_ood = bool(item.get(f"{output_column}_out_of_distribution", False))
+        sign_valid = bool(item.get(f"{output_column}_sign_contract_valid", True))
+        if metadata_missing:
+            rejection_reasons.append("prediction_ood_metadata_missing")
+        if not math.isfinite(value):
+            rejection_reasons.append("nonfinite_prediction")
+        if head == "mfe" and not sign_valid:
+            rejection_reasons.append("mfe_sign_contract_failed")
+        if head == "mae" and not sign_valid:
+            rejection_reasons.append("mae_sign_contract_failed")
+        if is_ood:
+            warning_heads.append(head)
+            if math.isfinite(severity):
+                max_severity = max(max_severity, severity)
+            warning_details.append(
+                {
+                    "head": head,
+                    "raw_value": value,
+                    "bound_low": item.get(f"{output_column}_ood_bound_low"),
+                    "bound_high": item.get(f"{output_column}_ood_bound_high"),
+                    "severity": severity,
+                    "frozen_severity_limit": severity_limit,
+                    "governance_version": item.get(f"{output_column}_ood_governance_version"),
+                }
+            )
+            if not math.isfinite(severity) or not math.isfinite(severity_limit):
+                rejection_reasons.append("prediction_ood_metadata_missing")
+            elif severity > 1.0:
+                rejection_reasons.append("catastrophic_prediction_extrapolation")
+            elif severity > severity_limit:
+                rejection_reasons.append(f"{head}_ood_severity_exceeds_frozen_limit")
+    ordered_reasons = tuple(dict.fromkeys(rejection_reasons))
+    return {
+        "prediction_integrity_passed": not ordered_reasons,
+        "prediction_integrity_rejection_reasons": ordered_reasons,
+        "ood_warning": bool(warning_heads),
+        "ood_affected_heads": tuple(dict.fromkeys(warning_heads)),
+        "ood_warning_details": warning_details,
+        "ood_max_severity": max_severity,
+    }
+
+
 def _build_scan_execution_identity(
     *,
     as_of_date: str,
@@ -151,6 +224,7 @@ def _build_scan_execution_identity(
     model_eligibility: dict[str, bool],
     model_policy_hashes: dict[str, str],
     effective_policies: dict[str, SelectionPolicy],
+    model_ood_metadata: dict[str, dict[str, object]],
     scanner_config: ScannerConfig,
     universe_snapshot_id: str,
     feature_manifest_hash: str,
@@ -170,9 +244,14 @@ def _build_scan_execution_identity(
     persisted_policy_hashes = {
         model_id: str(model_policy_hashes.get(model_id, "")) for model_id in model_ids
     }
+    ood_metadata_payload = {
+        model_id: model_ood_metadata.get(model_id, {}) for model_id in model_ids
+    }
+    ood_metadata_hash = _stable_hash(ood_metadata_payload)
     identity_payload: dict[str, object] = {
         "scanner_identity_schema_version": SCANNER_IDENTITY_SCHEMA_VERSION,
         "scanner_implementation_version": SCANNER_IMPLEMENTATION_VERSION,
+        "prediction_ood_governance_schema_version": PREDICTION_OOD_GOVERNANCE_VERSION,
         "market_as_of_date": as_of_date,
         "universe_snapshot_id": universe_snapshot_id,
         "feature_manifest_hash": feature_manifest_hash,
@@ -194,6 +273,8 @@ def _build_scan_execution_identity(
         "include_challengers": bool(include_challengers),
         "include_candidates": bool(include_candidates),
         "persisted_selection_policy_hashes": persisted_policy_hashes,
+        "model_ood_governance_metadata": ood_metadata_payload,
+        "model_ood_governance_metadata_hash": ood_metadata_hash,
         "effective_selection_policies": effective_policy_payload,
         "raw_scanner_config": raw_config,
         "raw_scanner_config_hash": raw_config_hash,
@@ -207,6 +288,8 @@ def _build_scan_execution_identity(
         "raw_scanner_config_json": dumps(raw_config),
         "raw_scanner_config_hash": raw_config_hash,
         "persisted_model_policy_hashes": persisted_policy_hashes,
+        "model_ood_governance_metadata_json": dumps(ood_metadata_payload),
+        "model_ood_governance_metadata_hash": ood_metadata_hash,
         "effective_model_policy_json": dumps(effective_policy_payload),
         "effective_policy_bundle_hash": effective_policy_bundle_hash,
         "canonical_scan_execution_identity": identity_payload,
@@ -244,6 +327,8 @@ def _metadata_matches_scan_identity(
         and metadata.get("raw_scanner_config_hash") == expected_metadata["raw_scanner_config_hash"]
         and metadata.get("effective_policy_bundle_hash")
         == expected_metadata["effective_policy_bundle_hash"]
+        and metadata.get("model_ood_governance_metadata_hash")
+        == expected_metadata["model_ood_governance_metadata_hash"]
         and metadata.get("feature_manifest_hash") == expected_metadata["feature_manifest_hash"]
         and metadata.get("universe_snapshot_id") == expected_metadata["universe_snapshot_id"]
         and metadata.get("model_generation_ids") == expected_metadata["model_generation_ids"]
@@ -395,6 +480,9 @@ def run_scanner(
         )
         for model_id in model_ids
     }
+    normalized_ood_metadata = {
+        model_id: bundle_ood_identity(bundles_by_id[model_id].metrics) for model_id in model_ids
+    }
     identity, metadata = _build_scan_execution_identity(
         as_of_date=as_of.date().isoformat(),
         model_ids=model_ids,
@@ -402,6 +490,7 @@ def run_scanner(
         model_eligibility=normalized_model_eligibility,
         model_policy_hashes=normalized_policy_hashes,
         effective_policies=effective_policies,
+        model_ood_metadata=normalized_ood_metadata,
         scanner_config=config,
         universe_snapshot_id=universe_snapshot_id,
         feature_manifest_hash=feature_manifest_hash,
@@ -448,7 +537,7 @@ def run_scanner(
     )
     rows: list[dict[str, object]] = []
     for _, row in enriched.iterrows():
-        item = row.to_dict()
+        item = {str(key): value for key, value in row.to_dict().items()}
         dollar_volume = float(item.get("dollar_volume", 0.0) or 0.0)
         probability = float(item["calibrated_probability"])
         target_before_stop_probability = float(item["target_before_stop_probability"])
@@ -459,6 +548,7 @@ def run_scanner(
         persisted_policy = model_policies.get(model_id)
         effective_policy = effective_policies.get(model_id)
         policy_hash = model_policy_hashes.get(model_id)
+        prediction_integrity = _prediction_integrity_result(item)
         status = "ACTIONABLE_PAPER_CANDIDATE"
         exclusion = ""
         if model_state not in {"CHAMPION", "CHALLENGER"}:
@@ -488,6 +578,16 @@ def run_scanner(
             if not selection_result.passed:
                 status = "REJECTED"
                 exclusion = ";".join(selection_result.rejection_reasons)
+        if not bool(prediction_integrity["prediction_integrity_passed"]):
+            rejection_reasons = cast(
+                tuple[object, ...],
+                prediction_integrity["prediction_integrity_rejection_reasons"],
+            )
+            integrity_exclusion = ";".join(str(reason) for reason in rejection_reasons)
+            status = "REJECTED"
+            exclusion = (
+                integrity_exclusion if not exclusion else f"{exclusion};{integrity_exclusion}"
+            )
         bundle = bundles_by_id[model_id]
         attribution = explain_candidate(bundle, row)
         top_categories = sorted(
@@ -522,6 +622,12 @@ def run_scanner(
                 "expected_return_out_of_distribution": bool(
                     item.get("expected_return_out_of_distribution", False)
                 ),
+                "expected_return_ood_severity": item.get("expected_return_ood_severity"),
+                "expected_return_ood_bound_low": item.get("expected_return_ood_bound_low"),
+                "expected_return_ood_bound_high": item.get("expected_return_ood_bound_high"),
+                "expected_return_ood_severity_limit": item.get(
+                    "expected_return_ood_severity_limit"
+                ),
                 "expected_mfe": float(item["expected_mfe"]),
                 "expected_mfe_raw": float(item.get("expected_mfe_raw", item["expected_mfe"])),
                 "expected_mfe_transformed": float(
@@ -530,6 +636,10 @@ def run_scanner(
                 "expected_mfe_out_of_distribution": bool(
                     item.get("expected_mfe_out_of_distribution", False)
                 ),
+                "expected_mfe_ood_severity": item.get("expected_mfe_ood_severity"),
+                "expected_mfe_ood_bound_low": item.get("expected_mfe_ood_bound_low"),
+                "expected_mfe_ood_bound_high": item.get("expected_mfe_ood_bound_high"),
+                "expected_mfe_ood_severity_limit": item.get("expected_mfe_ood_severity_limit"),
                 "expected_mae": float(item["expected_mae"]),
                 "expected_mae_raw": float(item.get("expected_mae_raw", item["expected_mae"])),
                 "expected_mae_transformed": float(
@@ -538,7 +648,18 @@ def run_scanner(
                 "expected_mae_out_of_distribution": bool(
                     item.get("expected_mae_out_of_distribution", False)
                 ),
+                "expected_mae_ood_severity": item.get("expected_mae_ood_severity"),
+                "expected_mae_ood_bound_low": item.get("expected_mae_ood_bound_low"),
+                "expected_mae_ood_bound_high": item.get("expected_mae_ood_bound_high"),
+                "expected_mae_ood_severity_limit": item.get("expected_mae_ood_severity_limit"),
                 "target_before_stop_probability": target_before_stop_probability,
+                "ood_warning": bool(prediction_integrity["ood_warning"]),
+                "ood_affected_heads": ";".join(
+                    str(head)
+                    for head in cast(tuple[object, ...], prediction_integrity["ood_affected_heads"])
+                ),
+                "ood_warning_details": dumps(prediction_integrity["ood_warning_details"]),
+                "ood_max_severity": prediction_integrity["ood_max_severity"],
                 "composite_utility_score": utility,
                 "liquidity_score": dollar_volume,
                 "regime": item.get("market_regime_label", "unknown"),

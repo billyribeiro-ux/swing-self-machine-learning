@@ -36,6 +36,14 @@ from swing_rsi.engine.gates import (
     quality_gate_bool_map,
 )
 from swing_rsi.engine.manifest import current_commit_hash
+from swing_rsi.engine.ood import (
+    PREDICTION_OOD_GOVERNANCE_VERSION,
+    REGRESSION_HEADS,
+    bundle_ood_identity,
+    live_ood_check,
+    probability_contract_metrics,
+    regression_head_ood_metrics,
+)
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import ModelState, RegisteredModel, make_model_id, register_model
 from swing_rsi.engine.selection import (
@@ -501,26 +509,27 @@ def _prediction_sanity_metrics(
     *,
     name: str,
     train_target: pd.Series,
+    calibration_target: pd.Series | None = None,
     holdout_target: pd.Series,
+    calibration_prediction: pd.Series | None = None,
     holdout_prediction: pd.Series,
+    direction: str = "unknown",
+    horizon: int = 0,
 ) -> dict[str, float | int | str | bool]:
-    metrics: dict[str, float | int | str | bool] = {}
-    metrics.update(_quantile_metrics(f"{name}_train_target", train_target))
-    metrics.update(_quantile_metrics(f"{name}_holdout_target", holdout_target))
-    metrics.update(_quantile_metrics(f"{name}_holdout_prediction_raw", holdout_prediction))
-    metrics.update(_quantile_metrics(f"{name}_holdout_prediction_transformed", holdout_prediction))
-    low = float(metrics[f"{name}_train_target_q01"])
-    high = float(metrics[f"{name}_train_target_q99"])
-    predictions = pd.to_numeric(holdout_prediction, errors="coerce").dropna()
-    ood_count = int(((predictions < low) | (predictions > high)).sum()) if predictions.size else 0
-    metrics[f"{name}_prediction_transform_method"] = "none"
-    metrics[f"{name}_prediction_bound_low_train_q01"] = low
-    metrics[f"{name}_prediction_bound_high_train_q99"] = high
-    metrics[f"{name}_prediction_ood_count"] = ood_count
-    metrics[f"{name}_prediction_ood_rate"] = (
-        float(ood_count / len(predictions)) if len(predictions) else math.nan
+    calibration_target = calibration_target if calibration_target is not None else train_target
+    calibration_prediction = (
+        calibration_prediction if calibration_prediction is not None else holdout_prediction.head(0)
     )
-    return metrics
+    return regression_head_ood_metrics(
+        name=name,
+        direction=direction,
+        horizon=horizon,
+        train_target=train_target,
+        calibration_target=calibration_target,
+        holdout_target=holdout_target,
+        calibration_prediction=calibration_prediction,
+        holdout_prediction=holdout_prediction,
+    )
 
 
 def _selection_diagnostics(
@@ -1110,32 +1119,254 @@ def _build_gate_results(
         else "Model is not the naive control family.",
     )
     add(
-        "prediction_units_verified",
-        "Prediction Units Verified",
+        "prediction_ood_governance_schema_version",
+        "Prediction OOD Governance Schema Version",
         "prediction sanity",
         "prediction",
+        "prediction_ood_governance_version",
+        PREDICTION_OOD_GOVERNANCE_VERSION,
+        "equals",
+        metrics.get("prediction_ood_governance_version"),
+        _status_from_bool(
+            metrics.get("prediction_ood_governance_version") == PREDICTION_OOD_GOVERNANCE_VERSION
+        ),
+        True,
+        "Model artifact uses calibrated prediction OOD governance V2."
+        if metrics.get("prediction_ood_governance_version") == PREDICTION_OOD_GOVERNANCE_VERSION
+        else "Model artifact is missing calibrated prediction OOD governance V2 metadata.",
+        evidence="prediction_ood_governance_v2",
+    )
+    add(
+        "classification_prediction_values_finite",
+        "Classification Prediction Values Finite",
+        "prediction sanity",
+        "classification",
+        "classification_prediction_nonfinite_count",
+        0,
+        "==",
+        int(metrics.get("classification_prediction_nonfinite_count") or 0),
+        _status_from_bool(bool(metrics.get("classification_prediction_values_finite"))),
+        True,
+        "All classification probabilities are finite."
+        if bool(metrics.get("classification_prediction_values_finite"))
+        else "At least one classification probability is nonfinite.",
+        evidence="prediction_ood_governance_v2",
+    )
+    add(
+        "classification_prediction_probability_contract_valid",
+        "Classification Probability Contract Valid",
+        "prediction sanity",
+        "classification",
+        "classification_probability_out_of_range_count",
+        0,
+        "==",
+        int(metrics.get("classification_probability_out_of_range_count") or 0),
+        _status_from_bool(bool(metrics.get("classification_probability_contract_valid"))),
+        True,
+        "Classification probabilities are finite and within [0, 1]."
+        if bool(metrics.get("classification_probability_contract_valid"))
+        else "At least one classification probability is outside [0, 1] or nonfinite.",
+        evidence="prediction_ood_governance_v2",
+    )
+    add(
+        "classification_prediction_unit_contract_valid",
+        "Classification Prediction Unit Contract Valid",
+        "prediction sanity",
+        "classification",
         "prediction_unit_contract",
         "decimal_return",
         "equals",
         metrics.get("prediction_unit_contract"),
         _status_from_bool(metrics.get("prediction_unit_contract") == "decimal_return"),
         True,
-        "Returns, MFE, and MAE are decimal returns.",
+        "Scanner prediction units remain decimal returns for downstream evaluation.",
+        evidence="prediction_ood_governance_v2",
     )
+    for head in REGRESSION_HEADS:
+        head_title = head.upper() if head in {"mfe", "mae"} else "Expected Return"
+        finite = bool(metrics.get(f"{head}_prediction_values_finite"))
+        unit_valid = metrics.get(f"{head}_prediction_unit_contract") == "decimal_return"
+        mapping_valid = bool(metrics.get(f"{head}_prediction_head_bound_mapping_valid"))
+        bounds_training_only = bool(metrics.get(f"{head}_prediction_bounds_training_only"))
+        sign_valid = bool(metrics.get(f"{head}_prediction_path_metric_sign_valid"))
+        calibration_rate = _float_metric(metrics, f"{head}_calibration_ood_rate")
+        calibration_rate_limit = 0.05
+        holdout_rate = _float_metric(metrics, f"{head}_holdout_ood_rate")
+        holdout_rate_limit = _float_metric(metrics, f"{head}_calibration_ood_rate_limit")
+        holdout_q99_severity = _float_metric(metrics, f"{head}_holdout_ood_q99_severity")
+        severity_limit = _float_metric(metrics, f"{head}_ood_severity_q99_limit")
+        holdout_max_severity = _float_metric(metrics, f"{head}_holdout_ood_max_severity")
+        nonfinite_count = int(metrics.get(f"{head}_calibration_prediction_nonfinite_count") or 0)
+        nonfinite_count += int(metrics.get(f"{head}_holdout_prediction_nonfinite_count") or 0)
+        add(
+            f"{head}_prediction_values_finite",
+            f"{head_title} Prediction Values Finite",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_prediction_nonfinite_count",
+            0,
+            "==",
+            nonfinite_count,
+            _status_from_bool(finite),
+            True,
+            f"{head_title} predictions are finite."
+            if finite
+            else f"{head_title} predictions include nonfinite values.",
+            evidence="prediction_ood_governance_v2",
+        )
+        add(
+            f"{head}_prediction_unit_contract_valid",
+            f"{head_title} Prediction Unit Contract Valid",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_prediction_unit_contract",
+            "decimal_return",
+            "equals",
+            metrics.get(f"{head}_prediction_unit_contract"),
+            _status_from_bool(unit_valid),
+            True,
+            f"{head_title} predictions use decimal-return units."
+            if unit_valid
+            else f"{head_title} prediction unit contract is invalid.",
+            evidence="prediction_ood_governance_v2",
+        )
+        add(
+            f"{head}_prediction_head_bound_mapping_valid",
+            f"{head_title} Head Bound Mapping Valid",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_prediction_head_bound_mapping_valid",
+            True,
+            "is true",
+            mapping_valid,
+            _status_from_bool(mapping_valid),
+            True,
+            f"{head_title} predictions use matching head, direction, and horizon bounds."
+            if mapping_valid
+            else f"{head_title} predictions use mismatched OOD bounds.",
+            evidence="prediction_ood_governance_v2",
+        )
+        add(
+            f"{head}_prediction_bounds_training_only",
+            f"{head_title} Bounds Training Only",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_ood_bound_provenance",
+            "training_targets_only",
+            "equals",
+            metrics.get(f"{head}_ood_bound_provenance"),
+            _status_from_bool(bounds_training_only),
+            True,
+            f"{head_title} OOD bounds were fit from training targets only."
+            if bounds_training_only
+            else f"{head_title} OOD bounds were not training-only.",
+            evidence="prediction_ood_governance_v2",
+        )
+        add(
+            f"{head}_prediction_path_metric_sign_valid",
+            f"{head_title} Path Metric Sign Valid",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_prediction_path_metric_sign_valid",
+            True,
+            "is true",
+            sign_valid,
+            _status_from_bool(sign_valid),
+            True,
+            f"{head_title} path-metric sign contract is valid."
+            if sign_valid
+            else f"{head_title} path-metric sign contract failed.",
+            evidence="prediction_ood_governance_v2",
+        )
+        add(
+            f"{head}_calibration_ood_rate_acceptable",
+            f"{head_title} Calibration OOD Rate Acceptable",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_calibration_ood_rate",
+            calibration_rate_limit,
+            "<=",
+            calibration_rate,
+            _status_from_bool(math.isfinite(calibration_rate) and calibration_rate <= 0.05),
+            True,
+            f"{head_title} calibration OOD rate is within the 5% maximum."
+            if math.isfinite(calibration_rate) and calibration_rate <= 0.05
+            else f"{head_title} calibration OOD rate exceeds the 5% maximum.",
+            evidence="prediction_ood_governance_v2",
+        )
+        add(
+            f"{head}_holdout_ood_rate_acceptable",
+            f"{head_title} Holdout OOD Rate Acceptable",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_holdout_ood_rate",
+            holdout_rate_limit,
+            "<=",
+            holdout_rate,
+            _status_from_bool(
+                math.isfinite(holdout_rate)
+                and math.isfinite(holdout_rate_limit)
+                and holdout_rate <= holdout_rate_limit
+            ),
+            True,
+            f"{head_title} holdout OOD rate is within the frozen calibration-derived limit."
+            if math.isfinite(holdout_rate)
+            and math.isfinite(holdout_rate_limit)
+            and holdout_rate <= holdout_rate_limit
+            else f"{head_title} holdout OOD rate exceeds the frozen calibration-derived limit.",
+            evidence="prediction_ood_governance_v2",
+        )
+        add(
+            f"{head}_holdout_ood_q99_severity_acceptable",
+            f"{head_title} Holdout OOD Q99 Severity Acceptable",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_holdout_ood_q99_severity",
+            severity_limit,
+            "<=",
+            holdout_q99_severity,
+            _status_from_bool(
+                math.isfinite(holdout_q99_severity)
+                and math.isfinite(severity_limit)
+                and holdout_q99_severity <= severity_limit
+            ),
+            True,
+            f"{head_title} holdout OOD q99 severity is within the frozen limit."
+            if math.isfinite(holdout_q99_severity)
+            and math.isfinite(severity_limit)
+            and holdout_q99_severity <= severity_limit
+            else f"{head_title} holdout OOD q99 severity exceeds the frozen limit.",
+            evidence="prediction_ood_governance_v2",
+        )
+        add(
+            f"{head}_catastrophic_prediction_extrapolation_absent",
+            f"{head_title} Catastrophic Extrapolation Absent",
+            "prediction sanity",
+            f"regression:{head}",
+            f"{head}_holdout_ood_max_severity",
+            1.0,
+            "<=",
+            holdout_max_severity,
+            _status_from_bool(math.isfinite(holdout_max_severity) and holdout_max_severity <= 1.0),
+            True,
+            f"{head_title} maximum holdout OOD severity is not catastrophic."
+            if math.isfinite(holdout_max_severity) and holdout_max_severity <= 1.0
+            else f"{head_title} maximum holdout OOD severity exceeds 1.00.",
+            evidence="prediction_ood_governance_v2",
+        )
     add(
-        "prediction_out_of_distribution_absent",
-        "No Out-Of-Distribution Regression Predictions",
-        "prediction sanity",
+        "legacy_prediction_out_of_distribution_absent_deprecated",
+        "Legacy No OOD Regression Predictions Deprecated",
+        "legacy",
         "prediction",
         "prediction_sanity_ood_total",
         0,
-        "==",
+        "deprecated",
         prediction_ood,
-        _status_from_bool(prediction_ood == 0),
-        True,
-        "Regression predictions are within train-only robust target quantiles."
-        if prediction_ood == 0
-        else "At least one regression prediction exceeds train-only robust target quantiles.",
+        "NOT_APPLICABLE",
+        False,
+        "The zero-exceedance OOD rule is deprecated under prediction_ood_governance_v2.",
+        evidence="prediction_ood_governance_v2",
     )
     return tuple(gates)
 
@@ -1195,6 +1426,9 @@ def _train_family(
     )
     target_calibrator = IsotonicRegression(out_of_bounds="clip")
     target_calibrator.fit(target_calibration_raw, calibration[target_before_stop].astype(int))
+    target_calibration_probability = np.asarray(
+        target_calibrator.predict(target_calibration_raw), dtype=float
+    )
     target_holdout_raw = _positive_class_probability(target_classifier, holdout[feature_columns])
     target_holdout_probability = np.asarray(
         target_calibrator.predict(target_holdout_raw), dtype=float
@@ -1208,6 +1442,18 @@ def _train_family(
     return_model.fit(x_train, train[returns])
     mfe_model.fit(x_train, train[mfe])
     mae_model.fit(x_train, train[mae])
+    calibration_expected_return = pd.Series(
+        return_model.predict(calibration[feature_columns]),
+        index=calibration.index,
+    )
+    calibration_expected_mfe = pd.Series(
+        mfe_model.predict(calibration[feature_columns]),
+        index=calibration.index,
+    )
+    calibration_expected_mae = pd.Series(
+        mae_model.predict(calibration[feature_columns]),
+        index=calibration.index,
+    )
     expected_return = pd.Series(return_model.predict(holdout[feature_columns]), index=holdout.index)
     expected_mfe = pd.Series(mfe_model.predict(holdout[feature_columns]), index=holdout.index)
     expected_mae = pd.Series(mae_model.predict(holdout[feature_columns]), index=holdout.index)
@@ -1332,31 +1578,67 @@ def _train_family(
     prediction_metrics.update(
         _prediction_sanity_metrics(
             name="return",
+            direction=direction,
+            horizon=horizon,
             train_target=train[returns],
+            calibration_target=calibration[returns],
             holdout_target=holdout[returns],
+            calibration_prediction=calibration_expected_return,
             holdout_prediction=expected_return,
         )
     )
     prediction_metrics.update(
         _prediction_sanity_metrics(
             name="mfe",
+            direction=direction,
+            horizon=horizon,
             train_target=train[mfe],
+            calibration_target=calibration[mfe],
             holdout_target=holdout[mfe],
+            calibration_prediction=calibration_expected_mfe,
             holdout_prediction=expected_mfe,
         )
     )
     prediction_metrics.update(
         _prediction_sanity_metrics(
             name="mae",
+            direction=direction,
+            horizon=horizon,
             train_target=train[mae],
+            calibration_target=calibration[mae],
             holdout_target=holdout[mae],
+            calibration_prediction=calibration_expected_mae,
             holdout_prediction=expected_mae,
+        )
+    )
+    prediction_metrics.update(
+        probability_contract_metrics(
+            calibration_probability=calibration_probability,
+            holdout_probability=holdout_probability,
+            target_calibration_probability=target_calibration_probability,
+            target_holdout_probability=target_holdout_probability,
         )
     )
     prediction_ood_total = int(
         int(prediction_metrics.get("return_prediction_ood_count") or 0)
         + int(prediction_metrics.get("mfe_prediction_ood_count") or 0)
         + int(prediction_metrics.get("mae_prediction_ood_count") or 0)
+    )
+    regression_finite = all(
+        bool(prediction_metrics.get(f"{head}_prediction_values_finite"))
+        for head in REGRESSION_HEADS
+    )
+    head_mapping_valid = all(
+        bool(prediction_metrics.get(f"{head}_prediction_head_bound_mapping_valid"))
+        for head in REGRESSION_HEADS
+    )
+    training_bounds_only = all(
+        bool(prediction_metrics.get(f"{head}_prediction_bounds_training_only"))
+        for head in REGRESSION_HEADS
+    )
+    path_metric_sign_valid_result = all(
+        bool(prediction_metrics.get(f"{head}_prediction_path_metric_sign_valid"))
+        for head in REGRESSION_HEADS
     )
     selected_feature_family_counts: dict[str, int] = {}
     for column in feature_columns:
@@ -1437,7 +1719,25 @@ def _train_family(
         "model_plugin_name": plugin.name,
         "model_plugin_nonlinear_interactions": plugin.nonlinear_interactions,
         "prediction_unit_contract": "decimal_return",
+        "prediction_ood_governance_version": PREDICTION_OOD_GOVERNANCE_VERSION,
+        "prediction_values_finite": regression_finite
+        and bool(prediction_metrics.get("classification_prediction_values_finite")),
+        "prediction_probability_contract_valid": bool(
+            prediction_metrics.get("classification_probability_contract_valid")
+        ),
+        "prediction_head_bound_mapping_valid": head_mapping_valid,
+        "prediction_bounds_training_only": training_bounds_only,
+        "prediction_path_metric_sign_valid": path_metric_sign_valid_result,
         "prediction_sanity_ood_total": prediction_ood_total,
+        "prediction_ood_metadata_json": _json_dumps(
+            bundle_ood_identity(
+                {
+                    "prediction_ood_governance_version": PREDICTION_OOD_GOVERNANCE_VERSION,
+                    "prediction_unit_contract": "decimal_return",
+                    **prediction_metrics,
+                }
+            )
+        ),
         "calibration_table_json": _json_dumps(calibration_table),
         "predicted_vs_realized_return_deciles_json": _json_dumps(prediction_deciles),
         "portfolio_daily_equity_json": _json_dumps(portfolio.equity.to_dict(orient="records")),
@@ -1730,15 +2030,39 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         )
         low_value = bundle.metrics.get(f"{metric_prefix}_prediction_bound_low_train_q01")
         high_value = bundle.metrics.get(f"{metric_prefix}_prediction_bound_high_train_q99")
+        checks = [
+            live_ood_check(metrics=bundle.metrics, head=metric_prefix, value=float(value))
+            for value in numeric
+        ]
         try:
             if low_value is None or high_value is None:
                 raise ValueError
-            low = float(low_value)
-            high = float(high_value)
+            low = float(str(low_value))
+            high = float(str(high_value))
         except (TypeError, ValueError):
-            output[f"{output_column}_out_of_distribution"] = False
+            legacy_ood = np.full(len(numeric), False)
         else:
-            output[f"{output_column}_out_of_distribution"] = (numeric < low) | (numeric > high)
+            legacy_ood = (numeric < low) | (numeric > high)
+        output[f"{output_column}_out_of_distribution"] = legacy_ood
+        output[f"{output_column}_ood_warning"] = legacy_ood
+        output[f"{output_column}_ood_severity"] = [check.severity for check in checks]
+        output[f"{output_column}_ood_bound_low"] = [check.lower_bound for check in checks]
+        output[f"{output_column}_ood_bound_high"] = [check.upper_bound for check in checks]
+        output[f"{output_column}_ood_robust_range"] = [check.robust_range for check in checks]
+        output[f"{output_column}_ood_severity_limit"] = [check.severity_limit for check in checks]
+        output[f"{output_column}_ood_rate_limit"] = [check.rate_limit for check in checks]
+        output[f"{output_column}_ood_governance_version"] = [
+            check.governance_version for check in checks
+        ]
+        output[f"{output_column}_ood_metadata_missing"] = [
+            check.metadata_missing for check in checks
+        ]
+        if metric_prefix == "mfe":
+            output[f"{output_column}_sign_contract_valid"] = numeric >= 0.0
+        elif metric_prefix == "mae":
+            output[f"{output_column}_sign_contract_valid"] = numeric <= 0.0
+        else:
+            output[f"{output_column}_sign_contract_valid"] = True
 
     add_regression_prediction("expected_return", "return", bundle.return_model.predict(x))
     add_regression_prediction("expected_mfe", "mfe", bundle.mfe_model.predict(x))
