@@ -360,6 +360,14 @@ def run_live_scanner(
         model_eligibility={
             model.model_id: promotion_eligibility(model.gate_results).eligible for model in models
         },
+        feature_manifest_hash=feature_hash,
+        model_artifact_hashes={
+            model.model_id: hash_file(Path(model.artifact_path)) for model in models
+        },
+        model_generation_ids={model.model_id: model.created_at_utc for model in models},
+        model_state_mode="review" if include_challengers else "champions-only",
+        include_challengers=include_challengers,
+        include_candidates=include_challengers,
         config=ScannerConfig(),
     )
 

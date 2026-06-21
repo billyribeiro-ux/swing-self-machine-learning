@@ -272,11 +272,19 @@ def test_drift_report_flags_shift_without_mutating_models() -> None:
     }
 
 
-def _policy_metrics(policy: SelectionPolicy | None = None) -> dict[str, object]:
+def _policy_metrics(
+    policy: SelectionPolicy | None = None,
+    *,
+    policy_hash: str = "policy-hash",
+    generation: str = "generation-a",
+    artifact_hash: str = "artifact-a",
+) -> dict[str, object]:
     policy = policy or SelectionPolicy()
     return {
         "selection_policy_json": json.dumps(asdict(policy), sort_keys=True),
-        "selection_policy_configuration_hash": "policy-hash",
+        "selection_policy_configuration_hash": policy_hash,
+        "generation": generation,
+        "artifact_hash": artifact_hash,
     }
 
 
@@ -288,6 +296,9 @@ def _bundle(
     expected_return: float = 0.02,
     policy: SelectionPolicy | None = None,
     include_policy: bool = True,
+    policy_hash: str = "policy-hash",
+    generation: str = "generation-a",
+    artifact_hash: str = "artifact-a",
 ) -> ModelBundle:
     training = pd.DataFrame({"f1": [0.0, 1.0, 2.0], "dollar_volume": [10_000_000.0] * 3})
     labels = pd.DataFrame(
@@ -322,8 +333,30 @@ def _bundle(
         training_stds={"f1": 1.0, "dollar_volume": 1.0},
         training_matrix=training,
         training_labels=labels,
-        metrics=_policy_metrics(policy) if include_policy else {},
+        metrics=(
+            _policy_metrics(
+                policy,
+                policy_hash=policy_hash,
+                generation=generation,
+                artifact_hash=artifact_hash,
+            )
+            if include_policy
+            else {}
+        ),
         calibration_metrics={},
+    )
+
+
+def _scanner_feature_panel(symbols: tuple[str, ...] = ("AAPL",)) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"] * len(symbols)),
+            "symbol": list(symbols),
+            "f1": [2.0] * len(symbols),
+            "dollar_volume": [20_000_000.0] * len(symbols),
+            "sector": ["technology"] * len(symbols),
+            "market_regime_label": ["mixed"] * len(symbols),
+        }
     )
 
 
@@ -573,6 +606,366 @@ def test_scanner_caps_are_order_independent_for_equal_utility_rows(tmp_path: Pat
         "B": "ACTIONABLE_PAPER_CANDIDATE",
         "C": "REJECTED",
     }
+
+
+def test_scanner_cache_identity_rejects_stricter_expected_return_run(
+    tmp_path: Path,
+) -> None:
+    feature_panel = _scanner_feature_panel()
+    db_path = tmp_path / "engine.sqlite3"
+    output_dir = tmp_path / "scanner"
+
+    loose = run_scanner(
+        feature_panel,
+        bundles=(_bundle(expected_return=0.02),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(expected_return_threshold=0.0),
+    )
+    old_csv_text = loose.csv_path.read_text(encoding="utf-8")
+    strict = run_scanner(
+        feature_panel,
+        bundles=(_bundle(expected_return=0.02),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(expected_return_threshold=0.03),
+    )
+
+    assert loose.scan_id != strict.scan_id
+    assert strict.created_at_utc != "existing"
+    assert loose.rows.iloc[0]["candidate_status"] == "ACTIONABLE_PAPER_CANDIDATE"
+    assert strict.rows.iloc[0]["candidate_status"] == "REJECTED"
+    assert strict.rows.iloc[0]["exclusion_reason"] == "below_expected_return_threshold"
+    assert loose.csv_path.read_text(encoding="utf-8") == old_csv_text
+    with engine_connection(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scanner_snapshots").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM scanner_candidates").fetchone()[0] == 2
+
+
+def test_scanner_identity_changes_for_behavior_affecting_config(
+    tmp_path: Path,
+) -> None:
+    feature_panel = _scanner_feature_panel()
+    base_kwargs = {
+        "feature_panel": feature_panel,
+        "bundles": (_bundle(),),
+        "db_path": tmp_path / "engine.sqlite3",
+        "output_dir": tmp_path / "scanner",
+        "universe_snapshot_id": "u",
+        "model_states": {"model-a": "CHAMPION"},
+        "model_eligibility": {"model-a": True},
+    }
+
+    base = run_scanner(**base_kwargs)
+    target = run_scanner(
+        **base_kwargs,
+        config=ScannerConfig(target_before_stop_threshold=0.80),
+    )
+    probability = run_scanner(
+        **base_kwargs,
+        config=ScannerConfig(probability_threshold=0.80),
+    )
+    liquidity = run_scanner(
+        **base_kwargs,
+        config=ScannerConfig(minimum_dollar_volume=30_000_000.0),
+    )
+    global_cap = run_scanner(
+        **base_kwargs,
+        config=ScannerConfig(top_n_per_direction=1),
+    )
+
+    assert (
+        len(
+            {
+                base.scan_id,
+                target.scan_id,
+                probability.scan_id,
+                liquidity.scan_id,
+                global_cap.scan_id,
+            }
+        )
+        == 5
+    )
+
+
+def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
+    tmp_path: Path,
+) -> None:
+    feature_panel = _scanner_feature_panel(("AAPL", "MSFT"))
+    base_kwargs = {
+        "feature_panel": feature_panel,
+        "db_path": tmp_path / "engine.sqlite3",
+        "output_dir": tmp_path / "scanner",
+        "model_states": {"model-a": "CHAMPION"},
+        "model_eligibility": {"model-a": True},
+    }
+
+    base = run_scanner(
+        **base_kwargs,
+        bundles=(_bundle(policy=SelectionPolicy(per_date_limit=2)),),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
+    per_date_cap = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                policy=SelectionPolicy(per_date_limit=1),
+                policy_hash="policy-hash-cap-1",
+            ),
+        ),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
+    policy_hash = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                policy=SelectionPolicy(per_date_limit=2),
+                policy_hash="policy-hash-new",
+            ),
+        ),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
+    generation = run_scanner(
+        **base_kwargs,
+        bundles=(_bundle(policy=SelectionPolicy(per_date_limit=2)),),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-b"},
+    )
+    feature_manifest = run_scanner(
+        **base_kwargs,
+        bundles=(_bundle(policy=SelectionPolicy(per_date_limit=2)),),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-b",
+        model_generation_ids={"model-a": "generation-a"},
+    )
+    universe = run_scanner(
+        **base_kwargs,
+        bundles=(_bundle(policy=SelectionPolicy(per_date_limit=2)),),
+        universe_snapshot_id="u2",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
+
+    assert (
+        len(
+            {
+                base.scan_id,
+                per_date_cap.scan_id,
+                policy_hash.scan_id,
+                generation.scan_id,
+                feature_manifest.scan_id,
+                universe.scan_id,
+            }
+        )
+        == 6
+    )
+
+
+def test_scanner_identity_is_stable_for_model_and_row_order(
+    tmp_path: Path,
+) -> None:
+    feature_panel = _scanner_feature_panel(("C", "A", "B"))
+    shuffled_features = feature_panel.sample(frac=1.0, random_state=11).reset_index(drop=True)
+    db_path = tmp_path / "engine.sqlite3"
+    output_dir = tmp_path / "scanner"
+
+    first = run_scanner(
+        feature_panel,
+        bundles=(_bundle("model-b"), _bundle("model-a")),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION", "model-b": "CHAMPION"},
+        model_eligibility={"model-a": True, "model-b": True},
+    )
+    second = run_scanner(
+        shuffled_features,
+        bundles=(_bundle("model-a"), _bundle("model-b")),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION", "model-b": "CHAMPION"},
+        model_eligibility={"model-a": True, "model-b": True},
+    )
+
+    assert first.scan_id == second.scan_id
+    assert second.created_at_utc == "existing"
+    first_rows = first.rows.sort_values(["ticker", "model_id"]).reset_index(drop=True).fillna("")
+    second_rows = second.rows.sort_values(["ticker", "model_id"]).reset_index(drop=True).fillna("")
+    pd.testing.assert_frame_equal(first_rows, second_rows, check_dtype=False)
+
+
+def test_scanner_exact_same_identity_reuses_cache_without_duplicate_rows(
+    tmp_path: Path,
+) -> None:
+    feature_panel = _scanner_feature_panel()
+    db_path = tmp_path / "engine.sqlite3"
+    output_dir = tmp_path / "scanner"
+
+    first = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+    second = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    assert first.scan_id == second.scan_id
+    assert second.created_at_utc == "existing"
+    with engine_connection(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scanner_snapshots").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM scanner_candidates").fetchone()[0] == 1
+
+
+def test_scanner_legacy_or_mismatched_cached_metadata_is_not_reused(
+    tmp_path: Path,
+) -> None:
+    feature_panel = _scanner_feature_panel()
+    db_path = tmp_path / "engine.sqlite3"
+    output_dir = tmp_path / "scanner"
+    baseline = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+    with engine_connection(db_path) as connection:
+        connection.execute(
+            "UPDATE scanner_snapshots SET metadata_json = ? WHERE scan_id = ?",
+            ("{}", baseline.scan_id),
+        )
+
+    rerun = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    assert rerun.scan_id != baseline.scan_id
+    assert rerun.created_at_utc != "existing"
+    with engine_connection(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scanner_snapshots").fetchone()[0] == 2
+
+    with engine_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM scanner_snapshots WHERE scan_id = ?",
+            (rerun.scan_id,),
+        ).fetchone()
+        metadata = json.loads(row["metadata_json"])
+        metadata["raw_scanner_config_hash"] = "mismatched"
+        connection.execute(
+            "UPDATE scanner_snapshots SET metadata_json = ? WHERE scan_id = ?",
+            (json.dumps(metadata, sort_keys=True), rerun.scan_id),
+        )
+
+    mismatched_config = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    assert mismatched_config.scan_id not in {baseline.scan_id, rerun.scan_id}
+    assert mismatched_config.created_at_utc != "existing"
+
+    with engine_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM scanner_snapshots WHERE scan_id = ?",
+            (mismatched_config.scan_id,),
+        ).fetchone()
+        metadata = json.loads(row["metadata_json"])
+        metadata["effective_policy_bundle_hash"] = "mismatched"
+        connection.execute(
+            "UPDATE scanner_snapshots SET metadata_json = ? WHERE scan_id = ?",
+            (json.dumps(metadata, sort_keys=True), mismatched_config.scan_id),
+        )
+
+    mismatched_policy = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    assert mismatched_policy.scan_id not in {
+        baseline.scan_id,
+        rerun.scan_id,
+        mismatched_config.scan_id,
+    }
+    assert mismatched_policy.created_at_utc != "existing"
+
+
+def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -> None:
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(_bundle(),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+        model_artifact_hashes={"model-a": "artifact-hash-a"},
+    )
+
+    with engine_connection(tmp_path / "engine.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM scanner_snapshots WHERE scan_id = ?",
+            (snapshot.scan_id,),
+        ).fetchone()
+    metadata = json.loads(row["metadata_json"])
+
+    assert metadata["final_scan_id"] == snapshot.scan_id
+    assert metadata["scanner_identity_schema_version"] == 2
+    assert metadata["raw_scanner_config_json"]
+    assert metadata["raw_scanner_config_hash"]
+    assert metadata["effective_model_policy_json"]
+    assert metadata["effective_policy_bundle_hash"]
+    assert metadata["persisted_model_policy_hashes"] == {"model-a": "policy-hash"}
+    identity = metadata["canonical_scan_execution_identity"]
+    assert identity["feature_manifest_hash"] == "features-a"
+    assert identity["model_generation_ids"] == {"model-a": "generation-a"}
+    assert identity["model_artifact_hashes"] == {"model-a": "artifact-hash-a"}
+    assert identity["effective_selection_policies"]["model-a"]["expected_return_threshold"] == 0.001
+    assert identity["raw_scanner_config"]["minimum_dollar_volume"] == 5_000_000.0
 
 
 def test_latest_common_session_uses_all_enabled_symbol_histories() -> None:
