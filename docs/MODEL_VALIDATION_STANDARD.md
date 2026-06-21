@@ -28,6 +28,10 @@ Autonomous scanner validation separates:
 - selected-candidate diagnostics over rows passing the frozen selection policy;
 - portfolio-level diagnostics from chronological portfolio simulation only.
 
+The default frozen selection policy is explicit and persisted: probability threshold `0.55`, expected-return threshold `0.001`, target-before-stop threshold `0.50`, minimum dollar volume `5,000,000`, per-date limit `5`, global holdout top-N limit `5,000`, and selected-rate ceiling `20%`. A model that breaches the selected-rate ceiling fails the mandatory selection-coverage gate.
+
+Candidate ordering is canonical and shared by holdout selection, scanner caps, and portfolio replay: composite utility descending, symbol ascending, direction ascending, model ID ascending, then stable candidate identity hash ascending. Probability and expected return are not tie-breakers unless the persisted tie-breaking policy is explicitly changed.
+
 Maximum drawdown used for promotion gates must come from daily portfolio equity. Sequential compounding of selected cross-sectional rows is allowed only as the diagnostic `selected_row_sequence_drawdown`.
 
 ## Research date eligibility

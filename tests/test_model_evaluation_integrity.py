@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import swing_rsi.engine.models as model_module
+import swing_rsi.engine.scanner as scanner_module
+import swing_rsi.engine.selection as selection_module
 from swing_rsi.config import ProjectPaths
 from swing_rsi.engine.gates import make_gate, promotion_eligibility
 from swing_rsi.engine.labels import LabelConfig, build_symbol_labels
@@ -15,12 +18,19 @@ from swing_rsi.engine.model_audit import build_model_audit, export_model_audit
 from swing_rsi.engine.models import (
     DiscoveryConfig,
     ModelBundle,
+    SelectionPolicy,
+    _apply_selection_policy,
     _build_gate_results,
     eligible_modeling_frame,
     predict_bundle,
+    selection_policy_from_config,
 )
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import RegisteredModel, list_models, promote_model, register_model
+from swing_rsi.engine.selection import (
+    CANONICAL_CANDIDATE_TIE_BREAKING_RULE,
+    evaluate_candidate_policy,
+)
 
 
 class ConstantClassifier:
@@ -158,6 +168,53 @@ def test_rejected_candidates_do_not_enter_and_portfolio_is_deterministic() -> No
     pd.testing.assert_frame_equal(first.trades, second.trades)
 
 
+def test_same_date_candidate_ranking_is_order_independent() -> None:
+    symbols = tuple(f"S{index}" for index in range(8))
+    candidates = _candidate_rows(symbols)
+    shuffled = candidates.sample(frac=1.0, random_state=11).reset_index(drop=True)
+    frames = {symbol: _loss_frame() for symbol in symbols}
+    config = PortfolioBacktestConfig(
+        horizon=2,
+        max_concurrent_positions=4,
+        max_gross_exposure=1.0,
+        max_sector_fraction=1.0,
+        round_trip_cost_bps=0.0,
+        slippage_bps=0.0,
+    )
+
+    baseline = backtest_scanner_candidates(frames, candidates, config=config)
+    rerun = backtest_scanner_candidates(frames, shuffled, config=config)
+
+    assert baseline.trades["ticker"].tolist() == rerun.trades["ticker"].tolist()
+    assert baseline.candidate_audit["audit_reason"].tolist().count("max_concurrent_positions") == 4
+
+
+def test_same_date_equal_utility_portfolio_replay_is_order_independent() -> None:
+    symbols = ("D", "B", "A", "C")
+    candidates = _candidate_rows(symbols)
+    candidates["composite_utility_score"] = 1.0
+    shuffled = candidates.sample(frac=1.0, random_state=29).reset_index(drop=True)
+    frames = {symbol: _loss_frame() for symbol in symbols}
+    config = PortfolioBacktestConfig(
+        horizon=2,
+        max_concurrent_positions=2,
+        max_gross_exposure=1.0,
+        max_sector_fraction=1.0,
+        round_trip_cost_bps=0.0,
+        slippage_bps=0.0,
+    )
+
+    baseline = backtest_scanner_candidates(frames, candidates, config=config)
+    rerun = backtest_scanner_candidates(frames, shuffled, config=config)
+
+    assert baseline.trades["ticker"].tolist() == ["A", "B"]
+    assert rerun.trades["ticker"].tolist() == ["A", "B"]
+    pd.testing.assert_frame_equal(baseline.trades, rerun.trades)
+    pd.testing.assert_frame_equal(baseline.equity, rerun.equity)
+    pd.testing.assert_frame_equal(baseline.candidate_audit, rerun.candidate_audit)
+    assert baseline.metrics == rerun.metrics
+
+
 def test_research_date_filter_preserves_warmup_but_excludes_pre_start_rows() -> None:
     dates = pd.bdate_range("2015-01-02", "2026-06-18")
     frame = pd.DataFrame(
@@ -272,6 +329,157 @@ def test_not_configured_selection_rate_blocks_promotion() -> None:
 
     assert eligibility.eligible is False
     assert eligibility.not_configured == 1
+
+
+def test_configured_selection_policy_persists_all_candidate_controls() -> None:
+    policy = selection_policy_from_config(DiscoveryConfig())
+
+    assert policy == SelectionPolicy(
+        probability_threshold=0.55,
+        expected_return_threshold=0.001,
+        target_before_stop_threshold=0.50,
+        top_n_limit=5_000,
+        per_date_limit=5,
+        liquidity_threshold=5_000_000.0,
+        selected_rate_ceiling=0.20,
+    )
+    assert policy.tie_breaking_rule == CANONICAL_CANDIDATE_TIE_BREAKING_RULE
+
+
+def test_selection_policy_evaluator_threshold_edges_and_bad_values() -> None:
+    policy = SelectionPolicy(
+        probability_threshold=0.55,
+        expected_return_threshold=0.001,
+        target_before_stop_threshold=0.50,
+        liquidity_threshold=5_000_000.0,
+    )
+
+    passing = evaluate_candidate_policy(
+        {
+            "calibrated_probability": 0.55,
+            "expected_return": 0.001,
+            "target_before_stop_probability": 0.50,
+            "liquidity_score": 5_000_000.0,
+        },
+        policy,
+        policy_hash="policy-hash",
+    )
+    missing = evaluate_candidate_policy(
+        {
+            "calibrated_probability": 0.55,
+            "target_before_stop_probability": 0.50,
+            "liquidity_score": 5_000_000.0,
+        },
+        policy,
+    )
+    nonfinite = evaluate_candidate_policy(
+        {
+            "calibrated_probability": 0.55,
+            "expected_return": float("nan"),
+            "target_before_stop_probability": 0.50,
+            "liquidity_score": 5_000_000.0,
+        },
+        policy,
+    )
+
+    assert passing.passed is True
+    assert passing.policy_hash == "policy-hash"
+    assert missing.passed is False
+    assert "required_policy_metric_missing" in missing.rejection_reasons
+    assert nonfinite.passed is False
+    assert "required_policy_metric_nonfinite" in nonfinite.rejection_reasons
+
+
+def test_scanner_and_holdout_selection_share_canonical_policy_evaluator() -> None:
+    assert model_module.evaluate_candidate_policy is selection_module.evaluate_candidate_policy
+    assert scanner_module.evaluate_candidate_policy is selection_module.evaluate_candidate_policy
+
+
+def test_selection_policy_enforces_thresholds_and_per_date_limit() -> None:
+    holdout = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"] * 5 + ["2024-01-03"]),
+            "symbol": ["A", "B", "C", "D", "E", "F"],
+            "dollar_volume": [
+                10_000_000.0,
+                9_000_000.0,
+                8_000_000.0,
+                7_000_000.0,
+                1.0,
+                9_000_000.0,
+            ],
+        }
+    )
+    probability = np.array([0.80, 0.75, 0.70, 0.65, 0.95, 0.80])
+    expected_return = pd.Series([0.02, 0.01, -0.01, 0.03, 0.04, 0.02])
+    target_probability = np.array([0.70, 0.65, 0.80, 0.40, 0.90, 0.70])
+    policy = SelectionPolicy(
+        probability_threshold=0.60,
+        expected_return_threshold=0.001,
+        target_before_stop_threshold=0.50,
+        top_n_limit=None,
+        per_date_limit=2,
+        liquidity_threshold=5_000_000.0,
+        selected_rate_ceiling=0.20,
+    )
+
+    selected = _apply_selection_policy(
+        holdout,
+        probability=probability,
+        expected_return=expected_return,
+        target_before_stop_probability=target_probability,
+        policy=policy,
+    )
+
+    assert holdout.loc[selected, "symbol"].tolist() == ["A", "B", "F"]
+
+
+def test_equal_utility_holdout_caps_use_symbol_before_probability_or_return() -> None:
+    holdout = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"] * 3),
+            "symbol": ["C", "A", "B"],
+            "dollar_volume": [10_000_000.0] * 3,
+        }
+    )
+    probability = np.array([0.375, 0.75, 0.50])
+    expected_return = pd.Series([0.50, 0.25, 0.375])
+    target_probability = np.array([0.80, 0.80, 0.80])
+    policy = SelectionPolicy(
+        probability_threshold=0.30,
+        expected_return_threshold=0.001,
+        target_before_stop_threshold=0.50,
+        top_n_limit=None,
+        per_date_limit=2,
+        liquidity_threshold=5_000_000.0,
+    )
+
+    first = _apply_selection_policy(
+        holdout,
+        probability=probability,
+        expected_return=expected_return,
+        target_before_stop_probability=target_probability,
+        policy=policy,
+    )
+    shuffled = holdout.sample(frac=1.0, random_state=17)
+    shuffled_probability = (
+        pd.Series(probability, index=holdout.index).loc[shuffled.index].to_numpy()
+    )
+    shuffled_expected = expected_return.loc[shuffled.index]
+    shuffled_target = (
+        pd.Series(target_probability, index=holdout.index).loc[shuffled.index].to_numpy()
+    )
+    second = _apply_selection_policy(
+        shuffled,
+        probability=shuffled_probability,
+        expected_return=shuffled_expected,
+        target_before_stop_probability=shuffled_target,
+        policy=policy,
+    )
+
+    assert sorted(holdout.loc[first, "symbol"].tolist()) == ["A", "B"]
+    assert sorted(shuffled.loc[second, "symbol"].tolist()) == ["A", "B"]
+    assert "C" not in set(holdout.loc[first, "symbol"])
 
 
 def _audit_model(model_id: str, gates: tuple[Any, ...]) -> RegisteredModel:

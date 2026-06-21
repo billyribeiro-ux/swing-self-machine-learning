@@ -38,6 +38,11 @@ from swing_rsi.engine.gates import (
 from swing_rsi.engine.manifest import current_commit_hash
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import ModelState, RegisteredModel, make_model_id, register_model
+from swing_rsi.engine.selection import (
+    SelectionPolicy,
+    evaluate_candidate_policy,
+    select_policy_cap_indexes,
+)
 from swing_rsi.engine.splits import (
     ChronologicalSplit,
     chronological_train_calibration_holdout_split,
@@ -70,17 +75,6 @@ class ModelBundle:
 
 
 @dataclass(frozen=True)
-class SelectionPolicy:
-    probability_threshold: float = 0.55
-    expected_return_threshold: float | None = None
-    target_before_stop_threshold: float | None = None
-    top_n_limit: int | None = None
-    per_date_limit: int | None = None
-    liquidity_requirement: float | None = None
-    tie_breaking_rule: str = "composite_utility_score_desc_then_symbol"
-
-
-@dataclass(frozen=True)
 class DiscoveryConfig:
     horizons: tuple[int, ...] = (10,)
     directions: tuple[str, ...] = ("bull", "bear")
@@ -101,11 +95,59 @@ class DiscoveryConfig:
     max_sector_fraction: float = 0.5
     max_gross_exposure: float = 1.0
     max_net_exposure: float = 1.0
-    selection_rate_max: float | None = None
+    expected_return_threshold: float | None = 0.001
+    target_before_stop_threshold: float | None = 0.50
+    selection_top_n_limit: int | None = 5_000
+    selection_per_date_limit: int | None = 5
+    selection_minimum_dollar_volume: float | None = 5_000_000.0
+    selection_rate_max: float | None = 0.20
 
 
 def selection_policy_from_config(config: DiscoveryConfig) -> SelectionPolicy:
-    return SelectionPolicy(probability_threshold=config.probability_threshold)
+    return SelectionPolicy(
+        probability_threshold=config.probability_threshold,
+        expected_return_threshold=config.expected_return_threshold,
+        target_before_stop_threshold=config.target_before_stop_threshold,
+        top_n_limit=config.selection_top_n_limit,
+        per_date_limit=config.selection_per_date_limit,
+        liquidity_threshold=config.selection_minimum_dollar_volume,
+        selected_rate_ceiling=config.selection_rate_max,
+    )
+
+
+def _apply_selection_policy(
+    holdout: pd.DataFrame,
+    *,
+    probability: np.ndarray,
+    expected_return: pd.Series,
+    target_before_stop_probability: np.ndarray,
+    policy: SelectionPolicy,
+) -> np.ndarray:
+    candidates = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(holdout["Date"]),
+            "symbol": holdout["symbol"].astype(str),
+            "calibrated_probability": np.asarray(probability, dtype=float),
+            "expected_return": expected_return.to_numpy(dtype=float),
+            "target_before_stop_probability": np.asarray(
+                target_before_stop_probability, dtype=float
+            ),
+        },
+        index=holdout.index,
+    )
+    if "dollar_volume" in holdout.columns:
+        candidates["dollar_volume"] = holdout["dollar_volume"]
+    candidates["composite_utility_score"] = (
+        candidates["calibrated_probability"] * candidates["expected_return"]
+    )
+
+    mask = candidates.apply(
+        lambda row: evaluate_candidate_policy(row.to_dict(), policy).passed,
+        axis=1,
+    )
+    eligible = candidates.loc[mask].copy()
+    selected_index = select_policy_cap_indexes(eligible, policy, date_column="Date")
+    return np.asarray([index in selected_index for index in holdout.index], dtype=bool)
 
 
 @dataclass(frozen=True)
@@ -1170,7 +1212,13 @@ def _train_family(
     expected_mfe = pd.Series(mfe_model.predict(holdout[feature_columns]), index=holdout.index)
     expected_mae = pd.Series(mae_model.predict(holdout[feature_columns]), index=holdout.index)
     selection_policy = selection_policy_from_config(config)
-    selected_mask = holdout_probability >= selection_policy.probability_threshold
+    selected_mask = _apply_selection_policy(
+        holdout,
+        probability=holdout_probability,
+        expected_return=expected_return,
+        target_before_stop_probability=target_holdout_probability,
+        policy=selection_policy,
+    )
     selected = holdout.loc[selected_mask].copy()
     selected_returns = selected[returns] - (config.round_trip_cost_bps / 10_000.0)
     if selected_returns.empty:
@@ -1360,6 +1408,13 @@ def _train_family(
         "selected_feature_family_counts_json": _json_dumps(selected_feature_family_counts),
         "selection_policy_json": _json_dumps(asdict(selection_policy)),
         "selection_policy_configuration_hash": selection_policy_hash,
+        "selection_probability_threshold": selection_policy.probability_threshold,
+        "selection_expected_return_threshold": selection_policy.expected_return_threshold,
+        "selection_target_before_stop_threshold": selection_policy.target_before_stop_threshold,
+        "selection_top_n_limit": selection_policy.top_n_limit,
+        "selection_per_date_limit": selection_policy.per_date_limit,
+        "selection_liquidity_threshold": selection_policy.liquidity_threshold,
+        "selection_rate_ceiling": selection_policy.selected_rate_ceiling,
         "portfolio_policy_json": _json_dumps(asdict(portfolio_config)),
         "portfolio_policy_configuration_hash": portfolio_policy_hash,
         "holdout_target_before_stop_brier": float(

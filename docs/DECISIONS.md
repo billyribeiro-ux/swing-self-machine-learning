@@ -135,3 +135,13 @@ Reason: A filename such as `AAPL.csv` is not a provider ticker. Normalization pr
 Decision: Automatically sized expanding walk-forward splits calculate test size from `sample_count - gap` before dividing by `n_splits + 1`, and the resulting canonical split plan is shared by dashboard preflight validation and actual execution.
 
 Reason: The previous default calculation sized test folds from all samples and then subtracted the gap, which could reject valid configurations. The split plan must preserve the requested gap, keep chronological non-overlapping test folds, and end the final test fold at the final available sample without silently changing user-selected dates or fold settings.
+
+## 2026-06-20 — Scanner actionability requires persisted gate eligibility
+
+Decision: The autonomous model selection policy is explicitly configured and persisted with each model, and live scanner actionability now requires both promoted registry state and promotion-eligible canonical gate results.
+
+Reason: Candidate rows must not become paper signals merely because a model has a favorable state string. Selection coverage, expected return, target-before-stop probability, liquidity, and date-level candidate caps are model-governance controls and must be evaluated from the same persisted gate results used by promotion.
+
+Decision: Candidate policy checks and deterministic candidate ordering live in one shared selection module.
+
+Reason: Holdout selection, live scanner actionability, scanner caps, and portfolio replay must not drift. The canonical order is composite utility descending, symbol ascending, direction ascending, model ID ascending, and stable candidate identity hash ascending.

@@ -22,6 +22,7 @@ from swing_rsi.engine.forward import (
     create_pending_events_from_snapshot,
     list_forward_events,
 )
+from swing_rsi.engine.gates import promotion_eligibility
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, merge_features_and_labels
 from swing_rsi.engine.manifest import create_manifest, hash_file, write_manifest
 from swing_rsi.engine.models import DiscoveryConfig, discover_models, load_model_bundle
@@ -356,6 +357,9 @@ def run_live_scanner(
         output_dir=paths.scanner_artifacts,
         universe_snapshot_id=universe.snapshot_id,
         model_states={model.model_id: model.state for model in models},
+        model_eligibility={
+            model.model_id: promotion_eligibility(model.gate_results).eligible for model in models
+        },
         config=ScannerConfig(),
     )
 

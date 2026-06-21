@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from swing_rsi.engine.models import BaseRateClassifier, ModelBundle, model_plugi
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import RegisteredModel, promote_model, register_model
 from swing_rsi.engine.scanner import ScannerConfig, latest_common_session, run_scanner
+from swing_rsi.engine.selection import SelectionPolicy
 from swing_rsi.engine.splits import chronological_train_calibration_holdout_split
 from swing_rsi.engine.storage import engine_connection
 from swing_rsi.engine.universe import UniverseConfig, UniverseSymbol, load_universe_config
@@ -26,8 +29,11 @@ from swing_rsi.sample_data import generate_sample_ohlcv
 
 
 class ConstantClassifier:
+    def __init__(self, probability: float = 0.75) -> None:
+        self.probability = probability
+
     def predict_proba(self, frame: pd.DataFrame) -> np.ndarray:
-        return np.tile(np.array([[0.25, 0.75]]), (len(frame), 1))
+        return np.tile(np.array([[1.0 - self.probability, self.probability]]), (len(frame), 1))
 
 
 class IdentityCalibrator:
@@ -266,7 +272,23 @@ def test_drift_report_flags_shift_without_mutating_models() -> None:
     }
 
 
-def _bundle(model_id: str = "model-a") -> ModelBundle:
+def _policy_metrics(policy: SelectionPolicy | None = None) -> dict[str, object]:
+    policy = policy or SelectionPolicy()
+    return {
+        "selection_policy_json": json.dumps(asdict(policy), sort_keys=True),
+        "selection_policy_configuration_hash": "policy-hash",
+    }
+
+
+def _bundle(
+    model_id: str = "model-a",
+    *,
+    probability: float = 0.75,
+    target_probability: float = 0.75,
+    expected_return: float = 0.02,
+    policy: SelectionPolicy | None = None,
+    include_policy: bool = True,
+) -> ModelBundle:
     training = pd.DataFrame({"f1": [0.0, 1.0, 2.0], "dollar_volume": [10_000_000.0] * 3})
     labels = pd.DataFrame(
         {
@@ -288,11 +310,11 @@ def _bundle(model_id: str = "model-a") -> ModelBundle:
             "f1": "stock-specific price structure",
             "dollar_volume": "volume participation",
         },
-        classifier=ConstantClassifier(),
+        classifier=ConstantClassifier(probability),
         calibrator=IdentityCalibrator(),
-        target_before_stop_model=ConstantClassifier(),
+        target_before_stop_model=ConstantClassifier(target_probability),
         target_before_stop_calibrator=IdentityCalibrator(),
-        return_model=ConstantRegressor(0.02),
+        return_model=ConstantRegressor(expected_return),
         mfe_model=ConstantRegressor(0.04),
         mae_model=ConstantRegressor(-0.015),
         training_medians={"f1": 1.0, "dollar_volume": 10_000_000.0},
@@ -300,7 +322,7 @@ def _bundle(model_id: str = "model-a") -> ModelBundle:
         training_stds={"f1": 1.0, "dollar_volume": 1.0},
         training_matrix=training,
         training_labels=labels,
-        metrics={},
+        metrics=_policy_metrics(policy) if include_policy else {},
         calibration_metrics={},
     )
 
@@ -358,6 +380,199 @@ def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_pa
     assert "label_bull_target_before_stop_10" in first.rows["historical_analogs"].iloc[0]
     with engine_connection(tmp_path / "engine.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scanner_candidates").fetchone()[0] == 2
+
+
+def test_scanner_rejects_promoted_model_without_gate_eligibility(tmp_path: Path) -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "dollar_volume": [20_000_000.0],
+            "sector": ["technology"],
+            "market_regime_label": ["mixed"],
+        }
+    )
+
+    snapshot = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": False},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert row["exclusion_reason"] == "model_quality_gates_failed"
+    assert bool(row["model_quality_gate_eligible"]) is False
+
+
+def test_scanner_applies_persisted_expected_return_threshold(tmp_path: Path) -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "dollar_volume": [20_000_000.0],
+            "sector": ["technology"],
+            "market_regime_label": ["mixed"],
+        }
+    )
+
+    snapshot = run_scanner(
+        feature_panel,
+        bundles=(_bundle(expected_return=0.0005),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(expected_return_threshold=0.0),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert row["exclusion_reason"] == "below_expected_return_threshold"
+
+
+def test_scanner_applies_persisted_target_before_stop_threshold(tmp_path: Path) -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "dollar_volume": [20_000_000.0],
+            "sector": ["technology"],
+            "market_regime_label": ["mixed"],
+        }
+    )
+
+    snapshot = run_scanner(
+        feature_panel,
+        bundles=(_bundle(target_probability=0.49),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert row["exclusion_reason"] == "below_target_before_stop_threshold"
+
+
+def test_scanner_threshold_equality_passes_and_runtime_can_only_tighten(
+    tmp_path: Path,
+) -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "dollar_volume": [5_000_000.0],
+            "sector": ["technology"],
+            "market_regime_label": ["mixed"],
+        }
+    )
+
+    equal = run_scanner(
+        feature_panel,
+        bundles=(_bundle(probability=0.55, target_probability=0.50, expected_return=0.001),),
+        db_path=tmp_path / "equal.sqlite3",
+        output_dir=tmp_path / "equal",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+    stricter = run_scanner(
+        feature_panel,
+        bundles=(_bundle(expected_return=0.02),),
+        db_path=tmp_path / "stricter.sqlite3",
+        output_dir=tmp_path / "stricter",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(expected_return_threshold=0.03),
+    )
+
+    assert equal.rows.iloc[0]["candidate_status"] == "ACTIONABLE_PAPER_CANDIDATE"
+    assert stricter.rows.iloc[0]["candidate_status"] == "REJECTED"
+    assert stricter.rows.iloc[0]["exclusion_reason"] == "below_expected_return_threshold"
+
+
+def test_scanner_rejects_missing_persisted_selection_policy(tmp_path: Path) -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "dollar_volume": [20_000_000.0],
+            "sector": ["technology"],
+            "market_regime_label": ["mixed"],
+        }
+    )
+
+    snapshot = run_scanner(
+        feature_panel,
+        bundles=(_bundle(include_policy=False),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    assert snapshot.rows.iloc[0]["candidate_status"] == "REJECTED"
+    assert snapshot.rows.iloc[0]["exclusion_reason"] == "persisted_selection_policy_missing"
+
+
+def test_scanner_caps_are_order_independent_for_equal_utility_rows(tmp_path: Path) -> None:
+    policy = SelectionPolicy(per_date_limit=2, top_n_limit=None)
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"] * 3),
+            "symbol": ["C", "A", "B"],
+            "f1": [2.0, 2.0, 2.0],
+            "dollar_volume": [20_000_000.0] * 3,
+            "sector": ["technology"] * 3,
+            "market_regime_label": ["mixed"] * 3,
+        }
+    )
+    shuffled = feature_panel.sample(frac=1.0, random_state=23).reset_index(drop=True)
+
+    first = run_scanner(
+        feature_panel,
+        bundles=(_bundle(policy=policy, expected_return=0.02),),
+        db_path=tmp_path / "first.sqlite3",
+        output_dir=tmp_path / "first",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+    second = run_scanner(
+        shuffled,
+        bundles=(_bundle(policy=policy, expected_return=0.02),),
+        db_path=tmp_path / "second.sqlite3",
+        output_dir=tmp_path / "second",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    first_status = first.rows.set_index("ticker")["candidate_status"].to_dict()
+    second_status = second.rows.set_index("ticker")["candidate_status"].to_dict()
+
+    assert first_status == second_status
+    assert first_status == {
+        "A": "ACTIONABLE_PAPER_CANDIDATE",
+        "B": "ACTIONABLE_PAPER_CANDIDATE",
+        "C": "REJECTED",
+    }
 
 
 def test_latest_common_session_uses_all_enabled_symbol_histories() -> None:

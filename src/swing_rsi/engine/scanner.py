@@ -9,12 +9,22 @@ import pandas as pd
 
 from swing_rsi.engine.attribution import explain_candidate
 from swing_rsi.engine.models import ModelBundle, predict_bundle
+from swing_rsi.engine.selection import (
+    SelectionPolicy,
+    effective_selection_policy,
+    evaluate_candidate_policy,
+    order_candidates,
+    select_policy_cap_indexes,
+    selection_policy_from_metrics,
+)
 from swing_rsi.engine.storage import dumps, engine_connection
 
 
 @dataclass(frozen=True)
 class ScannerConfig:
     probability_threshold: float = 0.55
+    expected_return_threshold: float | None = None
+    target_before_stop_threshold: float | None = None
     minimum_dollar_volume: float = 5_000_000.0
     top_n_per_direction: int = 25
 
@@ -55,6 +65,8 @@ def _scan_id(
     as_of_date: str,
     model_ids: tuple[str, ...],
     model_states: dict[str, str],
+    model_eligibility: dict[str, bool],
+    model_policy_hashes: dict[str, str],
     universe_snapshot_id: str,
     snapshot_hash: str,
 ) -> str:
@@ -63,6 +75,8 @@ def _scan_id(
             "as_of_date": as_of_date,
             "model_ids": model_ids,
             "model_states": model_states,
+            "model_eligibility": model_eligibility,
+            "model_policy_hashes": model_policy_hashes,
             "universe_snapshot_id": universe_snapshot_id,
             "snapshot_hash": snapshot_hash,
         }
@@ -94,6 +108,25 @@ def _persist_scanner_candidates(db_path: str | Path, rows: pd.DataFrame) -> None
             )
 
 
+def _apply_scanner_caps(
+    rows: pd.DataFrame,
+    *,
+    policies: dict[str, SelectionPolicy],
+) -> pd.DataFrame:
+    capped = rows.copy()
+    for model_id, policy in policies.items():
+        model_mask = capped["model_id"].astype(str) == model_id
+        actionable_mask = model_mask & (capped["candidate_status"] == "ACTIONABLE_PAPER_CANDIDATE")
+        candidates = capped.loc[actionable_mask]
+        if candidates.empty:
+            continue
+        kept_indexes = select_policy_cap_indexes(candidates, policy, date_column="as_of_date")
+        rejected = actionable_mask & ~capped.index.isin(kept_indexes)
+        capped.loc[rejected, "candidate_status"] = "REJECTED"
+        capped.loc[rejected, "exclusion_reason"] = "exceeds_selection_cap"
+    return capped
+
+
 def run_scanner(
     feature_panel: pd.DataFrame,
     *,
@@ -102,12 +135,32 @@ def run_scanner(
     output_dir: str | Path,
     universe_snapshot_id: str,
     model_states: dict[str, str] | None = None,
+    model_eligibility: dict[str, bool] | None = None,
     config: ScannerConfig | None = None,
 ) -> ScannerSnapshot:
     config = config or ScannerConfig()
     model_states = model_states or {bundle.model_id: "CHAMPION" for bundle in bundles}
+    if model_eligibility is None:
+        model_eligibility = {bundle.model_id: True for bundle in bundles}
     if not bundles:
         raise ValueError("No deployed champion models are available for scanning")
+    bundles_by_id = {bundle.model_id: bundle for bundle in bundles}
+    model_policies: dict[str, SelectionPolicy | None] = {}
+    model_policy_hashes: dict[str, str | None] = {}
+    effective_policies: dict[str, SelectionPolicy] = {}
+    for bundle in bundles:
+        policy, policy_hash = selection_policy_from_metrics(bundle.metrics)
+        model_policies[bundle.model_id] = policy
+        model_policy_hashes[bundle.model_id] = policy_hash
+        if policy is not None:
+            effective_policies[bundle.model_id] = effective_selection_policy(
+                policy,
+                probability_threshold=config.probability_threshold,
+                expected_return_threshold=config.expected_return_threshold,
+                target_before_stop_threshold=config.target_before_stop_threshold,
+                liquidity_threshold=config.minimum_dollar_volume,
+                top_n_limit=config.top_n_per_direction,
+            )
     as_of = pd.Timestamp(feature_panel["Date"].max())
     latest = feature_panel.loc[pd.to_datetime(feature_panel["Date"]) == as_of].copy()
     if latest.empty:
@@ -118,6 +171,12 @@ def run_scanner(
         as_of_date=as_of.date().isoformat(),
         model_ids=model_ids,
         model_states={model_id: model_states.get(model_id, "UNKNOWN") for model_id in model_ids},
+        model_eligibility={
+            model_id: bool(model_eligibility.get(model_id, False)) for model_id in model_ids
+        },
+        model_policy_hashes={
+            model_id: str(model_policy_hashes.get(model_id) or "") for model_id in model_ids
+        },
         universe_snapshot_id=universe_snapshot_id,
         snapshot_hash=snapshot_hash,
     )
@@ -161,22 +220,42 @@ def run_scanner(
         probability = float(item["calibrated_probability"])
         target_before_stop_probability = float(item["target_before_stop_probability"])
         expected_return = float(item["expected_return"])
-        model_state = model_states.get(str(item["model_id"]), "UNKNOWN")
+        model_id = str(item["model_id"])
+        model_state = model_states.get(model_id, "UNKNOWN")
+        quality_eligible = bool(model_eligibility.get(model_id, False))
+        persisted_policy = model_policies.get(model_id)
+        effective_policy = effective_policies.get(model_id)
+        policy_hash = model_policy_hashes.get(model_id)
         status = "ACTIONABLE_PAPER_CANDIDATE"
         exclusion = ""
         if model_state not in {"CHAMPION", "CHALLENGER"}:
             status = "REJECTED"
-            exclusion = "model_not_promoted_or_quality_gates_failed"
-        elif dollar_volume < config.minimum_dollar_volume:
+            exclusion = "model_not_promoted"
+        elif not quality_eligible:
             status = "REJECTED"
-            exclusion = "liquidity_below_minimum_dollar_volume"
-        elif probability < config.probability_threshold:
+            exclusion = "model_quality_gates_failed"
+        elif persisted_policy is None or effective_policy is None:
             status = "REJECTED"
-            exclusion = "probability_below_threshold"
-        elif expected_return <= 0:
-            status = "REJECTED"
-            exclusion = "expected_return_not_positive_after_costs"
-        bundle = next(model for model in bundles if model.model_id == item["model_id"])
+            exclusion = "persisted_selection_policy_missing"
+        else:
+            policy_values = {str(key): value for key, value in item.items()}
+            policy_values.update(
+                {
+                    "calibrated_probability": probability,
+                    "expected_return": expected_return,
+                    "target_before_stop_probability": target_before_stop_probability,
+                    "liquidity_score": dollar_volume,
+                }
+            )
+            selection_result = evaluate_candidate_policy(
+                policy_values,
+                effective_policy,
+                policy_hash=policy_hash,
+            )
+            if not selection_result.passed:
+                status = "REJECTED"
+                exclusion = ";".join(selection_result.rejection_reasons)
+        bundle = bundles_by_id[model_id]
         attribution = explain_candidate(bundle, row)
         top_categories = sorted(
             attribution.contribution_share.items(),
@@ -238,6 +317,8 @@ def run_scanner(
                 "top_divergences": "; ".join(attribution.relationship_divergences),
                 "model_id": item["model_id"],
                 "model_state": model_state,
+                "model_quality_gate_eligible": quality_eligible,
+                "selection_policy_hash": policy_hash or "",
                 "feature_snapshot_hash": snapshot_hash,
                 "candidate_status": status,
                 "exclusion_reason": exclusion,
@@ -246,11 +327,9 @@ def run_scanner(
             }
         )
     result = pd.DataFrame(rows)
+    result = _apply_scanner_caps(result, policies=effective_policies)
     result = (
-        result.sort_values(
-            ["direction", "candidate_status", "composite_utility_score"],
-            ascending=[True, True, False],
-        )
+        order_candidates(result)
         .groupby("direction", group_keys=False)
         .head(config.top_n_per_direction)
     )

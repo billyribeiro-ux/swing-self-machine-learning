@@ -61,6 +61,10 @@ The current vertical slice gates on:
 
 Registered metrics also retain feature-stability summaries, bounded holdout permutation-importance summaries, target-before-stop calibration, positive year/regime/sector fractions, symbol/sector concentration, double-cost lower bound, prediction turnover, temporal-fold positive fraction, exceptional-period concentration, model plugin metadata, and naive/RSI-control availability for review. Those diagnostics do not override failed gates.
 
+The configured default candidate-selection policy is persisted with each model artifact and registry row. It requires probability at least `0.55`, expected return at least `0.001` decimal return, target-before-stop probability at least `0.50`, dollar volume at least `5,000,000`, no more than five selected candidates per date, no more than 5,000 selected holdout rows globally, and selected holdout coverage no greater than `20%`. These defaults are methodology controls, not tuned approvals for any current model.
+
+The selection evaluator is canonical for holdout model evaluation and scanner actionability. Missing or non-finite required policy metrics fail safely, and the scanner cannot relax persisted policy thresholds.
+
 The selected row sequence drawdown is retained only as `selected_row_sequence_drawdown`. It is not a portfolio drawdown gate.
 
 ## Model Plugin Interface
@@ -92,3 +96,5 @@ Champion promotion requires:
 5. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
 
 Existing champion models for the same task, direction, and horizon are retired with a recorded reason.
+
+The live scanner re-checks the same persisted canonical gate results before marking a row actionable. Registry state alone is insufficient: a `CHAMPION` or `CHALLENGER` with failed, missing, not-configured, or not-applicable mandatory gates is rejected for paper action.

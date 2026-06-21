@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from swing_rsi.data.validation import validate_ohlcv
+from swing_rsi.engine.selection import order_candidates
 
 
 @dataclass(frozen=True)
@@ -262,115 +263,115 @@ def backtest_scanner_candidates(
     config = config or PortfolioBacktestConfig()
     if candidate_rows.empty:
         return _empty_result()
-    candidates = candidate_rows.sort_values(
-        ["as_of_date", "composite_utility_score"],
-        ascending=[True, False],
-    )
+    candidates = order_candidates(candidate_rows, date_column="as_of_date")
     open_positions: list[dict[str, object]] = []
     trades: list[dict[str, object]] = []
     audit_rows: list[dict[str, object]] = []
-    for _, candidate in candidates.iterrows():
-        audit: dict[str, object] = {
-            "as_of_date": candidate.get("as_of_date", ""),
-            "ticker": candidate.get("ticker", ""),
-            "direction": candidate.get("direction", ""),
-            "model_id": candidate.get("model_id", ""),
-            "candidate_status": candidate.get("candidate_status", ""),
-            "included_as_trade": False,
-            "audit_reason": "",
-        }
-        if candidate.get("candidate_status") != "ACTIONABLE_PAPER_CANDIDATE":
-            audit["audit_reason"] = candidate.get("exclusion_reason", "candidate_rejected")
-            audit_rows.append(audit)
-            continue
-        signal_date = pd.Timestamp(candidate["as_of_date"])
+    for as_of_date, date_candidates in candidates.groupby("as_of_date", sort=True):
+        signal_date = pd.Timestamp(str(as_of_date))
         open_positions = [
             position
             for position in open_positions
             if pd.Timestamp(str(position["exit_date"])) > signal_date
         ]
-        ticker = str(candidate["ticker"])
-        symbol_open_count = sum(1 for position in open_positions if position["ticker"] == ticker)
-        if symbol_open_count >= config.max_position_per_symbol:
-            audit["audit_reason"] = "max_position_per_symbol"
-            audit_rows.append(audit)
-            continue
-        if len(open_positions) >= config.max_concurrent_positions:
-            audit["audit_reason"] = "max_concurrent_positions"
-            audit_rows.append(audit)
-            continue
-        sector = str(candidate.get("sector", "unknown"))
-        sector_count = sum(1 for position in open_positions if position.get("sector") == sector)
-        if (sector_count + 1) / max(
-            config.max_concurrent_positions, 1
-        ) > config.max_sector_fraction:
-            audit["audit_reason"] = "sector_concentration_limit"
-            audit_rows.append(audit)
-            continue
-        frame = frames.get(ticker)
-        if frame is None:
-            audit["audit_reason"] = "missing_symbol_frame"
-            audit_rows.append(audit)
-            continue
-        data = validate_ohlcv(frame)
-        positions = np.where(data.index == signal_date)[0]
-        if len(positions) == 0:
-            audit["audit_reason"] = "signal_date_not_in_frame"
-            audit_rows.append(audit)
-            continue
-        trade = _exit_trade(
-            data,
-            signal_position=int(positions[0]),
-            direction=str(candidate["direction"]),
-            config=config,
-        )
-        if trade is None:
-            audit["audit_reason"] = "no_future_entry_or_exit_bar"
-            audit_rows.append(audit)
-            continue
-        weight = _position_weight(data, config)
-        direction_sign = 1.0 if trade["direction"] == "Bullish" else -1.0
-        projected_gross = sum(
-            abs(float(cast(float, position["weight"]))) for position in open_positions
-        ) + abs(weight)
-        projected_net = (
-            sum(
-                float(cast(float, position["weight"]))
-                * float(cast(float, position["direction_sign"]))
-                for position in open_positions
-            )
-            + weight * direction_sign
-        )
-        if (
-            projected_gross > config.max_gross_exposure
-            or abs(projected_net) > config.max_net_exposure
-        ):
-            audit["audit_reason"] = "exposure_limit"
-            audit_rows.append(audit)
-            continue
-        trade["ticker"] = ticker
-        trade["model_id"] = candidate.get("model_id", "")
-        trade["sector"] = candidate.get("sector", "")
-        trade["regime"] = candidate.get("regime", "")
-        trade["model_version"] = candidate.get("model_id", "")
-        trade["position_weight"] = weight
-        trade["weighted_net_return"] = float(cast(float, trade["net_return"])) * weight
-        trades.append(trade)
-        audit["included_as_trade"] = True
-        audit["audit_reason"] = "included"
-        audit["entry_date"] = trade["entry_date"]
-        audit["exit_date"] = trade["exit_date"]
-        audit["net_return"] = trade["net_return"]
-        audit_rows.append(audit)
-        open_positions.append(
-            {
-                "ticker": ticker,
-                "sector": sector,
-                "exit_date": str(trade["exit_date"]),
-                "weight": weight,
-                "direction_sign": direction_sign,
+        for _, candidate in date_candidates.iterrows():
+            audit: dict[str, object] = {
+                "as_of_date": candidate.get("as_of_date", ""),
+                "ticker": candidate.get("ticker", ""),
+                "direction": candidate.get("direction", ""),
+                "model_id": candidate.get("model_id", ""),
+                "candidate_status": candidate.get("candidate_status", ""),
+                "included_as_trade": False,
+                "audit_reason": "",
             }
-        )
+            if candidate.get("candidate_status") != "ACTIONABLE_PAPER_CANDIDATE":
+                audit["audit_reason"] = candidate.get("exclusion_reason", "candidate_rejected")
+                audit_rows.append(audit)
+                continue
+            ticker = str(candidate["ticker"])
+            symbol_open_count = sum(
+                1 for position in open_positions if position["ticker"] == ticker
+            )
+            if symbol_open_count >= config.max_position_per_symbol:
+                audit["audit_reason"] = "max_position_per_symbol"
+                audit_rows.append(audit)
+                continue
+            if len(open_positions) >= config.max_concurrent_positions:
+                audit["audit_reason"] = "max_concurrent_positions"
+                audit_rows.append(audit)
+                continue
+            sector = str(candidate.get("sector", "unknown"))
+            sector_count = sum(1 for position in open_positions if position.get("sector") == sector)
+            if (sector_count + 1) / max(
+                config.max_concurrent_positions, 1
+            ) > config.max_sector_fraction:
+                audit["audit_reason"] = "sector_concentration_limit"
+                audit_rows.append(audit)
+                continue
+            frame = frames.get(ticker)
+            if frame is None:
+                audit["audit_reason"] = "missing_symbol_frame"
+                audit_rows.append(audit)
+                continue
+            data = validate_ohlcv(frame)
+            positions = np.where(data.index == signal_date)[0]
+            if len(positions) == 0:
+                audit["audit_reason"] = "signal_date_not_in_frame"
+                audit_rows.append(audit)
+                continue
+            trade = _exit_trade(
+                data,
+                signal_position=int(positions[0]),
+                direction=str(candidate["direction"]),
+                config=config,
+            )
+            if trade is None:
+                audit["audit_reason"] = "no_future_entry_or_exit_bar"
+                audit_rows.append(audit)
+                continue
+            weight = _position_weight(data, config)
+            direction_sign = 1.0 if trade["direction"] == "Bullish" else -1.0
+            projected_gross = sum(
+                abs(float(cast(float, position["weight"]))) for position in open_positions
+            ) + abs(weight)
+            projected_net = (
+                sum(
+                    float(cast(float, position["weight"]))
+                    * float(cast(float, position["direction_sign"]))
+                    for position in open_positions
+                )
+                + weight * direction_sign
+            )
+            if (
+                projected_gross > config.max_gross_exposure
+                or abs(projected_net) > config.max_net_exposure
+            ):
+                audit["audit_reason"] = "exposure_limit"
+                audit_rows.append(audit)
+                continue
+            trade["ticker"] = ticker
+            trade["model_id"] = candidate.get("model_id", "")
+            trade["sector"] = candidate.get("sector", "")
+            trade["regime"] = candidate.get("regime", "")
+            trade["model_version"] = candidate.get("model_id", "")
+            trade["position_weight"] = weight
+            trade["weighted_net_return"] = float(cast(float, trade["net_return"])) * weight
+            trades.append(trade)
+            audit["included_as_trade"] = True
+            audit["audit_reason"] = "included"
+            audit["entry_date"] = trade["entry_date"]
+            audit["exit_date"] = trade["exit_date"]
+            audit["net_return"] = trade["net_return"]
+            audit_rows.append(audit)
+            open_positions.append(
+                {
+                    "ticker": ticker,
+                    "sector": sector,
+                    "exit_date": str(trade["exit_date"]),
+                    "weight": weight,
+                    "direction_sign": direction_sign,
+                }
+            )
 
     ledger = pd.DataFrame(trades)
     if ledger.empty:

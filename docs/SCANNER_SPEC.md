@@ -19,7 +19,7 @@ The scanner:
 2. Builds one as-of feature snapshot per symbol.
 3. Loads champion model bundles that match the current feature manifest, or the newest review candidate generation only when explicitly requested and no champion exists.
 4. Generates bullish and bearish predictions.
-5. Applies probability, expected-return, and liquidity gates.
+5. Applies registry state, persisted canonical gate eligibility, frozen selection-policy gates, and deterministic selection caps.
 6. Creates attribution, relationship evidence, and compact historical analog records.
 7. Saves immutable CSV and Parquet scanner snapshots under `artifacts/scanner/`.
 8. Writes snapshot and candidate rows to SQLite.
@@ -48,6 +48,7 @@ Snapshots include:
 - divergences;
 - model ID;
 - model state;
+- model quality-gate eligibility;
 - feature snapshot hash;
 - candidate status;
 - exclusion reason.
@@ -56,4 +57,6 @@ Snapshots include:
 
 Compact analog records include directional forward return, MFE, MAE, and target-before-stop outcome fields from the stored training labels.
 
-Scanner predictions are candidates, not trades. Only rows that pass configured gates become actionable paper candidates.
+Scanner predictions are candidates, not trades. Only rows from a `CHAMPION` or `CHALLENGER` whose persisted canonical gate results are promotion-eligible can become actionable paper candidates. Candidate-generation review rows remain visible, but they are rejected for paper trading with explicit exclusion reasons.
+
+Runtime scanner configuration may make a model's persisted selection policy stricter, but never looser. Minimum thresholds use `max(persisted_threshold, runtime_threshold)`. Maximum caps use `min(persisted_cap, runtime_cap)` when both values are configured. Missing persisted selection policy rejects the row with `persisted_selection_policy_missing`.

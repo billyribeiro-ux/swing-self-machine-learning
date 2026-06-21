@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import pandas as pd
 
@@ -9,6 +10,7 @@ from dashboard.ui.components import render_page_header, repository_root, st
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.engine_service import list_registered_models, promote_registered_model
 from swing_rsi.engine.gates import gate_results_to_jsonable, promotion_eligibility
+from swing_rsi.engine.model_audit import build_model_audit
 from swing_rsi.engine.registry import RegisteredModel
 
 STATE_LABELS = {
@@ -206,6 +208,31 @@ def _download_frame(label: str, frame: pd.DataFrame, filename: str) -> None:
     )
 
 
+def _render_generation_exports(root: str | Path) -> None:
+    streamlit = st()
+    try:
+        audit = build_model_audit(root)
+    except ValueError:
+        return
+    streamlit.caption(f"Latest generation audit export: {audit.generation_id}")
+    columns = streamlit.columns(3)
+    with columns[0]:
+        _download_frame("Export model summary CSV", audit.summary, "latest_model_summary.csv")
+    with columns[1]:
+        _download_frame("Export gate audit CSV", audit.gates, "latest_gate_audit.csv")
+    with columns[2]:
+        streamlit.download_button(
+            "Export gate audit JSON",
+            data=json.dumps(
+                audit.gates.to_dict(orient="records"),
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8"),
+            file_name="latest_gate_audit.json",
+            mime="application/json",
+        )
+
+
 def render_page() -> None:
     streamlit = st()
     root = repository_root()
@@ -219,6 +246,7 @@ def render_page() -> None:
     streamlit.caption(
         "Compact default view. Select a row below to inspect full IDs, hashes, metrics, and gates."
     )
+    _render_generation_exports(root)
     streamlit.dataframe(
         compact_registry_rows(models),
         width="stretch",

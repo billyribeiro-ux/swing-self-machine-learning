@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Configured and persisted the autonomous candidate-selection policy, including expected-return, target-before-stop, liquidity, per-date, global top-N, and selected-rate controls.
+- Changed live scanner actionability to require persisted canonical gate eligibility in addition to `CHAMPION` or `CHALLENGER` registry state.
+- Date-batched portfolio candidate replay so same-date predictions are processed as one chronological decision set before daily-equity drawdown is calculated.
+- Added latest-generation Model Registry export buttons for model summary and full canonical gate audits.
+- Aligned scanner selection and portfolio replay with one canonical policy evaluator and deterministic candidate ordering helper.
 - Hardened autonomous model evaluation: separated prediction, selected-candidate, and portfolio holdout diagnostics; replaced row-sequence drawdown gating with portfolio daily-equity drawdown; added canonical persisted gate results, model-audit CLI exports, prediction OOD audit fields, and Model Registry gate drilldowns.
 - Compact the Model Registry dashboard table so default columns fit the screen while full IDs, hashes, artifacts, metrics, calibration values, and gates remain available in a selected-model details panel.
 - Tightened scanner dashboard lifecycle evidence display: direct AppTest execution now runs every primary scanner section, Candidate Attribution displays recent price context, parsed historical analogs, and model/snapshot details, and Portfolio Backtests renders equity, drawdown, trade ledger, candidate audit, and return breakdowns from actionable scanner snapshots.
