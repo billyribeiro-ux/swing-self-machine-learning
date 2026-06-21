@@ -7,10 +7,15 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from swing_rsi.engine.gates import (
+    FINAL_HOLDOUT_PROMOTION_GATE_ID,
+    GATE_VALUE_NOT_AVAILABLE,
     GateResult,
     gate_results_from_jsonable,
     gate_results_to_jsonable,
+    holdout_status_allows_promotion,
+    holdout_status_block_reason,
     legacy_gate_results,
+    normalized_holdout_status,
     promotion_eligibility,
 )
 from swing_rsi.engine.storage import dumps, engine_connection, loads
@@ -189,6 +194,23 @@ def challenger_models(db_path: str | Path) -> list[RegisteredModel]:
     return [model for model in list_models(db_path) if model.state == "CHALLENGER"]
 
 
+def _registered_holdout_status(model: RegisteredModel) -> str:
+    metric_status = normalized_holdout_status(model.metrics.get("holdout_status"))
+    if metric_status != GATE_VALUE_NOT_AVAILABLE:
+        return metric_status
+    gate = next(
+        (
+            result
+            for result in model.gate_results
+            if result.gate_id == FINAL_HOLDOUT_PROMOTION_GATE_ID
+        ),
+        None,
+    )
+    if gate is None:
+        return metric_status
+    return normalized_holdout_status(gate.actual_value)
+
+
 def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
     models = list_models(db_path)
     selected = next((model for model in models if model.model_id == model_id), None)
@@ -196,6 +218,12 @@ def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
         raise ValueError(f"Unknown model: {model_id}")
     if selected.state not in {"CHALLENGER", "CANDIDATE"}:
         raise ValueError(f"Only challenger/candidate models can be promoted, not {selected.state}")
+    holdout_status = _registered_holdout_status(selected)
+    if not holdout_status_allows_promotion(holdout_status):
+        raise ValueError(
+            "Model cannot be promoted because holdout status blocks promotion: "
+            f"{holdout_status_block_reason(holdout_status)}"
+        )
     eligibility = promotion_eligibility(selected.gate_results)
     if not eligibility.eligible:
         raise ValueError(

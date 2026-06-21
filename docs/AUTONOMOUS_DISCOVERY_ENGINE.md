@@ -15,9 +15,9 @@ The implemented vertical slice lives under `src/swing_rsi/engine/` and is orches
 7. Split chronologically into train, calibration, and holdout slices with purge/embargo of overlapping label horizons.
 8. Train baseline and nonlinear local models, including the naive historical base-rate control.
 9. Fit head-specific train-only feature screens where heads use different targets. The target-before-stop classifier screens against `label_{direction}_target_before_stop_{horizon}` rather than reusing positive-return features.
-10. Calibrate classification probability on the calibration slice.
-11. Evaluate holdout quality gates.
-12. Register model artifacts as `CANDIDATE`, `CHALLENGER`, or `REJECTED` with quality gates, feature-stability diagnostics, target-specific screen diagnostics, and holdout permutation-importance summaries.
+10. Calibrate classification probability on the calibration slice. The target-before-stop head selects among identity, sigmoid, and isotonic calibrators using only internal chronological folds inside the calibration slice and the precommitted one-standard-error rule.
+11. Evaluate holdout quality gates. Target-before-stop holdout metrics from the current repeatedly inspected split are labeled development-holdout diagnostics.
+12. Register model artifacts as `CANDIDATE`, `CHALLENGER`, or `REJECTED` with quality gates, feature-stability diagnostics, target-specific screen diagnostics, target-before-stop calibration-governance metadata, and holdout permutation-importance summaries.
 13. Scan the latest feature snapshot with champion models, or with review candidates only when explicitly requested.
 14. Persist immutable scanner snapshots, append-only paper-forward events, and drift-check summaries.
 
@@ -35,6 +35,7 @@ RSI is one feature family and baseline control. It is not the scanner strategy a
 - `engine/labels.py`: forward swing labels for bullish and bearish outcomes.
 - `engine/splits.py`: chronological split and purge logic.
 - `engine/models.py`: bounded model discovery, train-only preprocessing, calibration, and gates.
+- `engine/calibration_governance.py`: target-before-stop calibration-method evaluation, chronological fold diagnostics, selected calibrator refit, and ignored audit artifact writers.
 - `engine/drift.py`: feature-distribution and prediction-distribution drift checks.
 - `engine/registry.py`: persistent model governance in SQLite.
 - `engine/scanner.py`: latest-session scanner snapshots.

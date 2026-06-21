@@ -197,6 +197,18 @@ def _json_records(value: object) -> pd.DataFrame:
     return pd.DataFrame([item for item in payload if isinstance(item, dict)])
 
 
+def _read_optional_csv(value: object) -> pd.DataFrame:
+    if not isinstance(value, str) or not value.strip():
+        return pd.DataFrame()
+    path = Path(value)
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except (OSError, pd.errors.ParserError):
+        return pd.DataFrame()
+
+
 def _safe_parse_dict(value: object) -> dict[str, object]:
     if not isinstance(value, str) or not value.strip():
         return {}
@@ -335,6 +347,7 @@ def render_page() -> None:
                 "Stability",
                 "Feature Diagnostics",
                 "Target-Before-Stop Screen",
+                "Target-Before-Stop Calibration",
                 "Prediction Sanity",
                 "Artifact Metadata",
             ]
@@ -491,6 +504,45 @@ def render_page() -> None:
                 f"{selected_model.model_id}_target_before_stop_feature_screen.csv",
             )
         with tabs[7]:
+            streamlit.warning(
+                "Current holdout metrics are DEVELOPMENT HOLDOUT DIAGNOSTICS, not final validation."
+            )
+            method_comparison = _json_records(
+                selected_model.metrics.get("target_before_stop_calibration_candidate_results_json")
+            )
+            fold_metrics = _json_records(
+                selected_model.metrics.get("target_before_stop_calibration_fold_results_json")
+            )
+            step_support = _json_records(
+                selected_model.metrics.get("target_before_stop_step_support_json")
+            )
+            threshold_utility = _read_optional_csv(
+                selected_model.metrics.get("target_before_stop_calibration_threshold_utility_path")
+            )
+            calibration_summary = _metric_subset(
+                selected_model,
+                (
+                    "target_before_stop_calibration",
+                    "target_before_stop_raw_score_distribution",
+                    "target_before_stop_calibrated_score_distribution",
+                    "target_before_stop_plateau",
+                    "target_before_stop_step_support",
+                    "target_before_stop_development_holdout",
+                ),
+            )
+            streamlit.dataframe(
+                display_frame(calibration_summary), width="stretch", hide_index=True
+            )
+            streamlit.dataframe(display_frame(method_comparison), width="stretch", hide_index=True)
+            streamlit.dataframe(display_frame(fold_metrics), width="stretch", hide_index=True)
+            streamlit.dataframe(display_frame(step_support), width="stretch", hide_index=True)
+            streamlit.dataframe(display_frame(threshold_utility), width="stretch", hide_index=True)
+            _download_frame(
+                "Export target-before-stop calibration methods",
+                method_comparison,
+                f"{selected_model.model_id}_target_before_stop_calibration_methods.csv",
+            )
+        with tabs[8]:
             sanity = _metric_subset(
                 selected_model,
                 (
@@ -503,7 +555,7 @@ def render_page() -> None:
                 ),
             )
             streamlit.dataframe(display_frame(sanity), width="stretch", hide_index=True)
-        with tabs[8]:
+        with tabs[9]:
             streamlit.dataframe(
                 display_frame(_detail_rows(selected_model)),
                 width="stretch",

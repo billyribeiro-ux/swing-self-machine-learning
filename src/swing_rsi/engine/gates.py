@@ -15,6 +15,9 @@ GATE_VALUE_NOT_AVAILABLE = "NOT_AVAILABLE"
 GATE_VALUE_NOT_APPLICABLE = "NOT_APPLICABLE"
 GATE_VALUE_POSITIVE_INFINITY = "Infinity"
 GATE_VALUE_NEGATIVE_INFINITY = "-Infinity"
+FINAL_HOLDOUT_STATUS = "FINAL_HOLDOUT"
+DEVELOPMENT_HOLDOUT_STATUS = "DEVELOPMENT_HOLDOUT"
+FINAL_HOLDOUT_PROMOTION_GATE_ID = "final_holdout_required_for_promotion"
 
 
 @dataclass(frozen=True)
@@ -596,6 +599,25 @@ def quality_gate_bool_map(results: tuple[GateResult, ...]) -> dict[str, bool]:
     return {result.gate_id: result.status == "PASS" for result in results if result.mandatory}
 
 
+def normalized_holdout_status(value: object) -> str:
+    if value is None:
+        return GATE_VALUE_NOT_AVAILABLE
+    status = str(value).strip()
+    return status if status else GATE_VALUE_NOT_AVAILABLE
+
+
+def holdout_status_allows_promotion(value: object) -> bool:
+    return normalized_holdout_status(value) == FINAL_HOLDOUT_STATUS
+
+
+def holdout_status_block_reason(value: object) -> str:
+    status = normalized_holdout_status(value)
+    return (
+        f"{FINAL_HOLDOUT_PROMOTION_GATE_ID}: model holdout status is {status}; "
+        f"only {FINAL_HOLDOUT_STATUS} models can be promoted"
+    )
+
+
 def promotion_eligibility(results: tuple[GateResult, ...]) -> PromotionEligibility:
     mandatory = [result for result in results if result.mandatory]
     if not mandatory:
@@ -627,12 +649,20 @@ def promotion_eligibility(results: tuple[GateResult, ...]) -> PromotionEligibili
             "prediction_ood_governance_schema_version: legacy OOD artifacts lack V2 "
             "canonical prediction gates"
         )
+    final_holdout_gate = next(
+        (result for result in mandatory if result.gate_id == FINAL_HOLDOUT_PROMOTION_GATE_ID),
+        None,
+    )
+    final_holdout_gate_missing = final_holdout_gate is None
+    if final_holdout_gate_missing:
+        blocked.append(holdout_status_block_reason(GATE_VALUE_NOT_AVAILABLE))
     return PromotionEligibility(
         eligible=not failed
         and not not_configured
         and not not_applicable
         and not integrity_warnings
-        and not (has_legacy_ood_gate and not has_v2_ood_schema_gate),
+        and not (has_legacy_ood_gate and not has_v2_ood_schema_gate)
+        and not final_holdout_gate_missing,
         mandatory_passed=len(passed),
         mandatory_failed=len(failed),
         not_configured=len(not_configured),

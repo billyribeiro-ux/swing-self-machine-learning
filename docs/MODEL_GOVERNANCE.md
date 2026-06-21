@@ -63,6 +63,10 @@ Registered metrics also retain feature-stability summaries, bounded holdout perm
 
 New model artifacts persist head-specific feature manifests. The target-before-stop head stores its own screening schema version, target label, selected features, selected-feature-family counts, full audit records, screen configuration hash, and selected-feature manifest hash. Legacy artifacts without this metadata remain readable and are labeled as using shared legacy feature screening; they are not equivalent to new target-specific artifacts.
 
+New target-before-stop heads also persist calibration governance schema `tbs_calibration_governance_v1`. Each artifact stores the selected calibrator method, evaluated candidate methods, chronological internal fold definitions, fold-level metrics, candidate mean and standard-error metrics, the one-standard-error boundary, method complexity order, selection reason, final calibration fit dates, calibration audit artifact paths, raw and calibrated score distributions, plateau/step-support diagnostics, calibration manifest hash, and calibrator artifact hash. Identity calibration is stored as explicit metadata and an explicit immutable calibrator object, not as missing calibration metadata.
+
+Registry metrics expose the selected target-before-stop calibration method, selected-method Brier/log loss/ECE, identity/sigmoid/isotonic fold Brier values, largest plateau percentage, minimum step support, selection reason, calibration manifest hash, and calibrator artifact hash. The current holdout is a development holdout for calibration-governance review and must not be presented as final validation evidence.
+
 The configured default candidate-selection policy is persisted with each model artifact and registry row. It requires probability at least `0.55`, expected return at least `0.001` decimal return, target-before-stop probability at least `0.50`, dollar volume at least `5,000,000`, no more than five selected candidates per date, no more than 5,000 selected holdout rows globally, and selected holdout coverage no greater than `20%`. These defaults are methodology controls, not tuned approvals for any current model.
 
 The selection evaluator is canonical for holdout model evaluation and scanner actionability. Missing or non-finite required policy metrics fail safely, and the scanner cannot relax persisted policy thresholds.
@@ -165,9 +169,12 @@ Champion promotion requires:
 
 1. The model is a candidate/challenger in the registry.
 2. Persisted canonical mandatory gates exist.
-3. Every mandatory quality gate passes.
-4. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
-5. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
+3. The model holdout status is explicitly `FINAL_HOLDOUT`.
+4. Every mandatory quality gate passes.
+5. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
+6. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
+
+Models labeled `DEVELOPMENT_HOLDOUT` or missing holdout-status metadata are promotion-ineligible even if their other gates pass. The manual promotion path checks the persisted holdout status before changing registry state.
 
 Existing champion models for the same task, direction, and horizon are retired with a recorded reason.
 

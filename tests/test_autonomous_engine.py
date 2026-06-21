@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from swing_rsi.engine.calibration_governance import TBS_CALIBRATION_GOVERNANCE_SCHEMA_VERSION
 from swing_rsi.engine.drift import build_drift_report
 from swing_rsi.engine.features import build_feature_panel, reject_label_columns
 from swing_rsi.engine.forward import (
@@ -16,7 +17,13 @@ from swing_rsi.engine.forward import (
     create_pending_events_from_snapshot,
     list_forward_events,
 )
-from swing_rsi.engine.gates import GATE_VALUE_NOT_AVAILABLE, make_gate, promotion_eligibility
+from swing_rsi.engine.gates import (
+    FINAL_HOLDOUT_PROMOTION_GATE_ID,
+    FINAL_HOLDOUT_STATUS,
+    GATE_VALUE_NOT_AVAILABLE,
+    make_gate,
+    promotion_eligibility,
+)
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
 from swing_rsi.engine.models import (
     TARGET_BEFORE_STOP_HEAD,
@@ -60,6 +67,14 @@ class FeatureEchoClassifier:
 class IdentityCalibrator:
     def predict(self, values: np.ndarray) -> np.ndarray:
         return values
+
+
+class MultiplierCalibrator:
+    def __init__(self, multiplier: float) -> None:
+        self.multiplier = multiplier
+
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        return np.clip(np.asarray(values, dtype=float) * self.multiplier, 0.0, 1.0)
 
 
 class ConstantRegressor:
@@ -188,6 +203,21 @@ def test_chronological_split_purges_overlapping_label_windows() -> None:
 
 
 def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> RegisteredModel:
+    final_holdout_gate = make_gate(
+        gate_id=FINAL_HOLDOUT_PROMOTION_GATE_ID,
+        gate_name="Final Holdout Required For Promotion",
+        category="research integrity",
+        scope="model",
+        metric_name="holdout_status",
+        threshold=FINAL_HOLDOUT_STATUS,
+        comparator="equals",
+        actual_value=FINAL_HOLDOUT_STATUS,
+        status="PASS",
+        mandatory=True,
+        evidence_source="test",
+        reason="Synthetic registry fixture uses a final holdout.",
+        configuration_hash_value="test",
+    )
     return RegisteredModel(
         model_id=model_id,
         task="swing_direction_probability",
@@ -205,9 +235,13 @@ def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> Registered
         feature_manifest_hash="f",
         raw_manifest_hashes=(),
         hyperparameters={},
-        metrics={"holdout_mean_return_lcb_90": 0.01},
+        metrics={
+            "holdout_mean_return_lcb_90": 0.01,
+            "holdout_status": FINAL_HOLDOUT_STATUS,
+        },
         calibration_metrics={"holdout_brier": 0.2},
-        quality_gates={"gate": True},
+        quality_gates={final_holdout_gate.gate_id: True},
+        gate_results=(final_holdout_gate,),
         artifact_path="artifact.joblib",
         code_commit_hash=None,
         created_at_utc=datetime.now(UTC).isoformat(),
@@ -432,9 +466,13 @@ def _policy_metrics(
     include_ood: bool = True,
     return_high: float = 0.10,
     return_severity_limit: float = 0.10,
+    include_tbs_calibration: bool = True,
+    calibration_method: str = "identity",
+    calibration_manifest_hash: str = "calibration-manifest-a",
+    calibrator_artifact_hash: str = "calibrator-artifact-a",
 ) -> dict[str, object]:
     policy = policy or SelectionPolicy()
-    return {
+    metrics = {
         **(
             _ood_metrics(
                 return_high=return_high,
@@ -447,6 +485,32 @@ def _policy_metrics(
         "selection_policy_configuration_hash": policy_hash,
         "generation": generation,
         "artifact_hash": artifact_hash,
+    }
+    if include_tbs_calibration:
+        metrics.update(
+            _tbs_calibration_metrics(
+                calibration_method=calibration_method,
+                calibration_manifest_hash=calibration_manifest_hash,
+                calibrator_artifact_hash=calibrator_artifact_hash,
+            )
+        )
+    return metrics
+
+
+def _tbs_calibration_metrics(
+    *,
+    calibration_method: str = "identity",
+    calibration_manifest_hash: str = "calibration-manifest-a",
+    calibrator_artifact_hash: str = "calibrator-artifact-a",
+) -> dict[str, object]:
+    return {
+        "target_before_stop_calibration_governance_schema": (
+            TBS_CALIBRATION_GOVERNANCE_SCHEMA_VERSION
+        ),
+        "target_before_stop_calibration_method": calibration_method,
+        "target_before_stop_calibration_manifest_hash": calibration_manifest_hash,
+        "target_before_stop_calibrator_artifact_hash": calibrator_artifact_hash,
+        "target_before_stop_calibration_selection_reason": "test_identity",
     }
 
 
@@ -466,7 +530,13 @@ def _bundle(
     return_severity_limit: float = 0.10,
     target_feature_columns: tuple[str, ...] | None = None,
     target_classifier: object | None = None,
+    target_calibrator: object | None = None,
     target_manifest: str = "target-before-stop-manifest",
+    include_tbs_calibration: bool = True,
+    calibration_method: str = "identity",
+    calibration_manifest_hash: str = "calibration-manifest-a",
+    calibrator_artifact_hash: str = "calibrator-artifact-a",
+    include_feature_screen_metadata: bool = True,
 ) -> ModelBundle:
     target_feature_columns = target_feature_columns or ("f1", "dollar_volume")
     training = pd.DataFrame(
@@ -499,7 +569,7 @@ def _bundle(
         classifier=ConstantClassifier(probability),
         calibrator=IdentityCalibrator(),
         target_before_stop_model=target_classifier or ConstantClassifier(target_probability),
-        target_before_stop_calibrator=IdentityCalibrator(),
+        target_before_stop_calibrator=target_calibrator or IdentityCalibrator(),
         return_model=ConstantRegressor(expected_return),
         mfe_model=ConstantRegressor(0.04),
         mae_model=ConstantRegressor(-0.015),
@@ -517,13 +587,31 @@ def _bundle(
                 include_ood=include_ood,
                 return_high=return_high,
                 return_severity_limit=return_severity_limit,
+                include_tbs_calibration=include_tbs_calibration,
+                calibration_method=calibration_method,
+                calibration_manifest_hash=calibration_manifest_hash,
+                calibrator_artifact_hash=calibrator_artifact_hash,
             )
             if include_policy
-            else (
-                _ood_metrics(return_high=return_high, return_severity_limit=return_severity_limit)
-                if include_ood
-                else {}
-            )
+            else {
+                **(
+                    _ood_metrics(
+                        return_high=return_high,
+                        return_severity_limit=return_severity_limit,
+                    )
+                    if include_ood
+                    else {}
+                ),
+                **(
+                    _tbs_calibration_metrics(
+                        calibration_method=calibration_method,
+                        calibration_manifest_hash=calibration_manifest_hash,
+                        calibrator_artifact_hash=calibrator_artifact_hash,
+                    )
+                    if include_tbs_calibration
+                    else {}
+                ),
+            }
         ),
         calibration_metrics={},
         head_feature_columns={
@@ -540,14 +628,18 @@ def _bundle(
             "mfe": "mfe-manifest",
             "mae": "mae-manifest",
         },
-        feature_screen_metadata={
-            TARGET_BEFORE_STOP_HEAD: {
-                "screening_schema_version": "target_specific_feature_screen_v1",
-                "selected_feature_count": len(target_feature_columns),
-                "selected_feature_families": {"test": len(target_feature_columns)},
-                "selected_feature_manifest_hash": target_manifest,
+        feature_screen_metadata=(
+            {
+                TARGET_BEFORE_STOP_HEAD: {
+                    "screening_schema_version": "target_specific_feature_screen_v1",
+                    "selected_feature_count": len(target_feature_columns),
+                    "selected_feature_families": {"test": len(target_feature_columns)},
+                    "selected_feature_manifest_hash": target_manifest,
+                }
             }
-        },
+            if include_feature_screen_metadata
+            else {}
+        ),
     )
 
 
@@ -601,6 +693,35 @@ def test_target_before_stop_classifier_receives_own_selected_columns() -> None:
     assert prediction["calibrated_probability"] == pytest.approx(0.75)
     assert prediction["target_before_stop_probability"] == pytest.approx(0.82)
     assert prediction["target_before_stop_feature_manifest_hash"] == "target-before-stop-manifest"
+
+
+def test_target_before_stop_prediction_uses_frozen_selected_calibrator() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "target_signal": [0.80],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        target_feature_columns=("target_signal",),
+        target_classifier=FeatureEchoClassifier("target_signal"),
+        target_calibrator=MultiplierCalibrator(0.50),
+        calibration_method="sigmoid",
+        calibration_manifest_hash="calibration-manifest-sigmoid",
+        calibrator_artifact_hash="calibrator-artifact-sigmoid",
+    )
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["target_before_stop_raw_probability"] == pytest.approx(0.80)
+    assert prediction["target_before_stop_probability"] == pytest.approx(0.40)
+    assert prediction["target_before_stop_calibration_method"] == "sigmoid"
+    assert (
+        prediction["target_before_stop_calibration_manifest_hash"] == "calibration-manifest-sigmoid"
+    )
 
 
 def test_predict_bundle_flags_missing_target_before_stop_features_without_substitution() -> None:
@@ -695,6 +816,62 @@ def test_scanner_rejects_missing_target_before_stop_features_explicitly(tmp_path
     assert row["candidate_status"] == "REJECTED"
     assert "target_before_stop_required_feature_missing" in row["exclusion_reason"]
     assert bool(row["target_before_stop_required_feature_missing"]) is True
+
+
+def test_scanner_rejects_missing_target_before_stop_calibration_metadata(tmp_path: Path) -> None:
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(_bundle(include_tbs_calibration=False),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "target_before_stop_calibration_metadata_missing" in row["exclusion_reason"]
+    assert bool(row["target_before_stop_calibration_metadata_missing"]) is True
+
+
+def test_legacy_shared_screen_artifact_is_not_marked_new_calibration_missing() -> None:
+    prediction = predict_bundle(
+        _bundle(include_tbs_calibration=False, include_feature_screen_metadata=False),
+        _scanner_feature_panel(),
+    ).iloc[0]
+
+    assert prediction["target_before_stop_feature_screen_schema"] == "legacy_shared_feature_screen"
+    assert bool(prediction["target_before_stop_calibration_metadata_missing"]) is False
+
+
+def test_scanner_uses_frozen_target_before_stop_calibrator(tmp_path: Path) -> None:
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(
+            _bundle(
+                target_feature_columns=("target_signal",),
+                target_classifier=FeatureEchoClassifier("target_signal"),
+                target_calibrator=MultiplierCalibrator(0.50),
+                calibration_method="sigmoid",
+                calibration_manifest_hash="calibration-manifest-sigmoid",
+                calibrator_artifact_hash="calibrator-artifact-sigmoid",
+            ),
+        ),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["target_before_stop_raw_probability"] == pytest.approx(0.75)
+    assert row["target_before_stop_probability"] == pytest.approx(0.375)
+    assert row["target_before_stop_calibration_method"] == "sigmoid"
+    assert row["target_before_stop_calibration_manifest_hash"] == "calibration-manifest-sigmoid"
 
 
 def test_scanner_rejects_promoted_model_without_gate_eligibility(tmp_path: Path) -> None:
@@ -1186,6 +1363,18 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    calibration_manifest = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                policy=SelectionPolicy(per_date_limit=2),
+                calibration_manifest_hash="calibration-manifest-b",
+            ),
+        ),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -1198,9 +1387,10 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 universe.scan_id,
                 ood_metadata.scan_id,
                 target_manifest.scan_id,
+                calibration_manifest.scan_id,
             }
         )
-        == 8
+        == 9
     )
 
 
@@ -1414,7 +1604,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 4
+    assert metadata["scanner_identity_schema_version"] == 5
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
@@ -1423,6 +1613,8 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     assert metadata["model_ood_governance_metadata_hash"]
     assert metadata["target_before_stop_feature_metadata_json"]
     assert metadata["target_before_stop_feature_metadata_hash"]
+    assert metadata["target_before_stop_calibration_metadata_json"]
+    assert metadata["target_before_stop_calibration_metadata_hash"]
     assert metadata["persisted_model_policy_hashes"] == {"model-a": "policy-hash"}
     identity = metadata["canonical_scan_execution_identity"]
     assert identity["prediction_ood_governance_schema_version"] == PREDICTION_OOD_GOVERNANCE_VERSION
@@ -1437,6 +1629,11 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
             "target_before_stop_feature_manifest_hash"
         ]
         == "target-before-stop-manifest"
+    )
+    assert identity["target_before_stop_calibration_metadata"]["model-a"]["method"] == "identity"
+    assert (
+        identity["target_before_stop_calibration_metadata"]["model-a"]["calibration_manifest_hash"]
+        == "calibration-manifest-a"
     )
     assert identity["effective_selection_policies"]["model-a"]["expected_return_threshold"] == 0.001
     assert identity["raw_scanner_config"]["minimum_dollar_volume"] == 5_000_000.0

@@ -26,6 +26,15 @@ from sklearn.metrics import brier_score_loss, log_loss, mean_absolute_error, mea
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from swing_rsi.engine.calibration_governance import (
+    TBS_CALIBRATION_GOVERNANCE_SCHEMA_VERSION,
+    binary_probability_quality,
+    build_probability_audit_frame,
+    calibration_threshold_utility,
+    probability_distribution_summary,
+    select_tbs_calibrator,
+    write_calibration_audit_artifacts,
+)
 from swing_rsi.engine.feature_screen import (
     FEATURE_SCREEN_SCHEMA_VERSION,
     FeatureScreenResult,
@@ -33,6 +42,9 @@ from swing_rsi.engine.feature_screen import (
 )
 from swing_rsi.engine.features import numeric_feature_columns, reject_label_columns
 from swing_rsi.engine.gates import (
+    DEVELOPMENT_HOLDOUT_STATUS,
+    FINAL_HOLDOUT_PROMOTION_GATE_ID,
+    FINAL_HOLDOUT_STATUS,
     GATE_VALUE_NOT_AVAILABLE,
     GATE_VALUE_POSITIVE_INFINITY,
     GateResult,
@@ -163,6 +175,26 @@ def bundle_feature_screen_records(bundle: ModelBundle, head: str) -> tuple[dict[
     if not value:
         return ()
     return tuple(dict(record) for record in value if isinstance(record, dict))
+
+
+def bundle_tbs_calibration_metadata(bundle: ModelBundle) -> dict[str, object]:
+    metrics = getattr(bundle, "metrics", {}) or {}
+    schema = metrics.get("target_before_stop_calibration_governance_schema")
+    if not schema:
+        return {}
+    return {
+        "schema_version": str(schema),
+        "method": str(metrics.get("target_before_stop_calibration_method") or ""),
+        "calibration_manifest_hash": str(
+            metrics.get("target_before_stop_calibration_manifest_hash") or ""
+        ),
+        "calibrator_artifact_hash": str(
+            metrics.get("target_before_stop_calibrator_artifact_hash") or ""
+        ),
+        "selection_reason": str(
+            metrics.get("target_before_stop_calibration_selection_reason") or ""
+        ),
+    }
 
 
 def selection_policy_from_config(config: DiscoveryConfig) -> SelectionPolicy:
@@ -1025,6 +1057,7 @@ def _build_gate_results(
     period_concentration = _float_metric(metrics, "exceptional_period_concentration_top")
     prediction_ood = int(metrics.get("prediction_sanity_ood_total") or 0)
     selected_rate = float(metrics.get("selected_observation_rate") or 0.0)
+    holdout_status = str(metrics.get("holdout_status") or GATE_VALUE_NOT_AVAILABLE)
     symbol_concentration_status: GateStatus = (
         "NOT_APPLICABLE"
         if not math.isfinite(symbol_concentration)
@@ -1070,6 +1103,24 @@ def _build_gate_results(
         threshold=TEMPORAL_FOLD_STABILITY_THRESHOLD,
     )
 
+    add(
+        FINAL_HOLDOUT_PROMOTION_GATE_ID,
+        "Final Holdout Required For Promotion",
+        "research integrity",
+        "model",
+        "holdout_status",
+        FINAL_HOLDOUT_STATUS,
+        "equals",
+        holdout_status,
+        _status_from_bool(holdout_status == FINAL_HOLDOUT_STATUS),
+        True,
+        "Model has a final holdout and may be considered for promotion."
+        if holdout_status == FINAL_HOLDOUT_STATUS
+        else (
+            f"Model holdout status is {holdout_status}; only {FINAL_HOLDOUT_STATUS} "
+            "models can be promoted."
+        ),
+    )
     add(
         "minimum_training_samples",
         "Minimum Training Samples",
@@ -1671,6 +1722,7 @@ def _train_family(
     direction: str,
     horizon: int,
     config: DiscoveryConfig,
+    calibration_audit_dir: str | Path,
 ) -> ModelBundle:
     target = f"label_{direction}_positive_return_{horizon}"
     returns = f"label_{direction}_forward_return_{horizon}"
@@ -1728,8 +1780,13 @@ def _train_family(
     target_calibration_raw = _positive_class_probability(
         target_classifier, calibration[list(target_feature_columns)]
     )
-    target_calibrator = IsotonicRegression(out_of_bounds="clip")
-    target_calibrator.fit(target_calibration_raw, calibration[target_before_stop].astype(int))
+    target_calibration_selection = select_tbs_calibrator(
+        raw_probability=target_calibration_raw,
+        target=calibration[target_before_stop].astype(int).to_numpy(),
+        dates=calibration["Date"],
+        random_seed=config.random_seed,
+    )
+    target_calibrator = target_calibration_selection.selected_calibrator
     target_calibration_probability = np.asarray(
         target_calibrator.predict(target_calibration_raw), dtype=float
     )
@@ -1738,6 +1795,35 @@ def _train_family(
     )
     target_holdout_probability = np.asarray(
         target_calibrator.predict(target_holdout_raw), dtype=float
+    )
+    target_calibration_probability_audit = build_probability_audit_frame(
+        calibration_frame=calibration,
+        development_holdout_frame=holdout,
+        calibration_raw_probability=target_calibration_raw,
+        calibration_calibrated_probability=target_calibration_probability,
+        development_holdout_raw_probability=target_holdout_raw,
+        development_holdout_calibrated_probability=target_holdout_probability,
+        target_column=target_before_stop,
+        selection=target_calibration_selection,
+        model_id=model_id,
+        direction=direction,
+        horizon=horizon,
+    )
+    target_calibration_threshold_utility = calibration_threshold_utility(
+        frame=calibration,
+        calibrated_probability=target_calibration_probability,
+        direction=direction,
+        horizon=horizon,
+        model_id=model_id,
+    )
+    target_calibration_audit = write_calibration_audit_artifacts(
+        audit_dir=calibration_audit_dir,
+        selection=target_calibration_selection,
+        probability_audit=target_calibration_probability_audit,
+        threshold_utility=target_calibration_threshold_utility,
+        model_id=model_id,
+        direction=direction,
+        horizon=horizon,
     )
 
     plugin_by_name = {plugin.name: plugin for plugin in model_plugins()}
@@ -1813,6 +1899,22 @@ def _train_family(
     )
     target_before_stop_brier = float(
         brier_score_loss(holdout[target_before_stop].astype(int), target_holdout_probability)
+    )
+    target_before_stop_development_raw_quality = binary_probability_quality(
+        holdout[target_before_stop].astype(int).to_numpy(),
+        target_holdout_raw,
+        target_holdout_raw,
+        method="identity",
+    )
+    target_before_stop_development_calibrated_quality = binary_probability_quality(
+        holdout[target_before_stop].astype(int).to_numpy(),
+        target_holdout_raw,
+        target_holdout_probability,
+        method=target_calibration_selection.selected_method,
+    )
+    target_before_stop_raw_distribution = probability_distribution_summary(target_holdout_raw)
+    target_before_stop_calibrated_distribution = probability_distribution_summary(
+        target_holdout_probability
     )
     target_before_stop_permutation_by_family = _permutation_importance_by_family(
         classifier=target_classifier,
@@ -2061,6 +2163,11 @@ def _train_family(
         "training_samples": len(train),
         "calibration_samples": len(calibration),
         "holdout_samples": len(holdout),
+        "holdout_status": DEVELOPMENT_HOLDOUT_STATUS,
+        "holdout_status_reason": (
+            "This chronological holdout has been repeatedly inspected during engineering "
+            "diagnosis and is not a pristine final validation holdout."
+        ),
         "selected_holdout_samples": len(selected_returns),
         "raw_data_first_date": _date_label(pd.Timestamp(full_frame["Date"].min())),
         "feature_warmup_first_date": _date_label(pd.Timestamp(full_frame["Date"].min())),
@@ -2107,6 +2214,147 @@ def _train_family(
         "portfolio_policy_configuration_hash": portfolio_policy_hash,
         "holdout_target_before_stop_brier": target_before_stop_brier,
         "holdout_target_before_stop_probability_mean": float(np.mean(target_holdout_probability)),
+        "target_before_stop_development_holdout_label": "DEVELOPMENT HOLDOUT DIAGNOSTIC",
+        "target_before_stop_calibration_governance_schema": TBS_CALIBRATION_GOVERNANCE_SCHEMA_VERSION,
+        "target_before_stop_calibration_method": target_calibration_selection.selected_method,
+        "target_before_stop_calibration_candidate_methods_json": _json_dumps(
+            [candidate.method for candidate in target_calibration_selection.candidate_results]
+        ),
+        "target_before_stop_calibration_fold_definitions_json": _json_dumps(
+            [asdict(item) for item in target_calibration_selection.fold_definitions]
+        ),
+        "target_before_stop_calibration_fold_results_json": _json_dumps(
+            [asdict(item) for item in target_calibration_selection.fold_results]
+        ),
+        "target_before_stop_calibration_candidate_results_json": _json_dumps(
+            [asdict(item) for item in target_calibration_selection.candidate_results]
+        ),
+        "target_before_stop_calibration_one_standard_error_boundary": (
+            target_calibration_selection.one_standard_error_boundary
+        ),
+        "target_before_stop_calibration_method_complexity_order_json": _json_dumps(
+            list(target_calibration_selection.method_complexity_order)
+        ),
+        "target_before_stop_calibration_selection_reason": (
+            target_calibration_selection.selection_reason
+        ),
+        "target_before_stop_calibration_final_fit_start": (
+            target_calibration_selection.final_fit_start
+        ),
+        "target_before_stop_calibration_final_fit_end": target_calibration_selection.final_fit_end,
+        "target_before_stop_calibration_final_fit_rows": target_calibration_selection.final_fit_rows,
+        "target_before_stop_calibration_audit_probability_path": (
+            target_calibration_audit.probability_audit_path
+        ),
+        "target_before_stop_calibration_method_comparison_path": (
+            target_calibration_audit.method_comparison_path
+        ),
+        "target_before_stop_calibration_fold_metrics_path": (
+            target_calibration_audit.fold_metrics_path
+        ),
+        "target_before_stop_calibration_step_support_path": (
+            target_calibration_audit.step_support_path
+        ),
+        "target_before_stop_calibration_threshold_utility_path": (
+            target_calibration_audit.threshold_utility_path
+        ),
+        "target_before_stop_calibration_governance_json_path": (
+            target_calibration_audit.governance_json_path
+        ),
+        "target_before_stop_calibration_manifest_hash": (
+            target_calibration_selection.calibration_manifest_hash
+        ),
+        "target_before_stop_calibrator_artifact_hash": (
+            target_calibration_selection.calibrator_artifact_hash
+        ),
+        "target_before_stop_raw_score_distribution_json": _json_dumps(
+            target_calibration_selection.raw_score_distribution
+        ),
+        "target_before_stop_calibrated_score_distribution_json": _json_dumps(
+            target_calibration_selection.calibrated_score_distribution
+        ),
+        "target_before_stop_plateau_diagnostics_json": _json_dumps(
+            target_calibration_selection.plateau_diagnostics
+        ),
+        "target_before_stop_step_support_json": _json_dumps(
+            list(target_calibration_selection.step_support_records)
+        ),
+        "target_before_stop_identity_fold_brier": next(
+            (
+                candidate.mean_brier_score
+                for candidate in target_calibration_selection.candidate_results
+                if candidate.method == "identity"
+            ),
+            math.nan,
+        ),
+        "target_before_stop_sigmoid_fold_brier": next(
+            (
+                candidate.mean_brier_score
+                for candidate in target_calibration_selection.candidate_results
+                if candidate.method == "sigmoid"
+            ),
+            math.nan,
+        ),
+        "target_before_stop_isotonic_fold_brier": next(
+            (
+                candidate.mean_brier_score
+                for candidate in target_calibration_selection.candidate_results
+                if candidate.method == "isotonic"
+            ),
+            math.nan,
+        ),
+        "target_before_stop_selected_method_brier": next(
+            (
+                candidate.mean_brier_score
+                for candidate in target_calibration_selection.candidate_results
+                if candidate.method == target_calibration_selection.selected_method
+            ),
+            math.nan,
+        ),
+        "target_before_stop_selected_method_log_loss": next(
+            (
+                candidate.mean_log_loss
+                for candidate in target_calibration_selection.candidate_results
+                if candidate.method == target_calibration_selection.selected_method
+            ),
+            math.nan,
+        ),
+        "target_before_stop_selected_method_ece": next(
+            (
+                candidate.mean_expected_calibration_error
+                for candidate in target_calibration_selection.candidate_results
+                if candidate.method == target_calibration_selection.selected_method
+            ),
+            math.nan,
+        ),
+        "target_before_stop_selected_method_largest_plateau_percentage": next(
+            (
+                candidate.mean_largest_plateau_percentage
+                for candidate in target_calibration_selection.candidate_results
+                if candidate.method == target_calibration_selection.selected_method
+            ),
+            math.nan,
+        ),
+        "target_before_stop_selected_method_minimum_step_support": next(
+            (
+                candidate.minimum_isotonic_step_support
+                for candidate in target_calibration_selection.candidate_results
+                if candidate.method == target_calibration_selection.selected_method
+            ),
+            math.nan,
+        ),
+        "target_before_stop_development_holdout_raw_quality_json": _json_dumps(
+            target_before_stop_development_raw_quality
+        ),
+        "target_before_stop_development_holdout_calibrated_quality_json": _json_dumps(
+            target_before_stop_development_calibrated_quality
+        ),
+        "target_before_stop_development_holdout_raw_distribution_json": _json_dumps(
+            target_before_stop_raw_distribution
+        ),
+        "target_before_stop_development_holdout_calibrated_distribution_json": _json_dumps(
+            target_before_stop_calibrated_distribution
+        ),
         "target_before_stop_feature_screen_schema_version": FEATURE_SCREEN_SCHEMA_VERSION,
         "target_before_stop_screening_target": target_before_stop,
         "target_before_stop_screening_task_type": "classification",
@@ -2341,6 +2589,7 @@ def discover_models(
                         direction=direction,
                         horizon=horizon,
                         config=config,
+                        calibration_audit_dir=Path(artifact_dir).parent / "calibration",
                     )
                 except ValueError as exc:
                     model_id = make_model_id(
@@ -2500,16 +2749,39 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             "screening_schema_version", "legacy_shared_feature_screen"
         )
     )
+    tbs_feature_screen_schema = (
+        str(output["target_before_stop_feature_screen_schema"].iloc[0])
+        if len(output)
+        else "legacy_shared_feature_screen"
+    )
+    tbs_calibration_metadata = bundle_tbs_calibration_metadata(bundle)
+    output["target_before_stop_calibration_governance_schema"] = str(
+        tbs_calibration_metadata.get("schema_version", "")
+    )
+    output["target_before_stop_calibration_method"] = str(
+        tbs_calibration_metadata.get("method", "")
+    )
+    output["target_before_stop_calibration_manifest_hash"] = str(
+        tbs_calibration_metadata.get("calibration_manifest_hash", "")
+    )
+    output["target_before_stop_calibrator_artifact_hash"] = str(
+        tbs_calibration_metadata.get("calibrator_artifact_hash", "")
+    )
+    output["target_before_stop_calibration_metadata_missing"] = bool(
+        tbs_feature_screen_schema == FEATURE_SCREEN_SCHEMA_VERSION and not tbs_calibration_metadata
+    )
     missing_target_features = [
         column for column in target_before_stop_features if column not in frame.columns
     ]
     output["target_before_stop_required_feature_missing"] = bool(missing_target_features)
     output["target_before_stop_missing_features"] = ";".join(missing_target_features[:10])
     if missing_target_features:
+        output["target_before_stop_raw_probability"] = np.full(len(frame), math.nan)
         output["target_before_stop_probability"] = np.full(len(frame), math.nan)
     else:
         target_x = frame[list(target_before_stop_features)]
         target_raw = _positive_class_probability(bundle.target_before_stop_model, target_x)
+        output["target_before_stop_raw_probability"] = np.asarray(target_raw, dtype=float)
         output["target_before_stop_probability"] = np.asarray(
             bundle.target_before_stop_calibrator.predict(target_raw), dtype=float
         )
