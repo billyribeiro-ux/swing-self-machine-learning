@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1617,6 +1618,106 @@ def test_gate_results_persist_export_and_block_failed_promotion(tmp_path: Path) 
     assert any(path.name == "full_gate_audit.json" for path in paths)
     with pytest.raises(ValueError, match="mandatory gate results block promotion"):
         promote_model(db, "model-a")
+
+
+def test_model_audit_exports_target_before_stop_calibration_governance(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "artifacts" / "calibration"
+    artifact_dir.mkdir(parents=True)
+    probability_path = artifact_dir / "model-a_probability_audit.parquet"
+    threshold_path = artifact_dir / "model-a_threshold_utility.csv"
+    pd.DataFrame(
+        [
+            {
+                "Date": "2024-01-02",
+                "symbol": "AAPL",
+                "split": "calibration",
+                "raw_classifier_probability": 0.42,
+                "selected_calibrated_probability": 0.44,
+                "target_label": 1,
+                "calibrator_method": "sigmoid",
+                "calibration_manifest_hash": "calibration-manifest-a",
+            }
+        ]
+    ).to_parquet(probability_path, index=False)
+    pd.DataFrame([{"model_id": "model-a", "threshold": 0.50, "observations": 3}]).to_csv(
+        threshold_path, index=False
+    )
+    base = _audit_model("model-a", ())
+    model = replace(
+        base,
+        metrics={
+            **base.metrics,
+            "target_before_stop_calibration_governance_schema": ("tbs_calibration_governance_v1"),
+            "target_before_stop_calibration_method": "sigmoid",
+            "target_before_stop_calibration_manifest_hash": "calibration-manifest-a",
+            "target_before_stop_calibrator_artifact_hash": "calibrator-artifact-a",
+            "target_before_stop_calibration_selection_reason": (
+                "lowest_mean_chronological_fold_brier"
+            ),
+            "target_before_stop_calibration_one_standard_error_boundary": 0.214,
+            "target_before_stop_calibration_candidate_results_json": json.dumps(
+                [
+                    {"method": "identity", "mean_brier_score": 0.22},
+                    {"method": "sigmoid", "mean_brier_score": 0.21},
+                    {"method": "isotonic", "mean_brier_score": 0.215},
+                ]
+            ),
+            "target_before_stop_calibration_fold_results_json": json.dumps(
+                [
+                    {
+                        "method": "sigmoid",
+                        "fold_id": 1,
+                        "status": "evaluable",
+                        "brier_score": 0.21,
+                    }
+                ]
+            ),
+            "target_before_stop_step_support_json": json.dumps(
+                [
+                    {
+                        "step_id": 1,
+                        "calibrated_probability": 0.44,
+                        "step_support": 12,
+                    }
+                ]
+            ),
+            "target_before_stop_calibration_audit_probability_path": str(probability_path),
+            "target_before_stop_calibration_threshold_utility_path": str(threshold_path),
+        },
+    )
+    db = ProjectPaths(tmp_path).engine_db
+    register_model(db, model)
+
+    audit = build_model_audit(tmp_path, model_id="model-a")
+    paths = export_model_audit(audit, tmp_path / "reports" / "model_audit")
+    path_names = {path.name for path in paths}
+
+    assert {
+        "calibration_method_comparison.csv",
+        "calibration_fold_metrics.csv",
+        "calibration_probability_audit.parquet",
+        "isotonic_step_support.csv",
+        "calibration_threshold_utility.csv",
+        "calibration_governance.json",
+    } <= path_names
+    comparison = pd.read_csv(
+        tmp_path / "reports" / "model_audit" / "calibration_method_comparison.csv"
+    )
+    probability_audit = pd.read_parquet(
+        tmp_path / "reports" / "model_audit" / "calibration_probability_audit.parquet"
+    )
+    governance = json.loads(
+        (tmp_path / "reports" / "model_audit" / "calibration_governance.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert set(comparison["method"]) == {"identity", "sigmoid", "isotonic"}
+    assert probability_audit["raw_classifier_probability"].iloc[0] == pytest.approx(0.42)
+    assert probability_audit["selected_calibrated_probability"].iloc[0] == pytest.approx(0.44)
+    assert governance[0]["selected_method"] == "sigmoid"
 
 
 def test_missing_canonical_gate_results_block_promotion() -> None:
