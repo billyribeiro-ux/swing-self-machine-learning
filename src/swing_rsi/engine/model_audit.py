@@ -118,6 +118,8 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "calibration_end": model.validation_end,
             "holdout_start": model.holdout_start,
             "holdout_end": model.holdout_end,
+            "holdout_status": metrics.get("holdout_status"),
+            "holdout_status_reason": metrics.get("holdout_status_reason"),
             "holdout_samples": metrics.get("holdout_samples"),
             "selected_samples": metrics.get("selected_holdout_samples"),
             "selected_rate": metrics.get("selected_observation_rate"),

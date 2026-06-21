@@ -169,9 +169,12 @@ Champion promotion requires:
 
 1. The model is a candidate/challenger in the registry.
 2. Persisted canonical mandatory gates exist.
-3. Every mandatory quality gate passes.
-4. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
-5. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
+3. The model holdout status is explicitly `FINAL_HOLDOUT`.
+4. Every mandatory quality gate passes.
+5. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
+6. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
+
+Models labeled `DEVELOPMENT_HOLDOUT` or missing holdout-status metadata are promotion-ineligible even if their other gates pass. The manual promotion path checks the persisted holdout status before changing registry state.
 
 Existing champion models for the same task, direction, and horizon are retired with a recorded reason.
 

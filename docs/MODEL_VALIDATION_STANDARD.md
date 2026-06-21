@@ -182,3 +182,5 @@ Only explicit promotion can create a champion. Discovery never silently replaces
 Legacy RSI reports may still use older research labels, but the autonomous registry uses the states above.
 
 Promotion eligibility is computed only from persisted canonical gate results. Missing mandatory gates, failed mandatory gates, mandatory `NOT_CONFIGURED`, and mandatory `NOT_APPLICABLE` block promotion.
+
+Promotion also requires an explicit `FINAL_HOLDOUT` status. A repeatedly inspected development holdout must be labeled `DEVELOPMENT_HOLDOUT` and is never sufficient for champion promotion, threshold optimization, or final performance claims. Missing holdout-status metadata is treated as not final.

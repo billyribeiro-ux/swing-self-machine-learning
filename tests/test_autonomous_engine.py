@@ -17,7 +17,13 @@ from swing_rsi.engine.forward import (
     create_pending_events_from_snapshot,
     list_forward_events,
 )
-from swing_rsi.engine.gates import GATE_VALUE_NOT_AVAILABLE, make_gate, promotion_eligibility
+from swing_rsi.engine.gates import (
+    FINAL_HOLDOUT_PROMOTION_GATE_ID,
+    FINAL_HOLDOUT_STATUS,
+    GATE_VALUE_NOT_AVAILABLE,
+    make_gate,
+    promotion_eligibility,
+)
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
 from swing_rsi.engine.models import (
     TARGET_BEFORE_STOP_HEAD,
@@ -197,6 +203,21 @@ def test_chronological_split_purges_overlapping_label_windows() -> None:
 
 
 def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> RegisteredModel:
+    final_holdout_gate = make_gate(
+        gate_id=FINAL_HOLDOUT_PROMOTION_GATE_ID,
+        gate_name="Final Holdout Required For Promotion",
+        category="research integrity",
+        scope="model",
+        metric_name="holdout_status",
+        threshold=FINAL_HOLDOUT_STATUS,
+        comparator="equals",
+        actual_value=FINAL_HOLDOUT_STATUS,
+        status="PASS",
+        mandatory=True,
+        evidence_source="test",
+        reason="Synthetic registry fixture uses a final holdout.",
+        configuration_hash_value="test",
+    )
     return RegisteredModel(
         model_id=model_id,
         task="swing_direction_probability",
@@ -214,9 +235,13 @@ def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> Registered
         feature_manifest_hash="f",
         raw_manifest_hashes=(),
         hyperparameters={},
-        metrics={"holdout_mean_return_lcb_90": 0.01},
+        metrics={
+            "holdout_mean_return_lcb_90": 0.01,
+            "holdout_status": FINAL_HOLDOUT_STATUS,
+        },
         calibration_metrics={"holdout_brier": 0.2},
-        quality_gates={"gate": True},
+        quality_gates={final_holdout_gate.gate_id: True},
+        gate_results=(final_holdout_gate,),
         artifact_path="artifact.joblib",
         code_commit_hash=None,
         created_at_utc=datetime.now(UTC).isoformat(),

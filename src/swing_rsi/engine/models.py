@@ -42,6 +42,9 @@ from swing_rsi.engine.feature_screen import (
 )
 from swing_rsi.engine.features import numeric_feature_columns, reject_label_columns
 from swing_rsi.engine.gates import (
+    DEVELOPMENT_HOLDOUT_STATUS,
+    FINAL_HOLDOUT_PROMOTION_GATE_ID,
+    FINAL_HOLDOUT_STATUS,
     GATE_VALUE_NOT_AVAILABLE,
     GATE_VALUE_POSITIVE_INFINITY,
     GateResult,
@@ -1054,6 +1057,7 @@ def _build_gate_results(
     period_concentration = _float_metric(metrics, "exceptional_period_concentration_top")
     prediction_ood = int(metrics.get("prediction_sanity_ood_total") or 0)
     selected_rate = float(metrics.get("selected_observation_rate") or 0.0)
+    holdout_status = str(metrics.get("holdout_status") or GATE_VALUE_NOT_AVAILABLE)
     symbol_concentration_status: GateStatus = (
         "NOT_APPLICABLE"
         if not math.isfinite(symbol_concentration)
@@ -1099,6 +1103,24 @@ def _build_gate_results(
         threshold=TEMPORAL_FOLD_STABILITY_THRESHOLD,
     )
 
+    add(
+        FINAL_HOLDOUT_PROMOTION_GATE_ID,
+        "Final Holdout Required For Promotion",
+        "research integrity",
+        "model",
+        "holdout_status",
+        FINAL_HOLDOUT_STATUS,
+        "equals",
+        holdout_status,
+        _status_from_bool(holdout_status == FINAL_HOLDOUT_STATUS),
+        True,
+        "Model has a final holdout and may be considered for promotion."
+        if holdout_status == FINAL_HOLDOUT_STATUS
+        else (
+            f"Model holdout status is {holdout_status}; only {FINAL_HOLDOUT_STATUS} "
+            "models can be promoted."
+        ),
+    )
     add(
         "minimum_training_samples",
         "Minimum Training Samples",
@@ -2141,6 +2163,11 @@ def _train_family(
         "training_samples": len(train),
         "calibration_samples": len(calibration),
         "holdout_samples": len(holdout),
+        "holdout_status": DEVELOPMENT_HOLDOUT_STATUS,
+        "holdout_status_reason": (
+            "This chronological holdout has been repeatedly inspected during engineering "
+            "diagnosis and is not a pristine final validation holdout."
+        ),
         "selected_holdout_samples": len(selected_returns),
         "raw_data_first_date": _date_label(pd.Timestamp(full_frame["Date"].min())),
         "feature_warmup_first_date": _date_label(pd.Timestamp(full_frame["Date"].min())),

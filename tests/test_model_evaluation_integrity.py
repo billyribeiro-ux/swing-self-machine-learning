@@ -18,6 +18,9 @@ import swing_rsi.engine.scanner as scanner_module
 import swing_rsi.engine.selection as selection_module
 from swing_rsi.config import ProjectPaths
 from swing_rsi.engine.gates import (
+    DEVELOPMENT_HOLDOUT_STATUS,
+    FINAL_HOLDOUT_PROMOTION_GATE_ID,
+    FINAL_HOLDOUT_STATUS,
     GATE_VALUE_NOT_APPLICABLE,
     GATE_VALUE_NOT_AVAILABLE,
     compare_gate_values,
@@ -518,6 +521,8 @@ def _base_gate_metrics(**overrides: object) -> dict[str, object]:
     metrics: dict[str, object] = {
         "training_samples": 300,
         "holdout_samples": 100,
+        "holdout_status": FINAL_HOLDOUT_STATUS,
+        "holdout_status_reason": "Synthetic unit-test fixture uses a final holdout.",
         "selected_holdout_samples": 10,
         "holdout_mean_return_lcb_90": 0.01,
         "holdout_profit_factor": 1.2,
@@ -615,6 +620,10 @@ def _temporal_evidence_gate(gates: tuple[Any, ...]) -> Any:
 
 def _temporal_threshold_gate(gates: tuple[Any, ...]) -> Any:
     return next(gate for gate in gates if gate.gate_id == "temporal_fold_stability_min_050")
+
+
+def _final_holdout_gate(gates: tuple[Any, ...]) -> Any:
+    return next(gate for gate in gates if gate.gate_id == FINAL_HOLDOUT_PROMOTION_GATE_ID)
 
 
 def test_profit_factor_gains_without_losses_is_positive_infinity_and_passes() -> None:
@@ -1568,6 +1577,8 @@ def _audit_model(model_id: str, gates: tuple[Any, ...]) -> RegisteredModel:
             "research_start": "2016-06-20",
             "research_end": "2026-06-18",
             "holdout_samples": 100,
+            "holdout_status": FINAL_HOLDOUT_STATUS,
+            "holdout_status_reason": "Synthetic audit fixture uses a final holdout.",
             "selected_holdout_samples": 10,
             "selected_observation_rate": 0.1,
             "holdout_mean_net_return": 0.01,
@@ -1725,6 +1736,75 @@ def test_missing_canonical_gate_results_block_promotion() -> None:
 
     assert eligibility.eligible is False
     assert "missing" in eligibility.blocked_reasons[0]
+
+
+def test_development_holdout_status_blocks_promotion_eligibility() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(holdout_status=DEVELOPMENT_HOLDOUT_STATUS),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    eligibility = promotion_eligibility(gates)
+
+    assert _final_holdout_gate(gates).status == "FAIL"
+    assert _final_holdout_gate(gates).actual_value == DEVELOPMENT_HOLDOUT_STATUS
+    assert eligibility.eligible is False
+    assert any(
+        reason.startswith(FINAL_HOLDOUT_PROMOTION_GATE_ID) for reason in eligibility.blocked_reasons
+    )
+
+
+def test_missing_final_holdout_gate_blocks_promotion_eligibility() -> None:
+    gate = make_gate(
+        gate_id="minimum_training_samples",
+        gate_name="Minimum Training Samples",
+        category="data sufficiency",
+        scope="prediction",
+        metric_name="training_samples",
+        threshold=200,
+        comparator=">=",
+        actual_value=300,
+        status="PASS",
+        mandatory=True,
+        evidence_source="test",
+        reason="Training sample count meets configured minimum.",
+        configuration_hash_value="test",
+    )
+    eligibility = promotion_eligibility((gate,))
+
+    assert eligibility.eligible is False
+    assert any(
+        reason.startswith(FINAL_HOLDOUT_PROMOTION_GATE_ID) for reason in eligibility.blocked_reasons
+    )
+
+
+def test_promote_model_rejects_development_holdout_even_when_gates_pass(
+    tmp_path: Path,
+) -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    assert promotion_eligibility(gates).eligible is True
+    model = _audit_model("model-dev-holdout", gates)
+    model = replace(
+        model,
+        metrics={
+            **model.metrics,
+            "holdout_status": DEVELOPMENT_HOLDOUT_STATUS,
+            "holdout_status_reason": "Inspected during engineering diagnosis.",
+        },
+    )
+    db = ProjectPaths(tmp_path).engine_db
+    register_model(db, model)
+
+    with pytest.raises(ValueError, match="holdout status blocks promotion"):
+        promote_model(db, "model-dev-holdout")
 
 
 def test_prediction_ood_flags_use_training_only_bounds() -> None:

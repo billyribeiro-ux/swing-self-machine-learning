@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added an explicit final-holdout promotion guard: new discovery artifacts persist `DEVELOPMENT_HOLDOUT`, canonical gates require `FINAL_HOLDOUT`, missing holdout-status metadata blocks eligibility, and manual promotion refuses non-final holdout models before mutating registry state.
 - Added Target-Before-Stop Calibration Governance V1: target-before-stop heads now evaluate identity, sigmoid, and isotonic calibrators on chronological calibration-only folds and select with a precommitted one-standard-error rule before refitting the chosen calibrator on the full calibration slice.
 - Persisted target-before-stop calibration governance metadata, calibration/audit artifact paths, method-comparison and fold diagnostics, plateau/step-support summaries, calibration manifest hashes, raw/calibrated probability audit exports, and development-holdout diagnostic labels.
 - Updated scanner target-before-stop handling to use the frozen head-specific calibrator, reject new-schema artifacts missing calibration governance metadata, and include calibration method/manifest hashes in scanner cache identity.
