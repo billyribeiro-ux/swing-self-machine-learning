@@ -18,6 +18,7 @@ from swing_rsi.engine.forward import (
 )
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
 from swing_rsi.engine.models import BaseRateClassifier, ModelBundle, model_plugins, predict_bundle
+from swing_rsi.engine.ood import PREDICTION_OOD_GOVERNANCE_VERSION
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import RegisteredModel, promote_model, register_model
 from swing_rsi.engine.scanner import ScannerConfig, latest_common_session, run_scanner
@@ -272,15 +273,79 @@ def test_drift_report_flags_shift_without_mutating_models() -> None:
     }
 
 
+def _ood_metrics(
+    *,
+    return_low: float = -0.10,
+    return_high: float = 0.10,
+    return_severity_limit: float = 0.10,
+) -> dict[str, object]:
+    metrics: dict[str, object] = {
+        "prediction_ood_governance_version": PREDICTION_OOD_GOVERNANCE_VERSION,
+        "prediction_unit_contract": "decimal_return",
+        "prediction_values_finite": True,
+        "prediction_probability_contract_valid": True,
+        "prediction_head_bound_mapping_valid": True,
+        "prediction_bounds_training_only": True,
+        "prediction_path_metric_sign_valid": True,
+        "classification_prediction_values_finite": True,
+        "classification_probability_contract_valid": True,
+        "classification_prediction_nonfinite_count": 0,
+        "classification_probability_out_of_range_count": 0,
+    }
+    head_bounds = {
+        "return": (return_low, return_high, return_severity_limit),
+        "mfe": (0.0, 0.20, 0.10),
+        "mae": (-0.20, 0.0, 0.10),
+    }
+    for head, (low, high, severity_limit) in head_bounds.items():
+        metrics.update(
+            {
+                f"{head}_prediction_ood_governance_version": PREDICTION_OOD_GOVERNANCE_VERSION,
+                f"{head}_prediction_unit_contract": "decimal_return",
+                f"{head}_prediction_bound_low_train_q01": low,
+                f"{head}_prediction_bound_high_train_q99": high,
+                f"{head}_prediction_bound_robust_range_train_q01_q99": high - low,
+                f"{head}_ood_bound_provenance": "training_targets_only",
+                f"{head}_ood_bound_head": head,
+                f"{head}_ood_bound_direction": "bull",
+                f"{head}_ood_bound_horizon": 10,
+                f"{head}_prediction_head_bound_mapping_valid": True,
+                f"{head}_prediction_bounds_training_only": True,
+                f"{head}_prediction_values_finite": True,
+                f"{head}_prediction_path_metric_sign_valid": True,
+                f"{head}_calibration_ood_rate": 0.0,
+                f"{head}_calibration_ood_rate_limit": 0.02,
+                f"{head}_calibration_ood_q99_severity": 0.0,
+                f"{head}_ood_severity_q99_limit": severity_limit,
+                f"{head}_holdout_ood_rate": 0.0,
+                f"{head}_holdout_ood_q99_severity": 0.0,
+                f"{head}_holdout_ood_max_severity": 0.0,
+                f"{head}_holdout_prediction_nonfinite_count": 0,
+            }
+        )
+    return metrics
+
+
 def _policy_metrics(
     policy: SelectionPolicy | None = None,
     *,
     policy_hash: str = "policy-hash",
     generation: str = "generation-a",
     artifact_hash: str = "artifact-a",
+    include_ood: bool = True,
+    return_high: float = 0.10,
+    return_severity_limit: float = 0.10,
 ) -> dict[str, object]:
     policy = policy or SelectionPolicy()
     return {
+        **(
+            _ood_metrics(
+                return_high=return_high,
+                return_severity_limit=return_severity_limit,
+            )
+            if include_ood
+            else {}
+        ),
         "selection_policy_json": json.dumps(asdict(policy), sort_keys=True),
         "selection_policy_configuration_hash": policy_hash,
         "generation": generation,
@@ -296,9 +361,12 @@ def _bundle(
     expected_return: float = 0.02,
     policy: SelectionPolicy | None = None,
     include_policy: bool = True,
+    include_ood: bool = True,
     policy_hash: str = "policy-hash",
     generation: str = "generation-a",
     artifact_hash: str = "artifact-a",
+    return_high: float = 0.10,
+    return_severity_limit: float = 0.10,
 ) -> ModelBundle:
     training = pd.DataFrame({"f1": [0.0, 1.0, 2.0], "dollar_volume": [10_000_000.0] * 3})
     labels = pd.DataFrame(
@@ -339,9 +407,16 @@ def _bundle(
                 policy_hash=policy_hash,
                 generation=generation,
                 artifact_hash=artifact_hash,
+                include_ood=include_ood,
+                return_high=return_high,
+                return_severity_limit=return_severity_limit,
             )
             if include_policy
-            else {}
+            else (
+                _ood_metrics(return_high=return_high, return_severity_limit=return_severity_limit)
+                if include_ood
+                else {}
+            )
         ),
         calibration_metrics={},
     )
@@ -564,6 +639,60 @@ def test_scanner_rejects_missing_persisted_selection_policy(tmp_path: Path) -> N
     assert snapshot.rows.iloc[0]["exclusion_reason"] == "persisted_selection_policy_missing"
 
 
+def test_scanner_rejects_missing_ood_metadata_for_actionable_model(tmp_path: Path) -> None:
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(_bundle(include_ood=False),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "prediction_ood_metadata_missing" in row["exclusion_reason"]
+
+
+def test_scanner_retains_permitted_ood_warning_without_clipping(tmp_path: Path) -> None:
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(_bundle(expected_return=0.02, return_high=0.01, return_severity_limit=0.20),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(expected_return_threshold=0.001),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "ACTIONABLE_PAPER_CANDIDATE"
+    assert bool(row["ood_warning"]) is True
+    assert row["ood_affected_heads"] == "return"
+    assert row["expected_return"] == pytest.approx(0.02)
+    assert row["expected_return_raw"] == pytest.approx(0.02)
+    assert row["expected_return_ood_severity"] > 0.0
+    assert row["expected_return_ood_severity"] <= row["expected_return_ood_severity_limit"]
+
+
+def test_scanner_rejects_ood_severity_above_frozen_limit(tmp_path: Path) -> None:
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(_bundle(expected_return=0.20, return_high=0.01, return_severity_limit=0.10),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "catastrophic_prediction_extrapolation" in row["exclusion_reason"]
+
+
 def test_scanner_caps_are_order_independent_for_equal_utility_rows(tmp_path: Path) -> None:
     policy = SelectionPolicy(per_date_limit=2, top_n_limit=None)
     feature_panel = pd.DataFrame(
@@ -758,6 +887,18 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    ood_metadata = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                policy=SelectionPolicy(per_date_limit=2),
+                return_severity_limit=0.20,
+            ),
+        ),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -768,9 +909,10 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 generation.scan_id,
                 feature_manifest.scan_id,
                 universe.scan_id,
+                ood_metadata.scan_id,
             }
         )
-        == 6
+        == 7
     )
 
 
@@ -931,6 +1073,36 @@ def test_scanner_legacy_or_mismatched_cached_metadata_is_not_reused(
     }
     assert mismatched_policy.created_at_utc != "existing"
 
+    with engine_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM scanner_snapshots WHERE scan_id = ?",
+            (mismatched_policy.scan_id,),
+        ).fetchone()
+        metadata = json.loads(row["metadata_json"])
+        metadata["model_ood_governance_metadata_hash"] = "mismatched"
+        connection.execute(
+            "UPDATE scanner_snapshots SET metadata_json = ? WHERE scan_id = ?",
+            (json.dumps(metadata, sort_keys=True), mismatched_policy.scan_id),
+        )
+
+    mismatched_ood = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    assert mismatched_ood.scan_id not in {
+        baseline.scan_id,
+        rerun.scan_id,
+        mismatched_config.scan_id,
+        mismatched_policy.scan_id,
+    }
+    assert mismatched_ood.created_at_utc != "existing"
+
 
 def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -> None:
     snapshot = run_scanner(
@@ -954,16 +1126,22 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 2
+    assert metadata["scanner_identity_schema_version"] == 3
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
     assert metadata["effective_policy_bundle_hash"]
+    assert metadata["model_ood_governance_metadata_json"]
+    assert metadata["model_ood_governance_metadata_hash"]
     assert metadata["persisted_model_policy_hashes"] == {"model-a": "policy-hash"}
     identity = metadata["canonical_scan_execution_identity"]
+    assert identity["prediction_ood_governance_schema_version"] == PREDICTION_OOD_GOVERNANCE_VERSION
     assert identity["feature_manifest_hash"] == "features-a"
     assert identity["model_generation_ids"] == {"model-a": "generation-a"}
     assert identity["model_artifact_hashes"] == {"model-a": "artifact-hash-a"}
+    assert identity["model_ood_governance_metadata"]["model-a"]["governance_schema_version"] == (
+        PREDICTION_OOD_GOVERNANCE_VERSION
+    )
     assert identity["effective_selection_policies"]["model-a"]["expected_return_threshold"] == 0.001
     assert identity["raw_scanner_config"]["minimum_dollar_volume"] == 5_000_000.0
 

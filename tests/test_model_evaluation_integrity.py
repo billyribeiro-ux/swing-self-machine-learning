@@ -25,6 +25,14 @@ from swing_rsi.engine.models import (
     predict_bundle,
     selection_policy_from_config,
 )
+from swing_rsi.engine.ood import (
+    PREDICTION_OOD_GOVERNANCE_VERSION,
+    ood_rate_limit,
+    probability_contract_metrics,
+    regression_head_ood_metrics,
+    severity_q99_limit,
+    wilson_upper_99,
+)
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import RegisteredModel, list_models, promote_model, register_model
 from swing_rsi.engine.selection import (
@@ -258,6 +266,239 @@ def test_bearish_label_units_and_sign_conventions_are_decimal_returns() -> None:
     assert value["label_bear_mae_3"] <= 0
 
 
+def test_prediction_ood_v2_allows_single_ordinary_exceedance() -> None:
+    train_target = pd.Series(np.linspace(-0.10, 0.10, 1_000))
+    calibration_prediction = pd.Series(np.linspace(-0.02, 0.02, 500))
+    holdout_prediction = pd.Series([0.101, *([0.0] * 199)])
+    head_metrics = regression_head_ood_metrics(
+        name="return",
+        direction="bull",
+        horizon=10,
+        train_target=train_target,
+        calibration_target=train_target.tail(500),
+        holdout_target=train_target.tail(200).reset_index(drop=True),
+        calibration_prediction=calibration_prediction,
+        holdout_prediction=holdout_prediction,
+    )
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(**head_metrics, prediction_sanity_ood_total=1),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    old_gate = next(
+        result
+        for result in gates
+        if result.gate_id == "legacy_prediction_out_of_distribution_absent_deprecated"
+    )
+    rate_gate = next(
+        result for result in gates if result.gate_id == "return_holdout_ood_rate_acceptable"
+    )
+    severity_gate = next(
+        result for result in gates if result.gate_id == "return_holdout_ood_q99_severity_acceptable"
+    )
+
+    assert head_metrics["return_prediction_ood_count"] == 1
+    assert old_gate.mandatory is False
+    assert old_gate.status == "NOT_APPLICABLE"
+    assert rate_gate.status == "PASS"
+    assert severity_gate.status == "PASS"
+
+
+def test_prediction_ood_hard_integrity_gates_fail() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            prediction_unit_contract="percent_return",
+            classification_prediction_values_finite=False,
+            classification_probability_contract_valid=False,
+            classification_prediction_nonfinite_count=1,
+            classification_probability_out_of_range_count=1,
+            return_prediction_unit_contract="percent_return",
+            return_prediction_values_finite=False,
+            return_prediction_head_bound_mapping_valid=False,
+            return_prediction_bounds_training_only=False,
+            return_prediction_path_metric_sign_valid=False,
+            return_holdout_prediction_nonfinite_count=1,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    statuses = {gate.gate_id: gate.status for gate in gates}
+
+    assert statuses["classification_prediction_values_finite"] == "FAIL"
+    assert statuses["classification_prediction_probability_contract_valid"] == "FAIL"
+    assert statuses["classification_prediction_unit_contract_valid"] == "FAIL"
+    assert statuses["return_prediction_values_finite"] == "FAIL"
+    assert statuses["return_prediction_unit_contract_valid"] == "FAIL"
+    assert statuses["return_prediction_head_bound_mapping_valid"] == "FAIL"
+    assert statuses["return_prediction_bounds_training_only"] == "FAIL"
+    assert statuses["return_prediction_path_metric_sign_valid"] == "FAIL"
+
+
+def test_prediction_ood_bounds_and_limits_are_training_and_calibration_only() -> None:
+    train = pd.Series(np.linspace(-0.10, 0.10, 1_000))
+    calibration_prediction = pd.Series(np.linspace(-0.02, 0.02, 500))
+    baseline = regression_head_ood_metrics(
+        name="return",
+        direction="bull",
+        horizon=10,
+        train_target=train,
+        calibration_target=train.tail(500),
+        holdout_target=pd.Series(np.linspace(-0.05, 0.05, 200)),
+        calibration_prediction=calibration_prediction,
+        holdout_prediction=pd.Series(np.linspace(-0.05, 0.05, 200)),
+    )
+    mutated_holdout = regression_head_ood_metrics(
+        name="return",
+        direction="bull",
+        horizon=10,
+        train_target=train,
+        calibration_target=train.tail(500),
+        holdout_target=pd.Series(np.linspace(-5.0, 5.0, 200)),
+        calibration_prediction=calibration_prediction,
+        holdout_prediction=pd.Series(np.linspace(-5.0, 5.0, 200)),
+    )
+
+    assert mutated_holdout["return_prediction_bound_low_train_q01"] == pytest.approx(
+        baseline["return_prediction_bound_low_train_q01"]
+    )
+    assert mutated_holdout["return_prediction_bound_high_train_q99"] == pytest.approx(
+        baseline["return_prediction_bound_high_train_q99"]
+    )
+    assert mutated_holdout["return_calibration_ood_rate_limit"] == pytest.approx(
+        baseline["return_calibration_ood_rate_limit"]
+    )
+    assert mutated_holdout["return_ood_severity_q99_limit"] == pytest.approx(
+        baseline["return_ood_severity_q99_limit"]
+    )
+
+
+def test_prediction_ood_head_direction_sign_and_probability_contracts() -> None:
+    return_metrics = regression_head_ood_metrics(
+        name="return",
+        direction="bear",
+        horizon=10,
+        train_target=pd.Series(np.linspace(-0.05, 0.08, 100)),
+        calibration_target=pd.Series(np.linspace(-0.03, 0.06, 50)),
+        holdout_target=pd.Series(np.linspace(-0.02, 0.04, 50)),
+        calibration_prediction=pd.Series(np.linspace(-0.02, 0.04, 50)),
+        holdout_prediction=pd.Series(np.linspace(-0.02, 0.04, 50)),
+    )
+    mfe_metrics = regression_head_ood_metrics(
+        name="mfe",
+        direction="bear",
+        horizon=10,
+        train_target=pd.Series(np.linspace(0.00, 0.30, 100)),
+        calibration_target=pd.Series(np.linspace(0.00, 0.20, 50)),
+        holdout_target=pd.Series(np.linspace(0.00, 0.20, 50)),
+        calibration_prediction=pd.Series(np.linspace(0.00, 0.20, 50)),
+        holdout_prediction=pd.Series([-0.01, 0.02, 0.03]),
+    )
+    mae_metrics = regression_head_ood_metrics(
+        name="mae",
+        direction="bull",
+        horizon=10,
+        train_target=pd.Series(np.linspace(-0.30, 0.00, 100)),
+        calibration_target=pd.Series(np.linspace(-0.20, 0.00, 50)),
+        holdout_target=pd.Series(np.linspace(-0.20, 0.00, 50)),
+        calibration_prediction=pd.Series(np.linspace(-0.20, 0.00, 50)),
+        holdout_prediction=pd.Series([0.01, -0.02, -0.03]),
+    )
+    probability_metrics = probability_contract_metrics(
+        calibration_probability=np.array([0.0, 0.5, 1.0]),
+        holdout_probability=np.array([1.2]),
+        target_calibration_probability=np.array([0.2]),
+        target_holdout_probability=np.array([np.nan]),
+    )
+
+    assert return_metrics["return_ood_bound_direction"] == "bear"
+    assert return_metrics["return_ood_bound_horizon"] == 10
+    assert return_metrics["return_prediction_bound_high_train_q99"] != pytest.approx(
+        mfe_metrics["mfe_prediction_bound_high_train_q99"]
+    )
+    assert mfe_metrics["mfe_prediction_path_metric_sign_valid"] is False
+    assert mae_metrics["mae_prediction_path_metric_sign_valid"] is False
+    assert probability_metrics["classification_probability_contract_valid"] is False
+    assert probability_metrics["classification_prediction_nonfinite_count"] == 1
+    assert probability_metrics["classification_probability_out_of_range_count"] == 1
+
+
+def test_prediction_ood_rate_and_severity_limit_formulas() -> None:
+    assert wilson_upper_99(0, 100) == pytest.approx(0.05134, rel=1e-3)
+    assert ood_rate_limit(0, 1_000) == pytest.approx(0.02)
+    assert ood_rate_limit(100, 100) == pytest.approx(0.05)
+    assert severity_q99_limit(0.0) == pytest.approx(0.10)
+    assert severity_q99_limit(1.0) == pytest.approx(0.50)
+
+
+def test_prediction_ood_rate_and_severity_gates_are_inclusive() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            return_calibration_ood_rate=0.05,
+            return_calibration_ood_rate_limit=0.02,
+            return_holdout_ood_rate=0.02,
+            return_ood_severity_q99_limit=0.10,
+            return_holdout_ood_q99_severity=0.10,
+            return_holdout_ood_max_severity=1.0,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    statuses = {gate.gate_id: gate.status for gate in gates}
+
+    assert statuses["return_calibration_ood_rate_acceptable"] == "PASS"
+    assert statuses["return_holdout_ood_rate_acceptable"] == "PASS"
+    assert statuses["return_holdout_ood_q99_severity_acceptable"] == "PASS"
+    assert statuses["return_catastrophic_prediction_extrapolation_absent"] == "PASS"
+
+    failing = _build_gate_results(
+        metrics=_base_gate_metrics(
+            return_holdout_ood_rate=0.021,
+            return_ood_severity_q99_limit=0.10,
+            return_holdout_ood_q99_severity=0.101,
+            return_holdout_ood_max_severity=1.01,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    failing_statuses = {gate.gate_id: gate.status for gate in failing}
+
+    assert failing_statuses["return_holdout_ood_rate_acceptable"] == "FAIL"
+    assert failing_statuses["return_holdout_ood_q99_severity_acceptable"] == "FAIL"
+    assert failing_statuses["return_catastrophic_prediction_extrapolation_absent"] == "FAIL"
+
+
+def test_legacy_prediction_ood_gate_blocks_promotion_without_v2_schema() -> None:
+    legacy_gate = make_gate(
+        gate_id="prediction_out_of_distribution_absent",
+        gate_name="No OOD Predictions",
+        category="prediction sanity",
+        scope="prediction",
+        metric_name="prediction_sanity_ood_total",
+        threshold=0,
+        comparator="==",
+        actual_value=0,
+        status="PASS",
+        mandatory=True,
+        evidence_source="legacy",
+        reason="Legacy gate passed.",
+        configuration_hash_value="legacy",
+    )
+
+    eligibility = promotion_eligibility((legacy_gate,))
+
+    assert eligibility.eligible is False
+    assert "legacy OOD artifacts lack V2" in " | ".join(eligibility.blocked_reasons)
+
+
 def _base_gate_metrics(**overrides: object) -> dict[str, object]:
     metrics: dict[str, object] = {
         "training_samples": 300,
@@ -275,9 +516,38 @@ def _base_gate_metrics(**overrides: object) -> dict[str, object]:
         "exceptional_period_concentration_top": 0.3,
         "rsi_control_columns_available": True,
         "prediction_unit_contract": "decimal_return",
+        "prediction_ood_governance_version": PREDICTION_OOD_GOVERNANCE_VERSION,
+        "prediction_values_finite": True,
+        "prediction_probability_contract_valid": True,
+        "prediction_head_bound_mapping_valid": True,
+        "prediction_bounds_training_only": True,
+        "prediction_path_metric_sign_valid": True,
+        "classification_prediction_values_finite": True,
+        "classification_probability_contract_valid": True,
+        "classification_prediction_nonfinite_count": 0,
+        "classification_probability_out_of_range_count": 0,
         "prediction_sanity_ood_total": 0,
         "selected_observation_rate": 0.1,
     }
+    for head in ("return", "mfe", "mae"):
+        metrics.update(
+            {
+                f"{head}_prediction_ood_governance_version": PREDICTION_OOD_GOVERNANCE_VERSION,
+                f"{head}_prediction_unit_contract": "decimal_return",
+                f"{head}_prediction_head_bound_mapping_valid": True,
+                f"{head}_prediction_bounds_training_only": True,
+                f"{head}_prediction_values_finite": True,
+                f"{head}_prediction_path_metric_sign_valid": True,
+                f"{head}_ood_bound_provenance": "training_targets_only",
+                f"{head}_calibration_ood_rate": 0.0,
+                f"{head}_calibration_ood_rate_limit": 0.02,
+                f"{head}_holdout_ood_rate": 0.0,
+                f"{head}_ood_severity_q99_limit": 0.10,
+                f"{head}_holdout_ood_q99_severity": 0.0,
+                f"{head}_holdout_ood_max_severity": 0.0,
+                f"{head}_holdout_prediction_nonfinite_count": 0,
+            }
+        )
     metrics.update(overrides)
     return metrics
 
