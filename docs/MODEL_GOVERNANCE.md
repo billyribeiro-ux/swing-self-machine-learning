@@ -75,13 +75,15 @@ The selected row sequence drawdown is retained only as `selected_row_sequence_dr
 
 ## Prospective Final Holdout
 
-Prospective final holdout is tracked in SQLite through `final_holdout_runs` and `final_holdout_models`. A run records schema version, creation timestamp, creation Git commit, baseline market date, first eligible future signal date, universe snapshot, feature manifest hash, generation ID, enrolled model IDs, frozen artifact hashes, model states, development-gate eligibility, selection-policy hashes, target-before-stop calibration hashes, OOD-governance hashes, scanner identity version, execution-policy hash, direction, horizon, status, and latest processed market date.
+Prospective final holdout is tracked in SQLite through `final_holdout_runs` and `final_holdout_models`. A run records schema version, creation timestamp, creation Git commit, baseline market date, first eligible future signal date, universe snapshot, feature manifest hash, generation ID, enrolled model IDs, frozen artifact hashes, model states, development-gate eligibility, selection-policy hashes, target-before-stop calibration hashes, OOD-governance hashes, scanner identity version, execution-policy hash, sample-policy version, sample-policy hash, normalized frozen sample policy JSON, direction, horizon, status, and latest processed market date.
 
-Run statuses are `CREATED`, `COLLECTING`, `READY_FOR_EVALUATION`, `EVALUATED_PASS`, `EVALUATED_FAIL`, `INVALIDATED`, and `CLOSED`. Runs are never overwritten. Research-only enrollment is allowed only for diagnostics and cannot satisfy promotion eligibility.
+Run statuses are `CREATED`, `COLLECTING`, `EARLY_DIAGNOSTIC_AVAILABLE`, `READY_FOR_EVALUATION`, `EVALUATED_PASS`, `EVALUATED_FAIL`, `INVALIDATED`, and `CLOSED`. Runs are never overwritten. Research-only enrollment is allowed only for diagnostics and cannot satisfy promotion eligibility.
 
 The no-backfill rule is strict. A run may process only sessions after its baseline date that have local ingestion provenance showing they became available after run creation. Missing or stale provenance appends a `FINAL_HOLDOUT_DATA_INVALIDATED` event with reason `FINAL_HOLDOUT_BACKFILL_BLOCKED` and prevents the session from becoming final evidence.
 
-Final-holdout evaluation persists canonical gates for provenance validity, sample-threshold configuration, final-holdout status, and research-only blocking when applicable. Final-holdout sample thresholds that are not governed remain `NOT_CONFIGURED` and block promotion.
+Final-holdout sample governance uses `prospective_final_holdout_sample_v1`: 100 matured outcomes, 60 distinct signal dates, 126 completed market sessions, 4 calendar months, 20 positive target-before-stop outcomes, 20 negative target-before-stop outcomes, valid prospective provenance, zero backfill, zero unresolved data-integrity events, and unchanged frozen artifacts/governance hashes. Early diagnostic display is allowed at 30 matured outcomes and 20 distinct signal dates, but it cannot set `FINAL_HOLDOUT` or permit promotion.
+
+Final-holdout evaluation persists canonical gates for `final_holdout_policy_configured`, `final_holdout_matured_outcomes_min_100`, `final_holdout_distinct_signal_dates_min_60`, `final_holdout_observation_sessions_min_126`, `final_holdout_calendar_months_min_4`, `final_holdout_positive_class_min_20`, `final_holdout_negative_class_min_20`, `final_holdout_provenance_valid`, `final_holdout_backfill_absent`, `final_holdout_data_integrity_valid`, `final_holdout_frozen_artifacts_unchanged`, and `final_holdout_sample_sufficient`, plus the final-holdout status gate and research-only blocking when applicable.
 
 ## Prediction OOD Governance
 

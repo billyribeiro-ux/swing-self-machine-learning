@@ -76,3 +76,5 @@ Final-holdout updates run the scanner in `SHADOW_FINAL_HOLDOUT` mode against onl
 Shadow final-holdout scanner rows are evidence collection records. They are labeled "Prospective shadow validation. Not a live trade recommendation." Dashboard displays must keep them separate from ordinary live scanner recommendations and historical development-holdout metrics.
 
 If an enrolled artifact, selection-policy hash, target-before-stop calibration hash, or OOD-governance hash changes after enrollment, the run is invalidated instead of silently scanning with drifted model identity.
+
+Prospective final-holdout dashboards display sample-governance progress as counts against the frozen policy thresholds. `EARLY_DIAGNOSTIC_AVAILABLE`, `READY_FOR_EVALUATION`, evaluated status, and promotion eligibility must remain visually separate from ordinary scanner actionability.

@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-21 — Prospective final-holdout sample sufficiency is precommitted
+
+Decision: Prospective final-holdout runs now freeze sample governance policy `prospective_final_holdout_sample_v1` at run creation. A model becomes ready for final-holdout evaluation only after 100 matured outcomes, 60 distinct signal dates, 126 completed market sessions, 4 calendar months, 20 positive and 20 negative target-before-stop outcomes, valid provenance for every included prediction, zero backfilled predictions, zero unresolved data-integrity events, and unchanged frozen artifacts/governance hashes. Early diagnostics are non-promotable and require 30 matured outcomes and 20 signal dates.
+
+Reason: The sample requirement must be known before prospective outcomes exist. Freezing the policy into each run prevents post-outcome threshold edits, keeps existing runs immutable when global policy changes, and preserves the distinction between evidence status, performance gates, and manual promotion.
+
 ## 2026-06-21 — Final holdout is prospective shadow validation only
 
 Decision: The only valid `FINAL_HOLDOUT` evidence is prospective. A model must be frozen and enrolled with artifact hash, feature manifest, selection policy, target-before-stop calibrator, OOD metadata, universe, scanner identity, execution policy, and baseline market date before final-holdout collection starts. No signal with `as_of_date <= baseline_market_date` may enter the run, and later sessions require local ingestion provenance showing they arrived after run creation. Final-holdout events reuse the append-only paper-forward lifecycle under `SHADOW_FINAL_HOLDOUT` and are not live trade recommendations. Evaluation may mark evidence as `FINAL_HOLDOUT`, but mandatory final-holdout gates still decide pass/fail and `NOT_CONFIGURED` sample thresholds block promotion.

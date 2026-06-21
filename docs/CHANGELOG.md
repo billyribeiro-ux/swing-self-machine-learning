@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Prospective Final-Holdout Sample Governance V1: frozen run-level sample policy `prospective_final_holdout_sample_v1`, canonical sufficiency/provenance/integrity gates, non-promotable early diagnostics, diagnostic-only evaluation, status progress counts, promotion checks for sample gates, and regression coverage for threshold boundaries and bypass prevention.
 - Added Prospective Final Holdout and Shadow Paper Forward Validation V1: final-holdout run/model registry tables, strict no-backfill enforcement with ingestion provenance, `SHADOW_FINAL_HOLDOUT` event lifecycle, final-holdout init/update/status/evaluate CLI commands, promotion evidence checks, and a dashboard section labeled as prospective shadow validation rather than a live recommendation.
 - Added an explicit final-holdout promotion guard: new discovery artifacts persist `DEVELOPMENT_HOLDOUT`, canonical gates require `FINAL_HOLDOUT`, missing holdout-status metadata blocks eligibility, and manual promotion refuses non-final holdout models before mutating registry state.
 - Added Target-Before-Stop Calibration Governance V1: target-before-stop heads now evaluate identity, sigmoid, and isotonic calibrators on chronological calibration-only folds and select with a precommitted one-standard-error rule before refitting the chosen calibrator on the full calibration slice.

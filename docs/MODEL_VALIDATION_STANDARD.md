@@ -31,7 +31,11 @@ A valid final holdout now means:
 7. Final-holdout events never enter training, calibration, feature screening, threshold choice, policy selection, or retraining.
 8. Evaluation uses only events belonging to the prospective run and persists canonical final-holdout gates.
 
-If final-holdout sample thresholds are not configured, the corresponding mandatory gate is `NOT_CONFIGURED` and blocks promotion. `FINAL_HOLDOUT` means evidence came from a valid prospective period; it does not mean the model passed.
+Prospective final-holdout sample sufficiency is governed by `prospective_final_holdout_sample_v1` and frozen into each run at creation. Per enrolled model, direction, and horizon, evaluation requires at least 100 matured outcomes, 60 distinct signal dates, 126 completed market sessions from the first eligible future signal date, 4 calendar months of matured outcomes, at least 20 positive and 20 negative target-before-stop outcomes, valid provenance for every included prediction, zero backfilled predictions, zero unresolved data-integrity events, and unchanged artifact, feature-manifest, selection-policy, calibrator, OOD-governance, execution-policy, and code hashes.
+
+`EARLY_DIAGNOSTIC_AVAILABLE` is non-promotable and requires at least 30 matured outcomes and 20 distinct signal dates. Diagnostic-only evaluation before full sample sufficiency cannot set `holdout_status = FINAL_HOLDOUT`, cannot satisfy promotion gates, and cannot select thresholds or mutate model artifacts.
+
+`FINAL_HOLDOUT` means evidence came from a valid prospective period and evaluation completed. It does not mean the model passed its performance gates.
 
 ## Evaluation layers
 
