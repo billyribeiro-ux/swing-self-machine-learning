@@ -18,7 +18,16 @@ from swing_rsi.engine.forward import (
 )
 from swing_rsi.engine.gates import GATE_VALUE_NOT_AVAILABLE, make_gate, promotion_eligibility
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
-from swing_rsi.engine.models import BaseRateClassifier, ModelBundle, model_plugins, predict_bundle
+from swing_rsi.engine.models import (
+    TARGET_BEFORE_STOP_HEAD,
+    BaseRateClassifier,
+    DiscoveryConfig,
+    ModelBundle,
+    discover_models,
+    load_model_bundle,
+    model_plugins,
+    predict_bundle,
+)
 from swing_rsi.engine.ood import PREDICTION_OOD_GOVERNANCE_VERSION
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.registry import RegisteredModel, promote_model, register_model
@@ -36,6 +45,16 @@ class ConstantClassifier:
 
     def predict_proba(self, frame: pd.DataFrame) -> np.ndarray:
         return np.tile(np.array([[1.0 - self.probability, self.probability]]), (len(frame), 1))
+
+
+class FeatureEchoClassifier:
+    def __init__(self, feature: str) -> None:
+        self.feature = feature
+
+    def predict_proba(self, frame: pd.DataFrame) -> np.ndarray:
+        positive = frame[self.feature].to_numpy(dtype=float)
+        positive = np.clip(positive, 0.0, 1.0)
+        return np.column_stack([1.0 - positive, positive])
 
 
 class IdentityCalibrator:
@@ -233,6 +252,83 @@ def test_model_plugins_define_classifier_and_regressor_interfaces() -> None:
         assert plugin.regressor_factory(42) is not None
 
 
+def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path: Path) -> None:
+    dates = pd.date_range("2019-01-02", periods=80, freq="B")
+    rows: list[dict[str, object]] = []
+    for symbol_offset, symbol in enumerate(("AAPL", "MSFT")):
+        for position, date_value in enumerate(dates):
+            tbs_target = int((position + symbol_offset) % 4 == 0)
+            positive_target = int((position + symbol_offset) % 5 < 3)
+            row: dict[str, object] = {
+                "Date": date_value,
+                "symbol": symbol,
+                "role": "stock",
+                "sector": "technology",
+                "sector_proxy": "XLK",
+                "market_regime_label": "mixed",
+                "Open": 100.0 + position,
+                "High": 101.0 + position,
+                "Low": 99.0 + position,
+                "Close": 100.5 + position,
+                "Volume": 1_000_000.0,
+                "dollar_volume": 100_000_000.0,
+                "primary_signal": float(positive_target),
+                "late_market_relative_signal": float(tbs_target),
+                "label_bull_positive_return_10": float(positive_target),
+                "label_bull_forward_return_10": 0.02 if positive_target else -0.01,
+                "label_bull_mfe_10": 0.04,
+                "label_bull_mae_10": -0.02,
+                "label_bull_target_before_stop_10": float(tbs_target),
+                "label_end_date_10": date_value + pd.offsets.BDay(10),
+            }
+            for index in range(70):
+                row[f"noise_{index:02d}"] = float(np.sin(position + index))
+            rows.append(row)
+    frame = pd.DataFrame(rows)
+    family_map = {column: "returns_momentum" for column in frame.columns}
+    family_map["late_market_relative_signal"] = "market_relative"
+    family_map["primary_signal"] = "returns_momentum"
+
+    result = discover_models(
+        frame,
+        db_path=tmp_path / "engine.sqlite3",
+        artifact_dir=tmp_path / "models",
+        universe_snapshot_id="u",
+        feature_manifest_hash="features",
+        feature_family_by_column=family_map,
+        config=DiscoveryConfig(
+            horizons=(10,),
+            directions=("bull",),
+            minimum_training_samples=20,
+            minimum_holdout_samples=10,
+            max_features=20,
+            mutual_information_top_k=8,
+            research_start=None,
+            random_seed=7,
+        ),
+        code_root=tmp_path,
+    )
+    learned = next(
+        model for model in result.registered_models if model.family == "logistic_regression"
+    )
+    bundle = load_model_bundle(learned.artifact_path)
+
+    bundle_head_target = bundle.head_feature_columns[TARGET_BEFORE_STOP_HEAD]
+    assert bundle_head_target
+    assert "late_market_relative_signal" in bundle_head_target
+    assert learned.metrics["target_before_stop_selected_feature_count"] == len(bundle_head_target)
+    assert learned.metrics["target_before_stop_screening_target"] == (
+        "label_bull_target_before_stop_10"
+    )
+    assert (
+        learned.metrics["target_before_stop_screening_manifest_hash"]
+        == (bundle.head_feature_manifests[TARGET_BEFORE_STOP_HEAD])
+    )
+    assert "late_market_relative_signal" in str(
+        learned.metrics["target_before_stop_feature_screen_audit_json"]
+    )
+
+
 def test_drift_report_flags_shift_without_mutating_models() -> None:
     reference = pd.DataFrame(
         {
@@ -368,8 +464,18 @@ def _bundle(
     artifact_hash: str = "artifact-a",
     return_high: float = 0.10,
     return_severity_limit: float = 0.10,
+    target_feature_columns: tuple[str, ...] | None = None,
+    target_classifier: object | None = None,
+    target_manifest: str = "target-before-stop-manifest",
 ) -> ModelBundle:
-    training = pd.DataFrame({"f1": [0.0, 1.0, 2.0], "dollar_volume": [10_000_000.0] * 3})
+    target_feature_columns = target_feature_columns or ("f1", "dollar_volume")
+    training = pd.DataFrame(
+        {
+            "f1": [0.0, 1.0, 2.0],
+            "target_signal": [0.25, 0.75, 0.90],
+            "dollar_volume": [10_000_000.0] * 3,
+        }
+    )
     labels = pd.DataFrame(
         {
             "Date": pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"]),
@@ -392,7 +498,7 @@ def _bundle(
         },
         classifier=ConstantClassifier(probability),
         calibrator=IdentityCalibrator(),
-        target_before_stop_model=ConstantClassifier(target_probability),
+        target_before_stop_model=target_classifier or ConstantClassifier(target_probability),
         target_before_stop_calibrator=IdentityCalibrator(),
         return_model=ConstantRegressor(expected_return),
         mfe_model=ConstantRegressor(0.04),
@@ -420,6 +526,28 @@ def _bundle(
             )
         ),
         calibration_metrics={},
+        head_feature_columns={
+            "primary_positive_return": ("f1", "dollar_volume"),
+            TARGET_BEFORE_STOP_HEAD: target_feature_columns,
+            "expected_return": ("f1", "dollar_volume"),
+            "mfe": ("f1", "dollar_volume"),
+            "mae": ("f1", "dollar_volume"),
+        },
+        head_feature_manifests={
+            "primary_positive_return": "primary-manifest",
+            TARGET_BEFORE_STOP_HEAD: target_manifest,
+            "expected_return": "return-manifest",
+            "mfe": "mfe-manifest",
+            "mae": "mae-manifest",
+        },
+        feature_screen_metadata={
+            TARGET_BEFORE_STOP_HEAD: {
+                "screening_schema_version": "target_specific_feature_screen_v1",
+                "selected_feature_count": len(target_feature_columns),
+                "selected_feature_families": {"test": len(target_feature_columns)},
+                "selected_feature_manifest_hash": target_manifest,
+            }
+        },
     )
 
 
@@ -429,6 +557,7 @@ def _scanner_feature_panel(symbols: tuple[str, ...] = ("AAPL",)) -> pd.DataFrame
             "Date": pd.to_datetime(["2024-01-02"] * len(symbols)),
             "symbol": list(symbols),
             "f1": [2.0] * len(symbols),
+            "target_signal": [0.75] * len(symbols),
             "dollar_volume": [20_000_000.0] * len(symbols),
             "sector": ["technology"] * len(symbols),
             "market_regime_label": ["mixed"] * len(symbols),
@@ -450,6 +579,49 @@ def test_predict_bundle_outputs_separate_target_before_stop_probability() -> Non
 
     assert "target_before_stop_probability" in prediction.columns
     assert prediction["target_before_stop_probability"].iloc[0] == pytest.approx(0.75)
+
+
+def test_target_before_stop_classifier_receives_own_selected_columns() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "target_signal": [0.82],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        target_feature_columns=("target_signal",),
+        target_classifier=FeatureEchoClassifier("target_signal"),
+    )
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["calibrated_probability"] == pytest.approx(0.75)
+    assert prediction["target_before_stop_probability"] == pytest.approx(0.82)
+    assert prediction["target_before_stop_feature_manifest_hash"] == "target-before-stop-manifest"
+
+
+def test_predict_bundle_flags_missing_target_before_stop_features_without_substitution() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        target_feature_columns=("target_signal",),
+        target_classifier=FeatureEchoClassifier("target_signal"),
+    )
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert bool(prediction["target_before_stop_required_feature_missing"]) is True
+    assert prediction["target_before_stop_missing_features"] == "target_signal"
+    assert pd.isna(prediction["target_before_stop_probability"])
 
 
 def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_path: Path) -> None:
@@ -489,6 +661,40 @@ def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_pa
     assert "label_bull_target_before_stop_10" in first.rows["historical_analogs"].iloc[0]
     with engine_connection(tmp_path / "engine.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scanner_candidates").fetchone()[0] == 2
+
+
+def test_scanner_rejects_missing_target_before_stop_features_explicitly(tmp_path: Path) -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "dollar_volume": [20_000_000.0],
+            "sector": ["technology"],
+            "market_regime_label": ["mixed"],
+        }
+    )
+
+    snapshot = run_scanner(
+        feature_panel,
+        bundles=(
+            _bundle(
+                target_feature_columns=("target_signal",),
+                target_classifier=FeatureEchoClassifier("target_signal"),
+            ),
+        ),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "target_before_stop_required_feature_missing" in row["exclusion_reason"]
+    assert bool(row["target_before_stop_required_feature_missing"]) is True
 
 
 def test_scanner_rejects_promoted_model_without_gate_eligibility(tmp_path: Path) -> None:
@@ -968,6 +1174,18 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    target_manifest = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                policy=SelectionPolicy(per_date_limit=2),
+                target_manifest="target-before-stop-manifest-b",
+            ),
+        ),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -979,9 +1197,10 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 feature_manifest.scan_id,
                 universe.scan_id,
                 ood_metadata.scan_id,
+                target_manifest.scan_id,
             }
         )
-        == 7
+        == 8
     )
 
 
@@ -1195,13 +1414,15 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 3
+    assert metadata["scanner_identity_schema_version"] == 4
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
     assert metadata["effective_policy_bundle_hash"]
     assert metadata["model_ood_governance_metadata_json"]
     assert metadata["model_ood_governance_metadata_hash"]
+    assert metadata["target_before_stop_feature_metadata_json"]
+    assert metadata["target_before_stop_feature_metadata_hash"]
     assert metadata["persisted_model_policy_hashes"] == {"model-a": "policy-hash"}
     identity = metadata["canonical_scan_execution_identity"]
     assert identity["prediction_ood_governance_schema_version"] == PREDICTION_OOD_GOVERNANCE_VERSION
@@ -1210,6 +1431,12 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     assert identity["model_artifact_hashes"] == {"model-a": "artifact-hash-a"}
     assert identity["model_ood_governance_metadata"]["model-a"]["governance_schema_version"] == (
         PREDICTION_OOD_GOVERNANCE_VERSION
+    )
+    assert (
+        identity["target_before_stop_feature_metadata"]["model-a"][
+            "target_before_stop_feature_manifest_hash"
+        ]
+        == "target-before-stop-manifest"
     )
     assert identity["effective_selection_policies"]["model-a"]["expected_return_threshold"] == 0.001
     assert identity["raw_scanner_config"]["minimum_dollar_volume"] == 5_000_000.0
