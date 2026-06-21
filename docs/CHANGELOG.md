@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Implemented `prediction_ood_governance_v2`: deprecated the old zero-exceedance OOD promotion rule for new artifacts, added per-head calibration-derived OOD rate/severity gates, hard prediction-integrity gates, training-only OOD bounds, scanner OOD warnings/rejections, OOD-aware scanner identity metadata, and model-audit export fields.
+- Added regression coverage for Wilson OOD limits, head-to-bound mapping, decimal-return contracts, MFE/MAE sign contracts, training-only OOD bounds, live scanner OOD warnings/rejections, legacy OOD promotion blocking, and scanner identity changes from OOD metadata.
+- Created one fresh local model generation under V2 governance (`2026-06-21T04:34:49.525939+00:00`) and a review-only scanner snapshot (`6e4ce9ccada34a0962d2bc20`); no model was promoted and no paper-forward update was run.
 - Configured and persisted the autonomous candidate-selection policy, including expected-return, target-before-stop, liquidity, per-date, global top-N, and selected-rate controls.
 - Changed live scanner actionability to require persisted canonical gate eligibility in addition to `CHAMPION` or `CHALLENGER` registry state.
 - Date-batched portfolio candidate replay so same-date predictions are processed as one chronological decision set before daily-equity drawdown is calculated.
