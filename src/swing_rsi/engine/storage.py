@@ -75,6 +75,44 @@ CREATE TABLE IF NOT EXISTS forward_events (
     payload_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS final_holdout_runs (
+    run_id TEXT PRIMARY KEY,
+    schema_version TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    creation_git_commit TEXT,
+    baseline_market_date TEXT NOT NULL,
+    first_eligible_future_signal_date TEXT,
+    universe_snapshot_id TEXT NOT NULL,
+    feature_manifest_hash TEXT NOT NULL,
+    generation_id TEXT NOT NULL,
+    model_ids_json TEXT NOT NULL,
+    scanner_identity_version INTEGER NOT NULL,
+    execution_policy_hash TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    direction TEXT NOT NULL,
+    status TEXT NOT NULL,
+    invalidation_reason TEXT,
+    latest_processed_market_date TEXT,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS final_holdout_models (
+    run_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    generation_id TEXT NOT NULL,
+    artifact_path TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    model_state_at_enrollment TEXT NOT NULL,
+    development_gate_eligible INTEGER NOT NULL,
+    research_only INTEGER NOT NULL DEFAULT 0,
+    selection_policy_hash TEXT NOT NULL,
+    calibration_governance_hash TEXT NOT NULL,
+    ood_governance_hash TEXT NOT NULL,
+    enrollment_blockers_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    PRIMARY KEY (run_id, model_id)
+);
+
 CREATE TABLE IF NOT EXISTS daily_cycles (
     market_date TEXT PRIMARY KEY,
     started_at_utc TEXT NOT NULL,

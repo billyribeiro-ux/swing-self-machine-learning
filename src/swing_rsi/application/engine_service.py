@@ -17,6 +17,16 @@ from swing_rsi.engine.features import (
     feature_family_map_for_columns,
     numeric_feature_columns,
 )
+from swing_rsi.engine.final_holdout import (
+    FinalHoldoutEnrollmentReport,
+    FinalHoldoutEvaluationResult,
+    FinalHoldoutUpdateResult,
+    evaluate_final_holdout_run,
+    final_holdout_events,
+    final_holdout_status_frame,
+    initialize_final_holdout_run,
+    process_final_holdout_update,
+)
 from swing_rsi.engine.forward import (
     advance_forward_positions,
     create_pending_events_from_snapshot,
@@ -435,6 +445,44 @@ def run_forward_update(
 
 def forward_events(root: str | Path) -> pd.DataFrame:
     return list_forward_events(ProjectPaths(Path(root)).engine_db)
+
+
+def initialize_final_holdout(
+    root: str | Path,
+    *,
+    generation: str = "latest",
+    research_only: bool = False,
+) -> FinalHoldoutEnrollmentReport:
+    return initialize_final_holdout_run(
+        root,
+        generation=generation,
+        research_only=research_only,
+    )
+
+
+def update_final_holdout(root: str | Path) -> FinalHoldoutUpdateResult:
+    return process_final_holdout_update(root)
+
+
+def final_holdout_status(root: str | Path) -> pd.DataFrame:
+    return final_holdout_status_frame(root)
+
+
+def final_holdout_event_history(root: str | Path, run_id: str | None = None) -> pd.DataFrame:
+    return final_holdout_events(ProjectPaths(Path(root)).engine_db, run_id)
+
+
+def evaluate_final_holdout(
+    root: str | Path,
+    *,
+    run_id: str,
+    minimum_matured_outcomes: int | None = None,
+) -> FinalHoldoutEvaluationResult:
+    return evaluate_final_holdout_run(
+        root,
+        run_id=run_id,
+        minimum_matured_outcomes=minimum_matured_outcomes,
+    )
 
 
 def latest_daily_cycle_summary(root: str | Path) -> dict[str, object]:
