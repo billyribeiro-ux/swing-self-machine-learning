@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -7,12 +9,21 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+from dashboard.sections.model_registry import compact_registry_rows
+from dashboard.ui.formatting import decimal, display_frame
 
 import swing_rsi.engine.models as model_module
 import swing_rsi.engine.scanner as scanner_module
 import swing_rsi.engine.selection as selection_module
 from swing_rsi.config import ProjectPaths
-from swing_rsi.engine.gates import make_gate, promotion_eligibility
+from swing_rsi.engine.gates import (
+    GATE_VALUE_NOT_AVAILABLE,
+    compare_gate_values,
+    gate_result_integrity_warning,
+    make_gate,
+    profit_factor_result,
+    promotion_eligibility,
+)
 from swing_rsi.engine.labels import LabelConfig, build_symbol_labels
 from swing_rsi.engine.model_audit import build_model_audit, export_model_audit
 from swing_rsi.engine.models import (
@@ -39,6 +50,7 @@ from swing_rsi.engine.selection import (
     CANONICAL_CANDIDATE_TIE_BREAKING_RULE,
     evaluate_candidate_policy,
 )
+from swing_rsi.engine.storage import dumps, engine_connection
 
 
 class ConstantClassifier:
@@ -506,6 +518,10 @@ def _base_gate_metrics(**overrides: object) -> dict[str, object]:
         "selected_holdout_samples": 10,
         "holdout_mean_return_lcb_90": 0.01,
         "holdout_profit_factor": 1.2,
+        "holdout_profit_factor_evidence_status": "AVAILABLE",
+        "holdout_positive_return_sum": 0.06,
+        "holdout_negative_return_abs_sum": 0.05,
+        "holdout_zero_return_count": 0,
         "portfolio_max_drawdown": -0.10,
         "feature_stability_mean_abs_z": 0.5,
         "symbol_concentration_top": 0.2,
@@ -550,6 +566,405 @@ def _base_gate_metrics(**overrides: object) -> dict[str, object]:
         )
     metrics.update(overrides)
     return metrics
+
+
+def _profit_gate(gates: tuple[Any, ...]) -> Any:
+    return next(gate for gate in gates if gate.gate_id == "profit_factor_min_090")
+
+
+def _symbol_concentration_gate(gates: tuple[Any, ...]) -> Any:
+    return next(gate for gate in gates if gate.gate_id == "symbol_concentration_max_050")
+
+
+def _sector_concentration_gate(gates: tuple[Any, ...]) -> Any:
+    return next(gate for gate in gates if gate.gate_id == "sector_concentration_max_080")
+
+
+def _exceptional_period_gate(gates: tuple[Any, ...]) -> Any:
+    return next(
+        gate for gate in gates if gate.gate_id == "exceptional_period_concentration_max_060"
+    )
+
+
+def test_profit_factor_gains_without_losses_is_positive_infinity_and_passes() -> None:
+    returns = pd.Series([0.01, 0.02])
+    count, gains, losses, zeros = model_module._profit_factor_components(returns)
+    result = profit_factor_result(
+        selected_count=count,
+        positive_return_sum=gains,
+        negative_return_abs_sum=losses,
+        zero_return_count=zeros,
+        naive_control=False,
+    )
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            selected_holdout_samples=count,
+            holdout_profit_factor=result.actual_value,
+            holdout_profit_factor_evidence_status=result.evidence_status,
+            holdout_positive_return_sum=gains,
+            holdout_negative_return_abs_sum=losses,
+            holdout_zero_return_count=zeros,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    gate = _profit_gate(gates)
+
+    assert result.actual_value == math.inf
+    assert compare_gate_values(result.actual_value, ">=", 0.9) is True
+    assert gate.status == "PASS"
+    assert gate.actual_value == math.inf
+    assert "gains and no losses" in gate.reason
+
+
+def test_profit_factor_with_gains_and_losses_compares_normally() -> None:
+    returns = pd.Series([0.03, -0.01, 0.02, -0.01])
+    count, gains, losses, zeros = model_module._profit_factor_components(returns)
+    result = profit_factor_result(
+        selected_count=count,
+        positive_return_sum=gains,
+        negative_return_abs_sum=losses,
+        zero_return_count=zeros,
+        naive_control=False,
+    )
+
+    assert result.actual_value == pytest.approx(2.5)
+    assert result.status == "PASS"
+
+
+def test_profit_factor_equal_to_minimum_passes_and_below_minimum_fails() -> None:
+    equal = profit_factor_result(
+        selected_count=2,
+        positive_return_sum=0.09,
+        negative_return_abs_sum=0.10,
+        zero_return_count=0,
+        naive_control=False,
+    )
+    below = profit_factor_result(
+        selected_count=2,
+        positive_return_sum=0.08,
+        negative_return_abs_sum=0.10,
+        zero_return_count=0,
+        naive_control=False,
+    )
+
+    assert equal.actual_value == pytest.approx(0.9)
+    assert equal.status == "PASS"
+    assert below.status == "FAIL"
+
+
+def test_profit_factor_zero_selected_learned_model_is_unavailable_and_fails() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            selected_holdout_samples=0,
+            holdout_profit_factor=GATE_VALUE_NOT_AVAILABLE,
+            holdout_profit_factor_evidence_status="UNAVAILABLE",
+            holdout_positive_return_sum=0.0,
+            holdout_negative_return_abs_sum=0.0,
+            holdout_zero_return_count=0,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    gate = _profit_gate(gates)
+
+    assert gate.actual_value == GATE_VALUE_NOT_AVAILABLE
+    assert gate.status == "FAIL"
+    assert "no selected observations" in gate.reason
+
+
+def test_profit_factor_zero_selected_naive_control_is_not_applicable() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            selected_holdout_samples=0,
+            holdout_profit_factor=GATE_VALUE_NOT_AVAILABLE,
+            holdout_profit_factor_evidence_status="NOT_APPLICABLE",
+            holdout_positive_return_sum=0.0,
+            holdout_negative_return_abs_sum=0.0,
+            holdout_zero_return_count=0,
+        ),
+        calibration_metrics={"brier_skill_score": 0.0, "holdout_brier": 0.25},
+        family="naive_base_rate",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    gate = _profit_gate(gates)
+
+    assert gate.actual_value == GATE_VALUE_NOT_AVAILABLE
+    assert gate.status == "NOT_APPLICABLE"
+    assert gate.mandatory is False
+    assert "naive control selected no rows" in gate.reason
+
+
+def test_profit_factor_all_zero_selected_returns_is_unavailable() -> None:
+    returns = pd.Series([0.0, 0.0, 0.0])
+    count, gains, losses, zeros = model_module._profit_factor_components(returns)
+    result = profit_factor_result(
+        selected_count=count,
+        positive_return_sum=gains,
+        negative_return_abs_sum=losses,
+        zero_return_count=zeros,
+        naive_control=False,
+    )
+
+    assert result.actual_value == GATE_VALUE_NOT_AVAILABLE
+    assert result.status == "FAIL"
+    assert "all selected returns were zero" in result.reason
+
+
+def test_nan_and_negative_infinity_do_not_pass_minimum_profit_factor_gate() -> None:
+    assert compare_gate_values(float("nan"), ">=", 0.9) is False
+    assert compare_gate_values(float("-inf"), ">=", 0.9) is False
+    assert compare_gate_values(float("inf"), ">=", 0.9) is True
+
+    nan_result = profit_factor_result(
+        selected_count=1,
+        positive_return_sum=float("nan"),
+        negative_return_abs_sum=0.0,
+        zero_return_count=0,
+        naive_control=False,
+    )
+    assert nan_result.status == "FAIL"
+    assert nan_result.actual_value == GATE_VALUE_NOT_AVAILABLE
+
+
+def test_concentration_reason_text_matches_status() -> None:
+    failed = _build_gate_results(
+        metrics=_base_gate_metrics(
+            symbol_concentration_top=0.8333,
+            sector_concentration_top=0.9,
+            exceptional_period_concentration_top=0.7,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    passed = _build_gate_results(
+        metrics=_base_gate_metrics(
+            symbol_concentration_top=0.42,
+            sector_concentration_top=0.70,
+            exceptional_period_concentration_top=0.55,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    assert _symbol_concentration_gate(failed).status == "FAIL"
+    assert "exceeds the maximum 50.00%" in _symbol_concentration_gate(failed).reason
+    assert _symbol_concentration_gate(passed).status == "PASS"
+    assert "is within the maximum 50.00%" in _symbol_concentration_gate(passed).reason
+    assert _sector_concentration_gate(failed).status == "FAIL"
+    assert "exceeds the maximum 80.00%" in _sector_concentration_gate(failed).reason
+    assert _sector_concentration_gate(passed).status == "PASS"
+    assert "is within the maximum 80.00%" in _sector_concentration_gate(passed).reason
+    assert _exceptional_period_gate(failed).status == "FAIL"
+    assert "exceeds the maximum 60.00%" in _exceptional_period_gate(failed).reason
+    assert _exceptional_period_gate(passed).status == "PASS"
+    assert "is within the maximum 60.00%" in _exceptional_period_gate(passed).reason
+
+
+def test_dashboard_display_distinguishes_infinity_from_unavailable() -> None:
+    frame = pd.DataFrame({"profit_factor": [math.inf, GATE_VALUE_NOT_AVAILABLE]})
+    display = display_frame(frame)
+    assert display["Profit Factor"].tolist() == ["∞", "Not available"]
+    assert decimal(math.inf) == "∞"
+    assert decimal(GATE_VALUE_NOT_AVAILABLE) == "Not available"
+
+    model = _audit_model(
+        "model-inf",
+        (
+            make_gate(
+                gate_id="minimum_training_samples",
+                gate_name="Minimum Training Samples",
+                category="data sufficiency",
+                scope="prediction",
+                metric_name="training_samples",
+                threshold=200,
+                comparator=">=",
+                actual_value=300,
+                status="PASS",
+                mandatory=True,
+                evidence_source="test",
+                reason="Training sample count meets configured minimum.",
+                configuration_hash_value="test",
+            ),
+        ),
+    )
+    model = RegisteredModel(
+        **{**model.__dict__, "metrics": {**model.metrics, "holdout_profit_factor": math.inf}}
+    )
+    assert compact_registry_rows([model]).iloc[0]["PF"] == "∞"
+
+
+def test_csv_and_json_exports_distinguish_infinity_from_unavailable(tmp_path: Path) -> None:
+    inf_gate = make_gate(
+        gate_id="profit_factor_min_090",
+        gate_name="Profit Factor Minimum",
+        category="selected-candidate quality",
+        scope="selected_candidates",
+        metric_name="holdout_profit_factor",
+        threshold=0.9,
+        comparator=">=",
+        actual_value=math.inf,
+        status="PASS",
+        mandatory=True,
+        evidence_source="test",
+        reason="Selected returns contain gains and no losses.",
+        configuration_hash_value="test",
+    )
+    unavailable_gate = make_gate(
+        gate_id="profit_factor_min_090_unavailable",
+        gate_name="Profit Factor Minimum",
+        category="selected-candidate quality",
+        scope="selected_candidates",
+        metric_name="holdout_profit_factor",
+        threshold=0.9,
+        comparator=">=",
+        actual_value=GATE_VALUE_NOT_AVAILABLE,
+        status="FAIL",
+        mandatory=True,
+        evidence_source="test",
+        reason="Profit factor is unavailable because no selected observations exist.",
+        configuration_hash_value="test",
+    )
+    db = ProjectPaths(tmp_path).engine_db
+    register_model(db, _audit_model("model-export", (inf_gate, unavailable_gate)))
+
+    audit = build_model_audit(tmp_path, model_id="model-export")
+    export_paths = export_model_audit(audit, tmp_path / "reports" / "model_audit")
+    csv_path = next(path for path in export_paths if path.name == "full_gate_audit.csv")
+    json_path = next(path for path in export_paths if path.name == "full_gate_audit.json")
+    csv_text = csv_path.read_text(encoding="utf-8")
+    json_rows = json.loads(json_path.read_text(encoding="utf-8"))
+
+    assert "Infinity" in csv_text
+    assert GATE_VALUE_NOT_AVAILABLE in csv_text
+    assert {row["actual_value"] for row in json_rows} == {"Infinity", GATE_VALUE_NOT_AVAILABLE}
+
+
+def test_promotion_eligibility_uses_corrected_profit_factor_gate_result() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            holdout_profit_factor=math.inf,
+            holdout_positive_return_sum=0.03,
+            holdout_negative_return_abs_sum=0.0,
+            holdout_zero_return_count=0,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    eligibility = promotion_eligibility(gates)
+
+    assert _profit_gate(gates).status == "PASS"
+    assert eligibility.eligible is True
+
+
+def test_existing_legacy_artifact_gate_row_remains_unchanged_but_warns(tmp_path: Path) -> None:
+    legacy_gate = make_gate(
+        gate_id="profit_factor_min_090",
+        gate_name="Profit Factor Minimum",
+        category="selected-candidate quality",
+        scope="selected_candidates",
+        metric_name="holdout_profit_factor",
+        threshold=0.9,
+        comparator=">=",
+        actual_value=math.inf,
+        status="FAIL",
+        mandatory=True,
+        evidence_source="legacy_model_evaluation",
+        reason="Selected-row profit factor fails configured minimum.",
+        configuration_hash_value="legacy",
+    )
+    db = ProjectPaths(tmp_path).engine_db
+    legacy_model = _audit_model("model-legacy", ())
+    legacy_payload = {
+        "gate_id": legacy_gate.gate_id,
+        "gate_name": legacy_gate.gate_name,
+        "category": legacy_gate.category,
+        "scope": legacy_gate.scope,
+        "metric_name": legacy_gate.metric_name,
+        "threshold": legacy_gate.threshold,
+        "comparator": legacy_gate.comparator,
+        "actual_value": legacy_gate.actual_value,
+        "status": legacy_gate.status,
+        "mandatory": legacy_gate.mandatory,
+        "evidence_source": legacy_gate.evidence_source,
+        "reason": legacy_gate.reason,
+        "evaluated_at_utc": legacy_gate.evaluated_at_utc,
+        "configuration_hash": legacy_gate.configuration_hash,
+    }
+    with engine_connection(db) as connection:
+        connection.execute(
+            """
+            INSERT INTO models (
+                model_id, task, horizon, direction, family, state, training_start, training_end,
+                validation_start, validation_end, holdout_start, holdout_end, universe_snapshot_id,
+                feature_manifest_hash, raw_manifest_hashes_json, hyperparameters_json, metrics_json,
+                calibration_metrics_json, quality_gates_json, gate_results_json, artifact_path,
+                code_commit_hash, created_at_utc, promoted_at_utc, retirement_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                legacy_model.model_id,
+                legacy_model.task,
+                legacy_model.horizon,
+                legacy_model.direction,
+                legacy_model.family,
+                legacy_model.state,
+                legacy_model.training_start,
+                legacy_model.training_end,
+                legacy_model.validation_start,
+                legacy_model.validation_end,
+                legacy_model.holdout_start,
+                legacy_model.holdout_end,
+                legacy_model.universe_snapshot_id,
+                legacy_model.feature_manifest_hash,
+                dumps(legacy_model.raw_manifest_hashes),
+                dumps(legacy_model.hyperparameters),
+                dumps(legacy_model.metrics),
+                dumps(legacy_model.calibration_metrics),
+                dumps(legacy_model.quality_gates),
+                dumps([legacy_payload]),
+                legacy_model.artifact_path,
+                legacy_model.code_commit_hash,
+                legacy_model.created_at_utc,
+                legacy_model.promoted_at_utc,
+                legacy_model.retirement_reason,
+            ),
+        )
+
+    loaded = list_models(db)[0]
+    audit = build_model_audit(tmp_path, model_id="model-legacy")
+
+    assert loaded.gate_results[0].status == "FAIL"
+    assert loaded.gate_results[0].actual_value == math.inf
+    assert gate_result_integrity_warning(loaded.gate_results[0])
+    assert "contradicts" in audit.gates.iloc[0]["evidence_integrity_warning"]
+
+
+def test_gate_evidence_tests_make_no_fmp_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_fmp(*_: object, **__: object) -> None:
+        raise AssertionError("gate evidence tests attempted an FMP call")
+
+    monkeypatch.setattr("swing_rsi.data.providers.fmp.download_fmp_daily", fail_fmp)
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    assert _profit_gate(gates).status == "PASS"
 
 
 def test_worse_than_naive_brier_fails_mandatory_predictive_gate() -> None:

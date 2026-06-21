@@ -28,12 +28,17 @@ from sklearn.preprocessing import StandardScaler
 
 from swing_rsi.engine.features import numeric_feature_columns, reject_label_columns
 from swing_rsi.engine.gates import (
+    GATE_VALUE_NOT_AVAILABLE,
+    GATE_VALUE_POSITIVE_INFINITY,
     GateResult,
     GateStatus,
+    compare_gate_values,
     configuration_hash,
     make_gate,
+    profit_factor_result,
     promotion_eligibility,
     quality_gate_bool_map,
+    threshold_reason,
 )
 from swing_rsi.engine.manifest import current_commit_hash
 from swing_rsi.engine.ood import (
@@ -354,10 +359,13 @@ def _positive_class_probability(model: Any, features: pd.DataFrame) -> np.ndarra
     return np.asarray(1.0 / (1.0 + np.exp(-scores)), dtype=float)
 
 
-def _profit_factor(returns: pd.Series) -> float:
-    gains = float(returns[returns > 0].sum())
-    losses = float(returns[returns < 0].sum())
-    return gains / abs(losses) if losses < 0 else math.inf
+def _profit_factor_components(returns: pd.Series) -> tuple[int, float, float, int]:
+    numeric = pd.to_numeric(returns, errors="coerce").dropna()
+    selected_count = len(numeric)
+    gains = float(numeric[numeric > 0.0].sum())
+    loss_abs = float(abs(numeric[numeric < 0.0].sum()))
+    zero_count = int((numeric == 0.0).sum())
+    return selected_count, gains, loss_abs, zero_count
 
 
 def _max_drawdown(returns: pd.Series) -> float:
@@ -821,7 +829,6 @@ def _build_gate_results(
     lcb = _float_metric(metrics, "holdout_mean_return_lcb_90")
     brier_skill = _float_metric(calibration_metrics, "brier_skill_score")
     holdout_brier = _float_metric(calibration_metrics, "holdout_brier")
-    profit_factor = _float_metric(metrics, "holdout_profit_factor")
     portfolio_drawdown = _float_metric(metrics, "portfolio_max_drawdown")
     feature_stability = _float_metric(metrics, "feature_stability_mean_abs_z")
     symbol_concentration = _float_metric(metrics, "symbol_concentration_top")
@@ -832,6 +839,29 @@ def _build_gate_results(
     period_concentration = _float_metric(metrics, "exceptional_period_concentration_top")
     prediction_ood = int(metrics.get("prediction_sanity_ood_total") or 0)
     selected_rate = float(metrics.get("selected_observation_rate") or 0.0)
+    symbol_concentration_status: GateStatus = (
+        "NOT_APPLICABLE"
+        if not math.isfinite(symbol_concentration)
+        else _status_from_bool(compare_gate_values(symbol_concentration, "<=", 0.50))
+    )
+    sector_concentration_status: GateStatus = (
+        "NOT_APPLICABLE"
+        if not math.isfinite(sector_concentration)
+        else _status_from_bool(compare_gate_values(sector_concentration, "<=", 0.80))
+    )
+    period_concentration_status: GateStatus = (
+        "NOT_APPLICABLE"
+        if not math.isfinite(period_concentration)
+        else _status_from_bool(compare_gate_values(period_concentration, "<=", 0.60))
+    )
+    profit_factor = profit_factor_result(
+        selected_count=selected_count,
+        positive_return_sum=_float_metric(metrics, "holdout_positive_return_sum"),
+        negative_return_abs_sum=_float_metric(metrics, "holdout_negative_return_abs_sum"),
+        zero_return_count=int(metrics.get("holdout_zero_return_count") or 0),
+        naive_control=family == "naive_base_rate",
+        threshold=0.90,
+    )
 
     add(
         "minimum_training_samples",
@@ -907,7 +937,7 @@ def _build_gate_results(
             False,
             "Naive control selected zero rows; trading metrics are not comparable.",
         )
-    else:
+    if family != "naive_base_rate" or selected_count > 0:
         add(
             "positive_expected_value_after_costs",
             "Positive Expected Value After Costs",
@@ -933,12 +963,24 @@ def _build_gate_results(
             "holdout_profit_factor",
             0.90,
             ">=",
-            profit_factor,
-            _status_from_bool(math.isfinite(profit_factor) and profit_factor >= 0.90),
-            True,
-            "Selected-row profit factor meets configured minimum."
-            if math.isfinite(profit_factor) and profit_factor >= 0.90
-            else "Selected-row profit factor fails configured minimum.",
+            profit_factor.actual_value,
+            profit_factor.status,
+            family != "naive_base_rate",
+            profit_factor.reason,
+        )
+    elif family == "naive_base_rate" and selected_count == 0:
+        add(
+            "profit_factor_min_090",
+            "Profit Factor Minimum",
+            "selected-candidate quality",
+            "selected_candidates",
+            "holdout_profit_factor",
+            0.90,
+            ">=",
+            profit_factor.actual_value,
+            profit_factor.status,
+            False,
+            profit_factor.reason,
         )
     add(
         "portfolio_drawdown_available",
@@ -994,9 +1036,17 @@ def _build_gate_results(
         0.50,
         "<=",
         symbol_concentration,
-        _status_from_bool(not math.isfinite(symbol_concentration) or symbol_concentration <= 0.50),
+        symbol_concentration_status,
         True,
-        "Symbol concentration is within cap or not applicable due no selected rows.",
+        threshold_reason(
+            metric_label="Symbol concentration",
+            actual_value=symbol_concentration,
+            comparator="<=",
+            threshold=0.50,
+            status=symbol_concentration_status,
+            unavailable_reason="Symbol concentration is unavailable because no rows were selected.",
+            percent=True,
+        ),
     )
     add(
         "sector_concentration_max_080",
@@ -1007,9 +1057,17 @@ def _build_gate_results(
         0.80,
         "<=",
         sector_concentration,
-        _status_from_bool(not math.isfinite(sector_concentration) or sector_concentration <= 0.80),
+        sector_concentration_status,
         True,
-        "Sector concentration is within cap or not applicable due no selected rows.",
+        threshold_reason(
+            metric_label="Sector concentration",
+            actual_value=sector_concentration,
+            comparator="<=",
+            threshold=0.80,
+            status=sector_concentration_status,
+            unavailable_reason="Sector concentration is unavailable because no rows were selected.",
+            percent=True,
+        ),
     )
     add(
         "transaction_cost_sensitivity_not_collapsed",
@@ -1084,9 +1142,19 @@ def _build_gate_results(
         0.60,
         "<=",
         period_concentration,
-        _status_from_bool(not math.isfinite(period_concentration) or period_concentration <= 0.60),
+        period_concentration_status,
         True,
-        "No single year dominates selected absolute return contribution.",
+        threshold_reason(
+            metric_label="Exceptional-period concentration",
+            actual_value=period_concentration,
+            comparator="<=",
+            threshold=0.60,
+            status=period_concentration_status,
+            unavailable_reason=(
+                "Exceptional-period concentration is unavailable because no rows were selected."
+            ),
+            percent=True,
+        ),
     )
     add(
         "comparison_controls_available",
@@ -1520,7 +1588,25 @@ def _train_family(
         lower_bound = mean_selected_return - (
             1.645 * float(selected_returns.std(ddof=1)) / math.sqrt(len(selected_returns))
         )
-    holdout_profit_factor = _profit_factor(selected_returns)
+    pf_selected_count, pf_gross_profit, pf_gross_loss_abs, pf_zero_count = (
+        _profit_factor_components(selected_returns)
+    )
+    profit_factor_evidence = profit_factor_result(
+        selected_count=pf_selected_count,
+        positive_return_sum=pf_gross_profit,
+        negative_return_abs_sum=pf_gross_loss_abs,
+        zero_return_count=pf_zero_count,
+        naive_control=family == "naive_base_rate",
+        threshold=0.90,
+    )
+    if profit_factor_evidence.evidence_status == "AVAILABLE":
+        holdout_profit_factor = (
+            GATE_VALUE_POSITIVE_INFINITY
+            if profit_factor_evidence.actual_value == math.inf
+            else profit_factor_evidence.actual_value
+        )
+    else:
+        holdout_profit_factor = GATE_VALUE_NOT_AVAILABLE
     selected_row_sequence_drawdown = _max_drawdown(selected_returns)
     double_cost_returns = selected[returns] - ((config.round_trip_cost_bps * 2.0) / 10_000.0)
     double_cost_lcb = (
@@ -1674,6 +1760,10 @@ def _train_family(
         else math.nan,
         "holdout_mean_return_lcb_90": lower_bound,
         "holdout_profit_factor": holdout_profit_factor,
+        "holdout_profit_factor_evidence_status": profit_factor_evidence.evidence_status,
+        "holdout_positive_return_sum": pf_gross_profit,
+        "holdout_negative_return_abs_sum": pf_gross_loss_abs,
+        "holdout_zero_return_count": pf_zero_count,
         "selected_row_sequence_drawdown": selected_row_sequence_drawdown,
         "holdout_max_drawdown": portfolio_max_drawdown,
         "portfolio_max_drawdown": portfolio_max_drawdown,

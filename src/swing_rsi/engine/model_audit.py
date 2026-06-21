@@ -8,7 +8,12 @@ from typing import Any
 import pandas as pd
 
 from swing_rsi.config import ProjectPaths
-from swing_rsi.engine.gates import gate_results_to_jsonable, promotion_eligibility
+from swing_rsi.engine.gates import (
+    gate_result_integrity_warning,
+    gate_results_to_jsonable,
+    machine_gate_value,
+    promotion_eligibility,
+)
 from swing_rsi.engine.registry import RegisteredModel, list_models
 
 
@@ -34,6 +39,10 @@ def _safe_json_records(value: object) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict)]
+
+
+def _machine_value(value: object) -> object:
+    return machine_gate_value(value)
 
 
 def _latest_generation(models: list[RegisteredModel]) -> tuple[str, tuple[RegisteredModel, ...]]:
@@ -106,7 +115,7 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "brier_skill_score": calibration.get("brier_skill_score"),
             "mean_selected_return": metrics.get("holdout_mean_net_return"),
             "lower_confidence_bound": metrics.get("holdout_mean_return_lcb_90"),
-            "profit_factor": metrics.get("holdout_profit_factor"),
+            "profit_factor": _machine_value(metrics.get("holdout_profit_factor")),
             "prediction_ood_governance_version": metrics.get("prediction_ood_governance_version"),
             "prediction_values_finite": metrics.get("prediction_values_finite"),
             "prediction_probability_contract_valid": metrics.get(
@@ -158,6 +167,7 @@ def _gate_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
                 "model_id": model.model_id,
                 "generation": model.created_at_utc,
                 **gate_results_to_jsonable((gate,))[0],
+                "evidence_integrity_warning": gate_result_integrity_warning(gate),
             }
             rows.append(row)
     return pd.DataFrame(rows)

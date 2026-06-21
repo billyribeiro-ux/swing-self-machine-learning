@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
 GateStatus = Literal["PASS", "FAIL", "NOT_APPLICABLE", "NOT_CONFIGURED"]
 type GateValue = str | float | int | bool | None
+EvidenceStatus = Literal["AVAILABLE", "UNAVAILABLE", "NOT_APPLICABLE"]
+
+GATE_VALUE_NOT_AVAILABLE = "NOT_AVAILABLE"
+GATE_VALUE_POSITIVE_INFINITY = "Infinity"
+GATE_VALUE_NEGATIVE_INFINITY = "-Infinity"
 
 
 @dataclass(frozen=True)
@@ -36,6 +42,19 @@ class PromotionEligibility:
     not_configured: int
     not_applicable: int
     blocked_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProfitFactorResult:
+    selected_count: int
+    gross_profit: float
+    gross_loss_abs: float
+    zero_return_count: int
+    naive_control: bool
+    actual_value: GateValue
+    evidence_status: EvidenceStatus
+    status: GateStatus
+    reason: str
 
 
 def configuration_hash(config: dict[str, object]) -> str:
@@ -78,8 +97,239 @@ def make_gate(
     )
 
 
+def _coerce_float(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def compare_gate_values(actual: object, comparator: str, threshold: object) -> bool:
+    actual_value = _coerce_float(actual)
+    threshold_value = _coerce_float(threshold)
+    if actual_value is None or threshold_value is None:
+        return False
+    if math.isnan(actual_value) or math.isnan(threshold_value):
+        return False
+    if math.isinf(threshold_value):
+        return False
+    if comparator == ">=":
+        return actual_value >= threshold_value or math.isclose(actual_value, threshold_value)
+    if comparator == ">":
+        return actual_value > threshold_value
+    if comparator == "<=":
+        return actual_value <= threshold_value or math.isclose(actual_value, threshold_value)
+    if comparator == "<":
+        return actual_value < threshold_value
+    if comparator == "==":
+        return actual_value == threshold_value
+    return False
+
+
+def _percent(value: float) -> str:
+    return f"{value:.2%}"
+
+
+def _profit_factor_value_label(value: float) -> str:
+    if math.isinf(value):
+        return "positive infinity" if value > 0.0 else "negative infinity"
+    return f"{value:.2f}"
+
+
+def profit_factor_result(
+    *,
+    selected_count: int,
+    positive_return_sum: float,
+    negative_return_abs_sum: float,
+    zero_return_count: int,
+    naive_control: bool,
+    threshold: float = 0.90,
+) -> ProfitFactorResult:
+    gross_profit = float(positive_return_sum)
+    gross_loss_abs = float(negative_return_abs_sum)
+    zeros = int(zero_return_count)
+    selected = int(selected_count)
+    if selected <= 0 and naive_control:
+        return ProfitFactorResult(
+            selected_count=selected,
+            gross_profit=gross_profit,
+            gross_loss_abs=gross_loss_abs,
+            zero_return_count=zeros,
+            naive_control=naive_control,
+            actual_value=GATE_VALUE_NOT_AVAILABLE,
+            evidence_status="NOT_APPLICABLE",
+            status="NOT_APPLICABLE",
+            reason=(
+                "Profit factor is not applicable because this naive control selected no rows; "
+                "trading-performance evidence is not comparable for the zero-selection control."
+            ),
+        )
+    if selected <= 0:
+        return ProfitFactorResult(
+            selected_count=selected,
+            gross_profit=gross_profit,
+            gross_loss_abs=gross_loss_abs,
+            zero_return_count=zeros,
+            naive_control=naive_control,
+            actual_value=GATE_VALUE_NOT_AVAILABLE,
+            evidence_status="UNAVAILABLE",
+            status="FAIL",
+            reason="Profit factor is unavailable because no selected observations exist.",
+        )
+    if (
+        not math.isfinite(gross_profit)
+        or not math.isfinite(gross_loss_abs)
+        or gross_profit < 0.0
+        or gross_loss_abs < 0.0
+    ):
+        return ProfitFactorResult(
+            selected_count=selected,
+            gross_profit=gross_profit,
+            gross_loss_abs=gross_loss_abs,
+            zero_return_count=zeros,
+            naive_control=naive_control,
+            actual_value=GATE_VALUE_NOT_AVAILABLE,
+            evidence_status="UNAVAILABLE",
+            status="FAIL",
+            reason="Profit factor is unavailable because selected return sums are invalid.",
+        )
+    if gross_profit == 0.0 and gross_loss_abs == 0.0:
+        return ProfitFactorResult(
+            selected_count=selected,
+            gross_profit=gross_profit,
+            gross_loss_abs=gross_loss_abs,
+            zero_return_count=zeros,
+            naive_control=naive_control,
+            actual_value=GATE_VALUE_NOT_AVAILABLE,
+            evidence_status="UNAVAILABLE",
+            status="FAIL",
+            reason="Profit factor is undefined because all selected returns were zero.",
+        )
+    actual = math.inf if gross_loss_abs == 0.0 else gross_profit / gross_loss_abs
+    passed = compare_gate_values(actual, ">=", threshold)
+    if math.isinf(actual) and actual > 0.0:
+        reason = (
+            "Selected returns contain gains and no losses, so profit factor is positive "
+            f"infinity and satisfies the minimum {threshold:.2f}."
+        )
+    elif passed:
+        reason = (
+            f"Profit factor {_profit_factor_value_label(actual)} meets the minimum {threshold:.2f}."
+        )
+    else:
+        reason = (
+            f"Profit factor {_profit_factor_value_label(actual)} is below the minimum "
+            f"{threshold:.2f}."
+        )
+    return ProfitFactorResult(
+        selected_count=selected,
+        gross_profit=gross_profit,
+        gross_loss_abs=gross_loss_abs,
+        zero_return_count=zeros,
+        naive_control=naive_control,
+        actual_value=actual,
+        evidence_status="AVAILABLE",
+        status="PASS" if passed else "FAIL",
+        reason=reason,
+    )
+
+
+def threshold_reason(
+    *,
+    metric_label: str,
+    actual_value: object,
+    comparator: str,
+    threshold: object,
+    status: GateStatus,
+    unavailable_reason: str,
+    not_configured_reason: str | None = None,
+    percent: bool = False,
+) -> str:
+    if status == "NOT_CONFIGURED":
+        return not_configured_reason or f"{metric_label} threshold is not configured."
+    if status == "NOT_APPLICABLE":
+        return unavailable_reason
+    actual = _coerce_float(actual_value)
+    required = _coerce_float(threshold)
+    if actual is None or required is None or math.isnan(actual) or math.isnan(required):
+        return unavailable_reason
+    actual_label = _percent(actual) if percent else f"{actual:.2f}"
+    threshold_label = _percent(required) if percent else f"{required:.2f}"
+    if status == "PASS":
+        if comparator == "<=":
+            return f"{metric_label} {actual_label} is within the maximum {threshold_label}."
+        if comparator == ">=":
+            return f"{metric_label} {actual_label} meets the minimum {threshold_label}."
+        if comparator == ">":
+            return f"{metric_label} {actual_label} is above the required {threshold_label}."
+        if comparator == "<":
+            return f"{metric_label} {actual_label} is below the required {threshold_label}."
+        if comparator == "==":
+            return f"{metric_label} equals the required {threshold_label}."
+    if comparator == "<=":
+        return f"{metric_label} {actual_label} exceeds the maximum {threshold_label}."
+    if comparator == ">=":
+        return f"{metric_label} {actual_label} is below the minimum {threshold_label}."
+    if comparator == ">":
+        return f"{metric_label} {actual_label} is not above the required {threshold_label}."
+    if comparator == "<":
+        return f"{metric_label} {actual_label} is not below the required {threshold_label}."
+    if comparator == "==":
+        return f"{metric_label} {actual_label} does not equal the required {threshold_label}."
+    return unavailable_reason
+
+
+def export_gate_value(value: object) -> object:
+    numeric = _coerce_float(value)
+    if numeric is not None:
+        if math.isnan(numeric):
+            return GATE_VALUE_NOT_AVAILABLE
+        if math.isinf(numeric):
+            return GATE_VALUE_POSITIVE_INFINITY if numeric > 0.0 else GATE_VALUE_NEGATIVE_INFINITY
+    return value
+
+
 def gate_results_to_jsonable(results: tuple[GateResult, ...]) -> list[dict[str, object]]:
-    return [asdict(result) for result in results]
+    rows: list[dict[str, object]] = []
+    for result in results:
+        item = asdict(result)
+        item["actual_value"] = export_gate_value(item["actual_value"])
+        item["threshold"] = export_gate_value(item["threshold"])
+        rows.append(item)
+    return rows
+
+
+def gate_result_integrity_warning(result: GateResult) -> str:
+    actual = _coerce_float(result.actual_value)
+    threshold = _coerce_float(result.threshold)
+    if actual is None or threshold is None or math.isnan(actual) or math.isnan(threshold):
+        return ""
+    if result.comparator in {">=", ">", "<=", "<", "=="}:
+        comparison = compare_gate_values(actual, result.comparator, threshold)
+        if result.status == "PASS" and not comparison:
+            return (
+                "Legacy gate evidence warning: PASS status contradicts actual/comparator/threshold."
+            )
+        if result.status == "FAIL" and comparison:
+            return (
+                "Legacy gate evidence warning: FAIL status contradicts actual/comparator/threshold."
+            )
+    return ""
+
+
+def display_gate_value(value: object) -> str:
+    exported = export_gate_value(value)
+    if exported == GATE_VALUE_NOT_AVAILABLE:
+        return "Not available"
+    if exported == GATE_VALUE_POSITIVE_INFINITY:
+        return "∞"
+    if exported == GATE_VALUE_NEGATIVE_INFINITY:
+        return "-∞"
+    return str(exported)
+
+
+def machine_gate_value(value: object) -> object:
+    return export_gate_value(value)
 
 
 def gate_results_from_jsonable(rows: object) -> tuple[GateResult, ...]:

@@ -7,9 +7,14 @@ from pathlib import Path
 import pandas as pd
 
 from dashboard.ui.components import render_page_header, repository_root, st
-from dashboard.ui.formatting import display_frame
+from dashboard.ui.formatting import display_frame, special_value_label
 from swing_rsi.application.engine_service import list_registered_models, promote_registered_model
-from swing_rsi.engine.gates import gate_results_to_jsonable, promotion_eligibility
+from swing_rsi.engine.gates import (
+    display_gate_value,
+    gate_result_integrity_warning,
+    gate_results_to_jsonable,
+    promotion_eligibility,
+)
 from swing_rsi.engine.model_audit import build_model_audit
 from swing_rsi.engine.registry import RegisteredModel
 
@@ -84,6 +89,9 @@ def _percent_label(value: object) -> str:
 
 
 def _decimal_label(value: object, *, digits: int = 2) -> str:
+    special = special_value_label(value)
+    if special is not None:
+        return special
     numeric = _finite_float(value)
     return "" if numeric is None else f"{numeric:.{digits}f}"
 
@@ -164,13 +172,14 @@ def _gate_audit_rows(model: RegisteredModel) -> pd.DataFrame:
         rows.append(
             {
                 "Gate": item["gate_name"],
-                "Mandatory": item["mandatory"],
-                "Threshold": item["threshold"],
+                "Actual": display_gate_value(item["actual_value"]),
                 "Comparator": item["comparator"],
-                "Actual": item["actual_value"],
+                "Threshold": display_gate_value(item["threshold"]),
                 "Status": item["status"],
                 "Reason": item["reason"],
+                "Mandatory": item["mandatory"],
                 "Evidence": item["evidence_source"],
+                "Evidence warning": gate_result_integrity_warning(gate),
             }
         )
     return pd.DataFrame(rows)

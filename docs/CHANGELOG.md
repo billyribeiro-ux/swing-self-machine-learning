@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Corrected canonical quality-gate evidence semantics for profit factor and concentration gates: positive-infinity profit factor now passes minimum thresholds when selected returns have gains and no losses, unavailable profit factor is represented explicitly instead of as infinity, concentration failure reasons now match status/threshold evidence, and dashboard/model-audit exports distinguish `Infinity` from `NOT_AVAILABLE`.
 - Implemented `prediction_ood_governance_v2`: deprecated the old zero-exceedance OOD promotion rule for new artifacts, added per-head calibration-derived OOD rate/severity gates, hard prediction-integrity gates, training-only OOD bounds, scanner OOD warnings/rejections, OOD-aware scanner identity metadata, and model-audit export fields.
 - Added regression coverage for Wilson OOD limits, head-to-bound mapping, decimal-return contracts, MFE/MAE sign contracts, training-only OOD bounds, live scanner OOD warnings/rejections, legacy OOD promotion blocking, and scanner identity changes from OOD metadata.
 - Created one fresh local model generation under V2 governance (`2026-06-21T04:34:49.525939+00:00`) and a review-only scanner snapshot (`6e4ce9ccada34a0962d2bc20`); no model was promoted and no paper-forward update was run.

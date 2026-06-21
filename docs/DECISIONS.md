@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-21 — Canonical gate evidence uses explicit profit-factor availability
+
+Decision: Profit-factor quality gates distinguish available, unavailable, and not-applicable evidence before applying the comparator. Selected returns with gains and no losses have profit factor `Infinity` and pass `>= 0.90`. Zero selected rows and all-zero selected returns are unavailable for learned models and fail mandatory profit-factor evidence. Zero-selection naive controls mark profit factor `NOT_APPLICABLE` while remaining promotion-ineligible through the existing naive-control gate. Concentration gates now generate status-aware reasons for pass, fail, and not-applicable evidence.
+
+Reason: Gate status, actual value, comparator, threshold, and reason must not contradict one another. Positive infinity is a valid mathematical profit factor when losses are zero and gains exist; unavailable evidence must not be encoded as infinity.
+
 ## 2026-06-21 — Prediction OOD governance uses calibrated rate and severity limits
 
 Decision: Replace the zero-tolerance `prediction_out_of_distribution_absent` promotion rule for new artifacts with governance schema `prediction_ood_governance_v2`. Training `q01` / `q99` remains the reference OOD envelope, but ordinary exceedances are evaluated by per-head OOD rate and severity limits derived from calibration predictions. Integrity defects remain mandatory zero-tolerance failures: nonfinite predictions, probability values outside `[0, 1]`, decimal/percent unit misuse, wrong head-to-bound mapping, non-training OOD bounds, double inverse transformation, MFE predictions below zero, and MAE predictions above zero. Raw predictions are never clipped.

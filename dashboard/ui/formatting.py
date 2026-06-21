@@ -5,8 +5,35 @@ from typing import Any
 
 import pandas as pd
 
+from swing_rsi.engine.gates import (
+    GATE_VALUE_NEGATIVE_INFINITY,
+    GATE_VALUE_NOT_AVAILABLE,
+    GATE_VALUE_POSITIVE_INFINITY,
+)
+
+
+def special_value_label(value: Any) -> str | None:
+    if value in {GATE_VALUE_NOT_AVAILABLE, "Not available"}:
+        return "Not available"
+    if value in {GATE_VALUE_POSITIVE_INFINITY, "inf", "Inf", "Infinity"}:
+        return "∞"
+    if value in {GATE_VALUE_NEGATIVE_INFINITY, "-inf", "-Inf", "-Infinity"}:
+        return "-∞"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(numeric):
+        return "Not available"
+    if math.isinf(numeric):
+        return "∞" if numeric > 0.0 else "-∞"
+    return None
+
 
 def percent(value: Any) -> str:
+    special = special_value_label(value)
+    if special is not None:
+        return special
     try:
         numeric = float(value)
     except (TypeError, ValueError):
@@ -17,6 +44,9 @@ def percent(value: Any) -> str:
 
 
 def decimal(value: Any, digits: int = 4) -> str:
+    special = special_value_label(value)
+    if special is not None:
+        return special
     try:
         numeric = float(value)
     except (TypeError, ValueError):
@@ -27,6 +57,9 @@ def decimal(value: Any, digits: int = 4) -> str:
 
 
 def whole(value: Any) -> str:
+    special = special_value_label(value)
+    if special is not None:
+        return special
     try:
         numeric = float(value)
     except (TypeError, ValueError):
