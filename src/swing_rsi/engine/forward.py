@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from numbers import Integral
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pandas as pd
 
@@ -31,6 +31,29 @@ class ForwardEvent:
 
 def make_event_id(unique_key: str) -> str:
     return hashlib.sha256(unique_key.encode("utf-8")).hexdigest()[:24]
+
+
+def _jsonable(value: object) -> object:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "isoformat"):
+        return cast(Any, value).isoformat()
+    try:
+        if bool(pd.isna(cast(Any, value))):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "item"):
+        return cast(Any, value).item()
+    return value
+
+
+def _event_name(event_prefix: str, event_type: str) -> str:
+    return f"{event_prefix}{event_type}" if event_prefix else event_type
 
 
 def append_forward_event(
@@ -157,20 +180,34 @@ def reconstruct_positions(db_path: str | Path) -> pd.DataFrame:
     return pd.DataFrame(positions.values())
 
 
-def create_pending_events_from_snapshot(db_path: str | Path, scanner_rows: pd.DataFrame) -> int:
+def create_pending_events_from_snapshot(
+    db_path: str | Path,
+    scanner_rows: pd.DataFrame,
+    *,
+    event_prefix: str = "",
+    payload_extra: dict[str, object] | None = None,
+    include_row_payload: bool = False,
+) -> int:
     count = 0
+    payload_extra = payload_extra or {}
     for _, row in scanner_rows.iterrows():
         if row.get("candidate_status") != "ACTIONABLE_PAPER_CANDIDATE":
+            payload: dict[str, object] = {
+                **payload_extra,
+                "exclusion_reason": str(row.get("exclusion_reason", "")),
+            }
+            if include_row_payload:
+                payload["scanner_row"] = _jsonable(row.to_dict())
             event = append_forward_event(
                 db_path,
-                event_type="SIGNAL_REJECTED",
+                event_type=_event_name(event_prefix, "SIGNAL_REJECTED"),
                 market_as_of_date=str(row["as_of_date"]),
                 ticker=str(row["ticker"]),
                 direction=str(row["direction"]),
                 model_id=str(row["model_id"]),
                 scanner_snapshot_id=str(row["scan_id"]),
                 feature_snapshot_hash=str(row["feature_snapshot_hash"]),
-                payload={"exclusion_reason": str(row.get("exclusion_reason", ""))},
+                payload=payload,
                 unique_suffix=str(row["horizon"]),
             )
             count += int(event.inserted)
@@ -184,7 +221,8 @@ def create_pending_events_from_snapshot(db_path: str | Path, scanner_rows: pd.Da
         )
         planned_target_return = max(expected_return, max(expected_mfe, 0.0) * 0.5, 0.005)
         planned_stop_return = max(abs(expected_mae), 0.005)
-        payload: dict[str, object] = {
+        payload = {
+            **payload_extra,
             "entry_rule": "next_completed_session_open",
             "signal_price_context": signal_price_context,
             "planned_stop_return": planned_stop_return,
@@ -199,9 +237,11 @@ def create_pending_events_from_snapshot(db_path: str | Path, scanner_rows: pd.Da
             "calibrated_probability": float(row["calibrated_probability"]),
             "horizon": int(row["horizon"]),
         }
+        if include_row_payload:
+            payload["scanner_row"] = _jsonable(row.to_dict())
         signal = append_forward_event(
             db_path,
-            event_type="SIGNAL_CREATED",
+            event_type=_event_name(event_prefix, "SIGNAL_CREATED"),
             market_as_of_date=str(row["as_of_date"]),
             ticker=str(row["ticker"]),
             direction=str(row["direction"]),
@@ -213,7 +253,7 @@ def create_pending_events_from_snapshot(db_path: str | Path, scanner_rows: pd.Da
         )
         pending = append_forward_event(
             db_path,
-            event_type="ENTRY_PENDING",
+            event_type=_event_name(event_prefix, "ENTRY_PENDING"),
             market_as_of_date=str(row["as_of_date"]),
             ticker=str(row["ticker"]),
             direction=str(row["direction"]),
@@ -355,13 +395,18 @@ def _realized_return_from_price(
     return gross, gross - costs
 
 
-def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFrame]) -> int:
+def advance_forward_positions(
+    db_path: str | Path,
+    frames: dict[str, pd.DataFrame],
+    *,
+    event_prefix: str = "",
+) -> int:
     events = list_forward_events(db_path)
     if events.empty:
         return 0
     inserted = 0
 
-    pending_entries = events.loc[events["event_type"] == "ENTRY_PENDING"]
+    pending_entries = events.loc[events["event_type"] == _event_name(event_prefix, "ENTRY_PENDING")]
     for _, pending in pending_entries.iterrows():
         ticker = str(pending["ticker"])
         frame = frames.get(ticker)
@@ -390,7 +435,7 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
         payload["planned_stop_price"] = stop_price
         event = append_forward_event(
             db_path,
-            event_type="ENTRY_FILLED",
+            event_type=_event_name(event_prefix, "ENTRY_FILLED"),
             market_as_of_date=entry_date.date().isoformat(),
             ticker=ticker,
             direction=str(pending["direction"]),
@@ -410,7 +455,7 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
                 continue
             policy_event = append_forward_event(
                 db_path,
-                event_type=event_type,
+                event_type=_event_name(event_prefix, event_type),
                 market_as_of_date=entry_date.date().isoformat(),
                 ticker=ticker,
                 direction=str(pending["direction"]),
@@ -427,11 +472,16 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
             inserted += int(policy_event.inserted)
 
     events = list_forward_events(db_path)
-    filled_entries = events.loc[events["event_type"] == "ENTRY_FILLED"]
+    filled_entries = events.loc[events["event_type"] == _event_name(event_prefix, "ENTRY_FILLED")]
     exit_sources = {
         str(dict(event["payload"]).get("source_pending_event_id"))
         for _, event in events.loc[
-            events["event_type"].isin({"EXIT_FILLED", "POSITION_EXPIRED"})
+            events["event_type"].isin(
+                {
+                    _event_name(event_prefix, "EXIT_FILLED"),
+                    _event_name(event_prefix, "POSITION_EXPIRED"),
+                }
+            )
         ].iterrows()
     }
     for _, filled in filled_entries.iterrows():
@@ -485,7 +535,7 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
             }
             event = append_forward_event(
                 db_path,
-                event_type="POSITION_MARKED",
+                event_type=_event_name(event_prefix, "POSITION_MARKED"),
                 market_as_of_date=mark_date.date().isoformat(),
                 ticker=ticker,
                 direction=str(filled["direction"]),
@@ -528,7 +578,7 @@ def advance_forward_positions(db_path: str | Path, frames: dict[str, pd.DataFram
             }
             event = append_forward_event(
                 db_path,
-                event_type="EXIT_FILLED",
+                event_type=_event_name(event_prefix, "EXIT_FILLED"),
                 market_as_of_date=actual_exit_date.date().isoformat(),
                 ticker=ticker,
                 direction=str(filled["direction"]),
