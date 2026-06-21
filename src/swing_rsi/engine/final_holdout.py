@@ -474,14 +474,56 @@ def _active_runs(db_path: str | Path) -> tuple[FinalHoldoutRun, ...]:
     )
 
 
-def _session_availability(
-    feature_frame: pd.DataFrame, session: str, run: FinalHoldoutRun
+def _feature_frame_session_rows(feature_frame: pd.DataFrame, session: str) -> pd.DataFrame:
+    return feature_frame.loc[pd.to_datetime(feature_frame["Date"]) == pd.Timestamp(session)]
+
+
+def _manifest_session_availability(
+    root: Path,
+    rows: pd.DataFrame,
+    session: str,
+    run: FinalHoldoutRun,
 ) -> tuple[bool, str]:
-    if "local_available_at_utc" not in feature_frame.columns:
-        return False, "FINAL_HOLDOUT_BACKFILL_BLOCKED: missing ingestion provenance"
-    rows = feature_frame.loc[pd.to_datetime(feature_frame["Date"]) == pd.Timestamp(session)]
+    if "symbol" not in rows.columns:
+        return False, "FINAL_HOLDOUT_BACKFILL_BLOCKED: missing symbol provenance key"
+    manifest_dir = ProjectPaths(root).manifests
+    symbols = sorted({str(symbol).upper() for symbol in rows["symbol"].dropna().unique()})
+    if not symbols:
+        return False, "FINAL_HOLDOUT_BACKFILL_BLOCKED: no symbols in feature session"
+    created_at = pd.Timestamp(run.created_at_utc)
+    for symbol in symbols:
+        path = manifest_dir / f"{symbol}.json"
+        if not path.exists():
+            return False, f"FINAL_HOLDOUT_BACKFILL_BLOCKED: missing manifest for {symbol}"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return False, f"FINAL_HOLDOUT_BACKFILL_BLOCKED: invalid manifest for {symbol}"
+        retrieved = pd.to_datetime(payload.get("retrieval_timestamp_utc"), errors="coerce")
+        actual_last = payload.get("actual_last_date")
+        if pd.isna(retrieved) or actual_last is None:
+            return False, f"FINAL_HOLDOUT_BACKFILL_BLOCKED: incomplete manifest for {symbol}"
+        if pd.Timestamp(str(actual_last)).date().isoformat() < session:
+            return False, f"FINAL_HOLDOUT_BACKFILL_BLOCKED: manifest does not cover {symbol}"
+        if not bool(pd.Timestamp(retrieved) > created_at):
+            return (
+                False,
+                f"FINAL_HOLDOUT_BACKFILL_BLOCKED: {symbol} manifest predates run creation",
+            )
+    return True, "ok"
+
+
+def _session_availability(
+    root: Path,
+    feature_frame: pd.DataFrame,
+    session: str,
+    run: FinalHoldoutRun,
+) -> tuple[bool, str]:
+    rows = _feature_frame_session_rows(feature_frame, session)
     if rows.empty:
         return False, "FINAL_HOLDOUT_BACKFILL_BLOCKED: no feature rows for session"
+    if "local_available_at_utc" not in feature_frame.columns:
+        return _manifest_session_availability(root, rows, session, run)
     values = pd.to_datetime(rows["local_available_at_utc"], errors="coerce")
     if values.isna().any():
         return False, "FINAL_HOLDOUT_BACKFILL_BLOCKED: incomplete ingestion provenance"
@@ -595,7 +637,7 @@ def process_final_holdout_update(
             )
         ]
         for session in candidates:
-            available, reason = _session_availability(feature_frame, session, run)
+            available, reason = _session_availability(project_root, feature_frame, session, run)
             if not available:
                 blocked[session] = reason
                 inserted += _append_run_event(

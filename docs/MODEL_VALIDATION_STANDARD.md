@@ -18,7 +18,20 @@ Historical walk-forward validation is legacy research evaluation. It is not the 
 
 ## Final holdout
 
-Before any model is promoted, reserve a final untouched time period that was not used for feature design, parameter ranges, threshold tuning, or model selection.
+Before any model is promoted, it must complete prospective final-holdout validation. The existing 2016-2026 chronological holdout has been repeatedly inspected and is labeled `DEVELOPMENT_HOLDOUT`; it cannot be reclassified as final evidence and cannot satisfy promotion.
+
+A valid final holdout now means:
+
+1. A model version is frozen and enrolled into a prospective final-holdout run.
+2. The artifact hash, feature manifest, selection policy, target-before-stop calibrator, OOD metadata, universe, scanner identity, execution policy, and code commit are recorded.
+3. A baseline market date is recorded at enrollment.
+4. No signal with `as_of_date <= baseline_market_date` may enter the run.
+5. Later sessions require local ingestion provenance proving they became available after run creation.
+6. Signals are written before outcomes exist and are advanced through the append-only paper-forward event lifecycle.
+7. Final-holdout events never enter training, calibration, feature screening, threshold choice, policy selection, or retraining.
+8. Evaluation uses only events belonging to the prospective run and persists canonical final-holdout gates.
+
+If final-holdout sample thresholds are not configured, the corresponding mandatory gate is `NOT_CONFIGURED` and blocks promotion. `FINAL_HOLDOUT` means evidence came from a valid prospective period; it does not mean the model passed.
 
 ## Evaluation layers
 

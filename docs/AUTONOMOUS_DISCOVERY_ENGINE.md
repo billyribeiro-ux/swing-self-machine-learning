@@ -20,6 +20,8 @@ The implemented vertical slice lives under `src/swing_rsi/engine/` and is orches
 12. Register model artifacts as `CANDIDATE`, `CHALLENGER`, or `REJECTED` with quality gates, feature-stability diagnostics, target-specific screen diagnostics, target-before-stop calibration-governance metadata, and holdout permutation-importance summaries.
 13. Scan the latest feature snapshot with champion models, or with review candidates only when explicitly requested.
 14. Persist immutable scanner snapshots, append-only paper-forward events, and drift-check summaries.
+15. Enroll eligible frozen models into prospective final-holdout runs only after a baseline market date is recorded.
+16. Collect shadow final-holdout events only from later locally available sessions with ingestion provenance; never backfill existing historical sessions.
 
 ## Scope
 
@@ -42,6 +44,7 @@ RSI is one feature family and baseline control. It is not the scanner strategy a
 - `engine/attribution.py`: per-candidate model contribution groups and evidence.
 - `engine/portfolio.py`: portfolio-level scanner-output backtester.
 - `engine/forward.py`: append-only paper-forward event log, next-session paper fills, position marks, time exits, and position reconstruction.
+- `engine/final_holdout.py`: prospective final-holdout run registry, no-backfill enforcement, shadow event lifecycle, evaluation, and promotion-evidence integration.
 
 ## Integrity Rules
 

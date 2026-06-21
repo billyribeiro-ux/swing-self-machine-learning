@@ -49,6 +49,8 @@ Historical walk-forward validation is a research evaluation method. Paper forwar
 
 A newly trained model is a challenger. It may not silently alter champion predictions or rewrite open paper positions.
 
+Prospective final holdout is a stricter shadow mode of paper forward testing. It starts only after enrollment records a baseline market date and frozen model identity. It must not backfill signals from sessions already available at enrollment, and its evidence may be used for promotion only after canonical final-holdout gates are evaluated.
+
 ## Model versions
 
 Any change to parameters, features, labels, costs, entry timing, or filtering rules requires a new model version.

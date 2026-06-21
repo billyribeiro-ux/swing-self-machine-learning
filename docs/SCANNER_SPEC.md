@@ -68,3 +68,11 @@ The target-before-stop probability must be generated from the target-before-stop
 The target-before-stop probability must also use the model artifact's frozen selected calibrator. Identity leaves the raw target-before-stop probability unchanged, sigmoid uses the frozen sigmoid calibrator, and isotonic uses the frozen isotonic calibrator. A new-schema artifact missing calibration-governance metadata is rejected with `target_before_stop_calibration_metadata_missing`; legacy shared-screen artifacts remain labeled as legacy review artifacts rather than being treated as equivalent to new governance-aware artifacts.
 
 Scanner cache identity includes the target-before-stop screening schema, selected-feature manifest hash, calibration governance schema, selected calibrator method, calibration manifest hash, and calibrator artifact hash for every loaded model. Changing the selected target-before-stop calibrator changes the scanner snapshot identity.
+
+## Prospective Final-Holdout Scanner Mode
+
+Final-holdout updates run the scanner in `SHADOW_FINAL_HOLDOUT` mode against only the models enrolled in the selected final-holdout run. The scanner uses the same frozen model artifacts, target-before-stop feature manifests, selected calibrators, selection policies, and OOD metadata recorded at enrollment.
+
+Shadow final-holdout scanner rows are evidence collection records. They are labeled "Prospective shadow validation. Not a live trade recommendation." Dashboard displays must keep them separate from ordinary live scanner recommendations and historical development-holdout metrics.
+
+If an enrolled artifact, selection-policy hash, target-before-stop calibration hash, or OOD-governance hash changes after enrollment, the run is invalidated instead of silently scanning with drifted model identity.

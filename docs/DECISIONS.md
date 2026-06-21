@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-21 — Final holdout is prospective shadow validation only
+
+Decision: The only valid `FINAL_HOLDOUT` evidence is prospective. A model must be frozen and enrolled with artifact hash, feature manifest, selection policy, target-before-stop calibrator, OOD metadata, universe, scanner identity, execution policy, and baseline market date before final-holdout collection starts. No signal with `as_of_date <= baseline_market_date` may enter the run, and later sessions require local ingestion provenance showing they arrived after run creation. Final-holdout events reuse the append-only paper-forward lifecycle under `SHADOW_FINAL_HOLDOUT` and are not live trade recommendations. Evaluation may mark evidence as `FINAL_HOLDOUT`, but mandatory final-holdout gates still decide pass/fail and `NOT_CONFIGURED` sample thresholds block promotion.
+
+Reason: The historical 2016-2026 holdout is now a development holdout because it has been repeatedly inspected during engineering diagnosis. Creating another historical holdout from that same period would not restore final out-of-sample integrity. Prospective collection preserves chronology: predictions are stored before outcomes exist, frozen model identity is auditable, and promotion remains explicit.
+
 ## 2026-06-21 — Promotion requires explicit final-holdout status
 
 Decision: Champion promotion now requires canonical holdout status `FINAL_HOLDOUT`. Discovery artifacts produced from the repeatedly inspected chronological holdout persist `DEVELOPMENT_HOLDOUT`, receive a mandatory `final_holdout_required_for_promotion` gate failure, and cannot become challengers or champions. Missing holdout-status metadata is treated as not final. The manual registry promotion path checks the persisted holdout status before ordinary gate eligibility.

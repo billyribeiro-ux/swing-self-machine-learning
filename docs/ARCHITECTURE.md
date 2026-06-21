@@ -27,6 +27,8 @@ Portfolio scanner-output backtester
    ↓
 Drift checks and append-only paper-forward lifecycle
    ↓
+Prospective shadow final-holdout collection and evaluation
+   ↓
 Daily-cycle orchestration
 ```
 
@@ -47,7 +49,7 @@ src/swing_rsi/
   research/                 candidate grids and walk-forward selection
   scanner/                  latest-bar evidence output
   forward/                  immutable signal and outcome journals
-  engine/                   autonomous universe, features, labels, models, scanner, attribution, registry, paper forward testing
+  engine/                   autonomous universe, features, labels, models, scanner, attribution, registry, paper forward testing, final holdout
   reports/                  atomic report writers
   application/              shared CLI/dashboard orchestration services
   sample_data.py            deterministic plumbing-only demo data

@@ -73,6 +73,16 @@ The selection evaluator is canonical for holdout model evaluation and scanner ac
 
 The selected row sequence drawdown is retained only as `selected_row_sequence_drawdown`. It is not a portfolio drawdown gate.
 
+## Prospective Final Holdout
+
+Prospective final holdout is tracked in SQLite through `final_holdout_runs` and `final_holdout_models`. A run records schema version, creation timestamp, creation Git commit, baseline market date, first eligible future signal date, universe snapshot, feature manifest hash, generation ID, enrolled model IDs, frozen artifact hashes, model states, development-gate eligibility, selection-policy hashes, target-before-stop calibration hashes, OOD-governance hashes, scanner identity version, execution-policy hash, direction, horizon, status, and latest processed market date.
+
+Run statuses are `CREATED`, `COLLECTING`, `READY_FOR_EVALUATION`, `EVALUATED_PASS`, `EVALUATED_FAIL`, `INVALIDATED`, and `CLOSED`. Runs are never overwritten. Research-only enrollment is allowed only for diagnostics and cannot satisfy promotion eligibility.
+
+The no-backfill rule is strict. A run may process only sessions after its baseline date that have local ingestion provenance showing they became available after run creation. Missing or stale provenance appends a `FINAL_HOLDOUT_DATA_INVALIDATED` event with reason `FINAL_HOLDOUT_BACKFILL_BLOCKED` and prevents the session from becoming final evidence.
+
+Final-holdout evaluation persists canonical gates for provenance validity, sample-threshold configuration, final-holdout status, and research-only blocking when applicable. Final-holdout sample thresholds that are not governed remain `NOT_CONFIGURED` and block promotion.
+
 ## Prediction OOD Governance
 
 New autonomous model artifacts use governance schema `prediction_ood_governance_v2`.
@@ -170,9 +180,12 @@ Champion promotion requires:
 1. The model is a candidate/challenger in the registry.
 2. Persisted canonical mandatory gates exist.
 3. The model holdout status is explicitly `FINAL_HOLDOUT`.
-4. Every mandatory quality gate passes.
-5. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
-6. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
+4. A final-holdout run ID and final-holdout evidence manifest hash are present.
+5. The final-holdout enrollment record exists and is not research-only.
+6. The frozen artifact hash, selection-policy hash, target-before-stop calibration hash, and OOD-governance hash still match the enrollment record.
+7. Every mandatory development and final-holdout quality gate passes.
+8. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
+9. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
 
 Models labeled `DEVELOPMENT_HOLDOUT` or missing holdout-status metadata are promotion-ineligible even if their other gates pass. The manual promotion path checks the persisted holdout status before changing registry state.
 

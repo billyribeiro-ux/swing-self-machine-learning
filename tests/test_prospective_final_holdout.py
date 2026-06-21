@@ -459,6 +459,38 @@ def test_future_session_with_provenance_processes_and_rerun_is_idempotent(
     assert status.loc[0, "signals"] == 1
 
 
+def test_future_session_can_use_raw_manifest_ingestion_provenance(tmp_path: Path) -> None:
+    _register(tmp_path, _registered_model(tmp_path))
+    report = initialize_final_holdout_run(
+        tmp_path,
+        generation="latest",
+        feature_panel=_feature_panel(["2026-06-18"]),
+    )
+    assert report.run is not None
+    manifest_dir = tmp_path / "data" / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "AAPL.json").write_text(
+        json.dumps(
+            {
+                "retrieval_timestamp_utc": (
+                    pd.Timestamp(report.run.created_at_utc) + timedelta(minutes=5)
+                ).isoformat(),
+                "actual_last_date": "2026-06-19",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = process_final_holdout_update(
+        tmp_path,
+        feature_panel=_feature_panel(["2026-06-18", "2026-06-19"]),
+        frames={"AAPL": _ohlcv(["2026-06-18", "2026-06-19"])},
+    )
+
+    assert result.processed_sessions == ("2026-06-19",)
+    assert result.blocked_sessions == {}
+
+
 def test_signal_is_recorded_before_future_entry_outcome(tmp_path: Path) -> None:
     _register(tmp_path, _registered_model(tmp_path))
     report = initialize_final_holdout_run(
