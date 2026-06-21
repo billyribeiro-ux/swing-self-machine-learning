@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-21 — Prediction OOD governance uses calibrated rate and severity limits
+
+Decision: Replace the zero-tolerance `prediction_out_of_distribution_absent` promotion rule for new artifacts with governance schema `prediction_ood_governance_v2`. Training `q01` / `q99` remains the reference OOD envelope, but ordinary exceedances are evaluated by per-head OOD rate and severity limits derived from calibration predictions. Integrity defects remain mandatory zero-tolerance failures: nonfinite predictions, probability values outside `[0, 1]`, decimal/percent unit misuse, wrong head-to-bound mapping, non-training OOD bounds, double inverse transformation, MFE predictions below zero, and MAE predictions above zero. Raw predictions are never clipped.
+
+Reason: A robust `q01` / `q99` envelope is a diagnostic reference, not an absolute mathematical domain. Requiring zero exceedances across thousands of predictions makes one normal tail estimate fail an entire model and masks the more important distinction between ordinary tails, severe extrapolation, and implementation defects. Calibration-derived limits keep the rule fixed before holdout evaluation while preserving every exceedance for audit.
+
 ## 2026-06-20 — Model promotion requires canonical portfolio-aware gates
 
 Decision: Autonomous model promotion is computed only from persisted canonical gate records. Portfolio maximum drawdown must come from chronological daily portfolio equity. Cross-sectional selected-row compounding is retained only as `selected_row_sequence_drawdown` and cannot satisfy the portfolio drawdown gate.

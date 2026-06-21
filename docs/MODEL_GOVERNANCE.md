@@ -55,8 +55,8 @@ The current vertical slice gates on:
 - temporal-fold stability;
 - exceptional-period concentration;
 - comparison-control availability.
-- prediction-unit sanity;
-- prediction out-of-distribution sanity;
+- prediction-unit contract validity;
+- calibrated prediction out-of-distribution rate and severity;
 - selection-rate policy configuration.
 
 Registered metrics also retain feature-stability summaries, bounded holdout permutation-importance summaries, target-before-stop calibration, positive year/regime/sector fractions, symbol/sector concentration, double-cost lower bound, prediction turnover, temporal-fold positive fraction, exceptional-period concentration, model plugin metadata, and naive/RSI-control availability for review. Those diagnostics do not override failed gates.
@@ -66,6 +66,78 @@ The configured default candidate-selection policy is persisted with each model a
 The selection evaluator is canonical for holdout model evaluation and scanner actionability. Missing or non-finite required policy metrics fail safely, and the scanner cannot relax persisted policy thresholds.
 
 The selected row sequence drawdown is retained only as `selected_row_sequence_drawdown`. It is not a portfolio drawdown gate.
+
+## Prediction OOD Governance
+
+New autonomous model artifacts use governance schema `prediction_ood_governance_v2`.
+
+The legacy mandatory gate `prediction_out_of_distribution_absent` is deprecated for new artifacts. Legacy artifacts remain readable for audit, but a legacy artifact that lacks the V2 canonical prediction gates is not promotion eligible. The old gate is excluded from new promotion decisions and must be labeled as legacy when displayed or exported.
+
+V2 keeps training `q01` / `q99` as a reference envelope, not an absolute domain. Every exceedance is persisted with raw prediction value, head, direction, horizon, bound provenance, reference bounds, severity, and governance version.
+
+For each regression head:
+
+```text
+L = training target q01
+U = training target q99
+R = max(U - L, epsilon)
+
+low_overshoot = max(0, L - prediction) / R
+high_overshoot = max(0, prediction - U) / R
+ood_severity = max(low_overshoot, high_overshoot)
+is_ood = ood_severity > 0
+```
+
+Each artifact freezes a calibration-derived OOD rate limit using `z = 2.326347874`:
+
+```text
+rate_limit =
+    min(
+        0.05,
+        max(
+            0.02,
+            wilson_upper_99(k_calibration_ood, n_calibration) + 0.005
+        )
+    )
+```
+
+The mandatory rate gates are:
+
+- calibration OOD rate `<= 0.05`;
+- holdout OOD rate `<= frozen rate_limit`.
+
+Each artifact freezes a calibration-derived severity limit:
+
+```text
+severity_q99_limit =
+    min(
+        0.50,
+        max(
+            0.10,
+            calibration_q99_severity + 0.05
+        )
+    )
+```
+
+where `calibration_q99_severity` is zero when calibration has no nonzero OOD severities, otherwise it is the q99 of nonzero calibration OOD severities.
+
+The mandatory severity gates are:
+
+- holdout q99 OOD severity `<= frozen severity_q99_limit`;
+- maximum holdout OOD severity `<= 1.00`.
+
+The following hard integrity gates are mandatory and zero tolerance:
+
+- `prediction_values_finite`;
+- `prediction_unit_contract_valid`;
+- `prediction_head_bound_mapping_valid`;
+- `prediction_bounds_training_only`;
+- `prediction_path_metric_sign_valid`;
+- `prediction_probability_contract_valid`.
+
+The path-metric sign contract is explicit: expected MFE predictions must be `>= 0`, and expected MAE predictions must be `<= 0`. The engine does not silently clip invalid predictions.
+
+Live scanner eligibility uses the frozen OOD metadata stored with the model artifact. Rows are rejected when required OOD metadata is missing, a hard integrity contract fails, severity exceeds `1.00`, or severity exceeds the frozen per-head severity limit. Rows with permitted OOD warnings remain auditable and must display the warning rather than treating it as an explanation or causal claim.
 
 ## Model Plugin Interface
 
