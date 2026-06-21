@@ -38,6 +38,7 @@ from swing_rsi.engine.gates import (
     profit_factor_result,
     promotion_eligibility,
     quality_gate_bool_map,
+    temporal_fold_stability_result,
     threshold_reason,
 )
 from swing_rsi.engine.manifest import current_commit_hash
@@ -60,6 +61,10 @@ from swing_rsi.engine.splits import (
     ChronologicalSplit,
     chronological_train_calibration_holdout_split,
 )
+
+TEMPORAL_FOLD_STABILITY_SCHEMA_VERSION = "temporal_fold_stability_v1"
+TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS = 3
+TEMPORAL_FOLD_STABILITY_THRESHOLD = 0.50
 
 
 @dataclass(frozen=True)
@@ -732,22 +737,94 @@ def _max_concentration(frame: pd.DataFrame, column: str) -> float:
     return float(shares.max()) if not shares.empty else math.nan
 
 
-def _temporal_fold_stability(frame: pd.DataFrame, returns: pd.Series, *, folds: int = 3) -> float:
-    if frame.empty or returns.empty or "Date" not in frame.columns:
-        return math.nan
+def _empty_temporal_fold_details(folds: int) -> dict[str, object]:
+    return {
+        "schema_version": TEMPORAL_FOLD_STABILITY_SCHEMA_VERSION,
+        "folds_requested": folds,
+        "folds_evaluated": 0,
+        "folds_with_selected_observations": 0,
+        "selected_observations_per_fold": [0 for _ in range(folds)],
+        "fold_records": [],
+        "positive_fraction": GATE_VALUE_NOT_AVAILABLE,
+    }
+
+
+def _temporal_fold_stability_details(
+    frame: pd.DataFrame,
+    returns: pd.Series,
+    *,
+    folds: int = TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS,
+) -> dict[str, object]:
+    details = _empty_temporal_fold_details(folds)
+    if frame.empty or returns.empty:
+        return details
+    if "Date" not in frame.columns:
+        return details
     ordered = pd.DataFrame(
-        {"Date": pd.to_datetime(frame["Date"]), "return": returns.to_numpy(dtype=float)}
+        {
+            "Date": pd.to_datetime(frame["Date"], errors="coerce"),
+            "return": pd.to_numeric(returns, errors="coerce").to_numpy(dtype=float),
+        }
     ).dropna()
-    if len(ordered) < folds:
-        return math.nan
-    ordered = ordered.sort_values("Date")
+    if ordered.empty:
+        return details
+    ordered = ordered.sort_values("Date").reset_index(drop=True)
     fold_indices = np.array_split(np.arange(len(ordered)), folds)
-    fold_means = [
-        float(ordered.iloc[indices]["return"].mean()) for indices in fold_indices if len(indices)
-    ]
-    if not fold_means:
+    selected_counts = [len(indices) for indices in fold_indices]
+    fold_records: list[dict[str, object]] = []
+    fold_positive_results: list[bool] = []
+    for position, indices in enumerate(fold_indices, start=1):
+        if len(indices) == 0:
+            continue
+        fold_returns = ordered.iloc[indices]["return"]
+        mean_return = float(fold_returns.mean())
+        positive = bool(mean_return > 0.0)
+        fold_positive_results.append(positive)
+        fold_records.append(
+            {
+                "fold": position,
+                "selected_count": len(indices),
+                "mean_return": mean_return,
+                "positive": positive,
+                "result": "positive" if positive else "negative_or_zero",
+            }
+        )
+    folds_with_selected = int(sum(1 for count in selected_counts if count > 0))
+    details.update(
+        {
+            "folds_evaluated": len(fold_records),
+            "folds_with_selected_observations": folds_with_selected,
+            "selected_observations_per_fold": selected_counts,
+            "fold_records": fold_records,
+        }
+    )
+    if len(ordered) < folds:
+        return details
+    if not fold_positive_results:
+        return details
+    details["positive_fraction"] = float(
+        sum(1 for positive in fold_positive_results if positive) / len(fold_positive_results)
+    )
+    return details
+
+
+def _temporal_fold_stability(
+    frame: pd.DataFrame,
+    returns: pd.Series,
+    *,
+    folds: int = TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS,
+) -> float:
+    positive_fraction = _temporal_fold_stability_details(
+        frame,
+        returns,
+        folds=folds,
+    )["positive_fraction"]
+    try:
+        if isinstance(positive_fraction, str | int | float):
+            return float(positive_fraction)
+    except (TypeError, ValueError):
         return math.nan
-    return float(sum(1 for value in fold_means if value > 0.0) / len(fold_means))
+    return math.nan
 
 
 def _period_concentration(frame: pd.DataFrame, returns: pd.Series) -> float:
@@ -835,7 +912,6 @@ def _build_gate_results(
     sector_concentration = _float_metric(metrics, "sector_concentration_top")
     double_cost_lcb = _float_metric(metrics, "holdout_double_cost_lcb_90")
     turnover = _float_metric(metrics, "prediction_turnover")
-    temporal_fraction = _float_metric(metrics, "temporal_fold_positive_fraction")
     period_concentration = _float_metric(metrics, "exceptional_period_concentration_top")
     prediction_ood = int(metrics.get("prediction_sanity_ood_total") or 0)
     selected_rate = float(metrics.get("selected_observation_rate") or 0.0)
@@ -861,6 +937,27 @@ def _build_gate_results(
         zero_return_count=int(metrics.get("holdout_zero_return_count") or 0),
         naive_control=family == "naive_base_rate",
         threshold=0.90,
+    )
+    temporal_fold = temporal_fold_stability_result(
+        selected_count=selected_count,
+        folds_requested=int(
+            metrics.get("temporal_fold_folds_requested") or TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS
+        ),
+        folds_evaluated=int(metrics.get("temporal_fold_folds_evaluated") or 0),
+        folds_with_selected_observations=int(
+            metrics.get("temporal_fold_folds_with_selected_observations") or 0
+        ),
+        selected_observations_per_fold=tuple(
+            cast(
+                list[int],
+                json.loads(str(metrics.get("temporal_fold_selected_observations_per_fold_json")))
+                if metrics.get("temporal_fold_selected_observations_per_fold_json")
+                else [],
+            )
+        ),
+        positive_fraction=metrics.get("temporal_fold_positive_fraction"),
+        naive_control=family == "naive_base_rate",
+        threshold=TEMPORAL_FOLD_STABILITY_THRESHOLD,
     )
 
     add(
@@ -1121,17 +1218,30 @@ def _build_gate_results(
         else "Selected rate evaluated against configured maximum.",
     )
     add(
+        "temporal_fold_stability_evidence_available",
+        "Temporal Fold Stability Evidence Available",
+        "temporal stability",
+        "selected_candidates",
+        "temporal_fold_evidence_status",
+        "AVAILABLE",
+        "is available",
+        temporal_fold.evidence_status,
+        temporal_fold.evidence_gate_status,
+        family != "naive_base_rate",
+        temporal_fold.evidence_reason,
+    )
+    add(
         "temporal_fold_stability_min_050",
         "Temporal Fold Positive Fraction Minimum",
         "temporal stability",
         "selected_candidates",
         "temporal_fold_positive_fraction",
-        0.50,
+        TEMPORAL_FOLD_STABILITY_THRESHOLD,
         ">=",
-        temporal_fraction,
-        _status_from_bool(not math.isfinite(temporal_fraction) or temporal_fraction >= 0.50),
-        True,
-        "Temporal fold stability passes or is not applicable due insufficient selected rows.",
+        temporal_fold.actual_value,
+        temporal_fold.threshold_gate_status,
+        family != "naive_base_rate",
+        temporal_fold.threshold_reason,
     )
     add(
         "exceptional_period_concentration_max_060",
@@ -1624,7 +1734,33 @@ def _train_family(
     symbol_concentration = _max_concentration(selected, "symbol")
     sector_concentration = _max_concentration(selected, "sector")
     prediction_turnover = len(selected_returns) / len(holdout) if len(holdout) else math.nan
-    temporal_fold_positive_fraction = _temporal_fold_stability(selected, selected_returns)
+    temporal_fold_details = _temporal_fold_stability_details(
+        selected,
+        selected_returns,
+        folds=TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS,
+    )
+    temporal_folds_requested = int(cast(int, temporal_fold_details["folds_requested"]))
+    temporal_folds_evaluated = int(cast(int, temporal_fold_details["folds_evaluated"]))
+    temporal_folds_with_selected = int(
+        cast(int, temporal_fold_details["folds_with_selected_observations"])
+    )
+    temporal_selected_observations_per_fold = tuple(
+        int(value)
+        for value in cast(
+            list[int],
+            temporal_fold_details["selected_observations_per_fold"],
+        )
+    )
+    temporal_fold = temporal_fold_stability_result(
+        selected_count=pf_selected_count,
+        folds_requested=temporal_folds_requested,
+        folds_evaluated=temporal_folds_evaluated,
+        folds_with_selected_observations=temporal_folds_with_selected,
+        selected_observations_per_fold=temporal_selected_observations_per_fold,
+        positive_fraction=temporal_fold_details["positive_fraction"],
+        naive_control=family == "naive_base_rate",
+        threshold=TEMPORAL_FOLD_STABILITY_THRESHOLD,
+    )
     period_concentration = _period_concentration(selected, selected_returns)
     selection_metrics = _selection_diagnostics(
         holdout=holdout,
@@ -1802,7 +1938,20 @@ def _train_family(
         "symbol_concentration_top": symbol_concentration,
         "sector_concentration_top": sector_concentration,
         "prediction_turnover": prediction_turnover,
-        "temporal_fold_positive_fraction": temporal_fold_positive_fraction,
+        "temporal_fold_schema_version": TEMPORAL_FOLD_STABILITY_SCHEMA_VERSION,
+        "temporal_fold_folds_requested": temporal_folds_requested,
+        "temporal_fold_folds_evaluated": temporal_folds_evaluated,
+        "temporal_fold_folds_with_selected_observations": temporal_folds_with_selected,
+        "temporal_fold_selected_observations_per_fold_json": _json_dumps(
+            temporal_fold_details["selected_observations_per_fold"]
+        ),
+        "temporal_fold_records_json": _json_dumps(temporal_fold_details["fold_records"]),
+        "temporal_fold_positive_fraction": temporal_fold.actual_value,
+        "temporal_fold_evidence_status": temporal_fold.evidence_status,
+        "temporal_fold_evidence_unavailable_reason": temporal_fold.evidence_unavailable_reason,
+        "temporal_fold_threshold": TEMPORAL_FOLD_STABILITY_THRESHOLD,
+        "temporal_fold_evidence_gate_status": temporal_fold.evidence_gate_status,
+        "temporal_fold_threshold_gate_status": temporal_fold.threshold_gate_status,
         "exceptional_period_concentration_top": period_concentration,
         "rsi_control_columns_available": "rsi_14" in train.columns,
         "naive_control_family": family == "naive_base_rate",

@@ -7,6 +7,7 @@ import pandas as pd
 
 from swing_rsi.engine.gates import (
     GATE_VALUE_NEGATIVE_INFINITY,
+    GATE_VALUE_NOT_APPLICABLE,
     GATE_VALUE_NOT_AVAILABLE,
     GATE_VALUE_POSITIVE_INFINITY,
 )
@@ -15,6 +16,8 @@ from swing_rsi.engine.gates import (
 def special_value_label(value: Any) -> str | None:
     if value in {GATE_VALUE_NOT_AVAILABLE, "Not available"}:
         return "Not available"
+    if value in {GATE_VALUE_NOT_APPLICABLE, "Not applicable"}:
+        return "Not applicable"
     if value in {GATE_VALUE_POSITIVE_INFINITY, "inf", "Inf", "Infinity"}:
         return "∞"
     if value in {GATE_VALUE_NEGATIVE_INFINITY, "-inf", "-Inf", "-Infinity"}:
@@ -126,6 +129,8 @@ def display_frame(
         "mean_mfe",
         "mean_mae",
         "positive_year_fraction",
+        "temporal_fold_positive_fraction",
+        "temporal_fold_threshold",
         "net_return",
         "gross_return",
         "mfe",

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Corrected temporal-fold stability gate evidence semantics: new artifacts now persist a separate temporal-fold evidence-availability gate, fold evidence details, and a threshold gate that becomes `NOT_APPLICABLE` when evidence is unavailable instead of passing missing evidence.
 - Corrected canonical quality-gate evidence semantics for profit factor and concentration gates: positive-infinity profit factor now passes minimum thresholds when selected returns have gains and no losses, unavailable profit factor is represented explicitly instead of as infinity, concentration failure reasons now match status/threshold evidence, and dashboard/model-audit exports distinguish `Infinity` from `NOT_AVAILABLE`.
 - Implemented `prediction_ood_governance_v2`: deprecated the old zero-exceedance OOD promotion rule for new artifacts, added per-head calibration-derived OOD rate/severity gates, hard prediction-integrity gates, training-only OOD bounds, scanner OOD warnings/rejections, OOD-aware scanner identity metadata, and model-audit export fields.
 - Added regression coverage for Wilson OOD limits, head-to-bound mapping, decimal-return contracts, MFE/MAE sign contracts, training-only OOD bounds, live scanner OOD warnings/rejections, legacy OOD promotion blocking, and scanner identity changes from OOD metadata.

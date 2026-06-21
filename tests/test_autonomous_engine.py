@@ -16,6 +16,7 @@ from swing_rsi.engine.forward import (
     create_pending_events_from_snapshot,
     list_forward_events,
 )
+from swing_rsi.engine.gates import GATE_VALUE_NOT_AVAILABLE, make_gate, promotion_eligibility
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
 from swing_rsi.engine.models import BaseRateClassifier, ModelBundle, model_plugins, predict_bundle
 from swing_rsi.engine.ood import PREDICTION_OOD_GOVERNANCE_VERSION
@@ -517,6 +518,74 @@ def test_scanner_rejects_promoted_model_without_gate_eligibility(tmp_path: Path)
     assert row["candidate_status"] == "REJECTED"
     assert row["exclusion_reason"] == "model_quality_gates_failed"
     assert bool(row["model_quality_gate_eligible"]) is False
+
+
+def test_scanner_eligibility_uses_persisted_temporal_fold_gates(tmp_path: Path) -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "dollar_volume": [20_000_000.0],
+            "sector": ["technology"],
+            "market_regime_label": ["mixed"],
+        }
+    )
+    gates = (
+        make_gate(
+            gate_id="temporal_fold_stability_evidence_available",
+            gate_name="Temporal Fold Stability Evidence Available",
+            category="temporal stability",
+            scope="selected_candidates",
+            metric_name="temporal_fold_evidence_status",
+            threshold="AVAILABLE",
+            comparator="is available",
+            actual_value="UNAVAILABLE",
+            status="FAIL",
+            mandatory=True,
+            evidence_source="test",
+            reason=(
+                "Temporal-fold stability evidence is unavailable because only 0 folds contained "
+                "selected observations."
+            ),
+            configuration_hash_value="test",
+        ),
+        make_gate(
+            gate_id="temporal_fold_stability_min_050",
+            gate_name="Temporal Fold Positive Fraction Minimum",
+            category="temporal stability",
+            scope="selected_candidates",
+            metric_name="temporal_fold_positive_fraction",
+            threshold=0.50,
+            comparator=">=",
+            actual_value=GATE_VALUE_NOT_AVAILABLE,
+            status="NOT_APPLICABLE",
+            mandatory=True,
+            evidence_source="test",
+            reason=(
+                "Temporal-fold stability threshold cannot be evaluated because valid "
+                "temporal-fold evidence is unavailable."
+            ),
+            configuration_hash_value="test",
+        ),
+    )
+    eligible = promotion_eligibility(gates).eligible
+
+    snapshot = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": eligible},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert eligible is False
+    assert row["candidate_status"] == "REJECTED"
+    assert row["exclusion_reason"] == "model_quality_gates_failed"
 
 
 def test_scanner_applies_persisted_expected_return_threshold(tmp_path: Path) -> None:

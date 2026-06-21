@@ -80,6 +80,28 @@ def render_page() -> None:
                 "selected_row_sequence_drawdown": model.metrics.get(
                     "selected_row_sequence_drawdown"
                 ),
+                "temporal_fold_evidence_status": model.metrics.get("temporal_fold_evidence_status"),
+                "temporal_fold_folds_requested": model.metrics.get("temporal_fold_folds_requested"),
+                "temporal_fold_folds_evaluated": model.metrics.get("temporal_fold_folds_evaluated"),
+                "temporal_fold_folds_with_selected_observations": model.metrics.get(
+                    "temporal_fold_folds_with_selected_observations"
+                ),
+                "temporal_fold_selected_observations_per_fold": model.metrics.get(
+                    "temporal_fold_selected_observations_per_fold_json"
+                ),
+                "temporal_fold_positive_fraction": model.metrics.get(
+                    "temporal_fold_positive_fraction"
+                ),
+                "temporal_fold_threshold": model.metrics.get("temporal_fold_threshold"),
+                "temporal_fold_evidence_gate_status": model.metrics.get(
+                    "temporal_fold_evidence_gate_status"
+                ),
+                "temporal_fold_threshold_gate_status": model.metrics.get(
+                    "temporal_fold_threshold_gate_status"
+                ),
+                "temporal_fold_evidence_unavailable_reason": model.metrics.get(
+                    "temporal_fold_evidence_unavailable_reason"
+                ),
                 "ood_governance": model.metrics.get("prediction_ood_governance_version"),
                 "prediction_ood_total": model.metrics.get("prediction_sanity_ood_total"),
                 "prediction_values_finite": model.metrics.get("prediction_values_finite"),

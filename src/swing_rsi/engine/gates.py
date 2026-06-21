@@ -12,6 +12,7 @@ type GateValue = str | float | int | bool | None
 EvidenceStatus = Literal["AVAILABLE", "UNAVAILABLE", "NOT_APPLICABLE"]
 
 GATE_VALUE_NOT_AVAILABLE = "NOT_AVAILABLE"
+GATE_VALUE_NOT_APPLICABLE = "NOT_APPLICABLE"
 GATE_VALUE_POSITIVE_INFINITY = "Infinity"
 GATE_VALUE_NEGATIVE_INFINITY = "-Infinity"
 
@@ -55,6 +56,21 @@ class ProfitFactorResult:
     evidence_status: EvidenceStatus
     status: GateStatus
     reason: str
+
+
+@dataclass(frozen=True)
+class TemporalFoldStabilityResult:
+    folds_requested: int
+    folds_evaluated: int
+    folds_with_selected_observations: int
+    selected_observations_per_fold: tuple[int, ...]
+    actual_value: GateValue
+    evidence_status: EvidenceStatus
+    evidence_gate_status: GateStatus
+    threshold_gate_status: GateStatus
+    evidence_reason: str
+    threshold_reason: str
+    evidence_unavailable_reason: str
 
 
 def configuration_hash(config: dict[str, object]) -> str:
@@ -234,6 +250,104 @@ def profit_factor_result(
     )
 
 
+def temporal_fold_stability_result(
+    *,
+    selected_count: int,
+    folds_requested: int,
+    folds_evaluated: int,
+    folds_with_selected_observations: int,
+    selected_observations_per_fold: tuple[int, ...],
+    positive_fraction: object,
+    naive_control: bool,
+    threshold: float = 0.50,
+) -> TemporalFoldStabilityResult:
+    requested = int(folds_requested)
+    evaluated = int(folds_evaluated)
+    with_selected = int(folds_with_selected_observations)
+    selected = int(selected_count)
+    counts = tuple(int(value) for value in selected_observations_per_fold)
+    if naive_control:
+        reason = (
+            "Temporal-fold trading stability is not applicable to the naive zero-selection control."
+        )
+        return TemporalFoldStabilityResult(
+            folds_requested=requested,
+            folds_evaluated=evaluated,
+            folds_with_selected_observations=with_selected,
+            selected_observations_per_fold=counts,
+            actual_value=GATE_VALUE_NOT_AVAILABLE,
+            evidence_status="NOT_APPLICABLE",
+            evidence_gate_status="NOT_APPLICABLE",
+            threshold_gate_status="NOT_APPLICABLE",
+            evidence_reason=reason,
+            threshold_reason=reason,
+            evidence_unavailable_reason=reason,
+        )
+    actual = _coerce_float(positive_fraction)
+    if selected <= 0:
+        unavailable = (
+            "Temporal-fold stability evidence is unavailable because only 0 folds contained "
+            "selected observations."
+        )
+    elif with_selected < requested:
+        unavailable = (
+            "Temporal-fold stability evidence is unavailable because only "
+            f"{with_selected} folds contained selected observations."
+        )
+    elif positive_fraction in {None, GATE_VALUE_NOT_AVAILABLE, ""} or actual is None:
+        unavailable = (
+            "Temporal-fold stability evidence is unavailable because the fold metric is missing."
+        )
+    elif math.isnan(actual) or math.isinf(actual):
+        unavailable = (
+            "Temporal-fold stability evidence is unavailable because the fold metric is nonfinite."
+        )
+    else:
+        unavailable = ""
+    if unavailable:
+        return TemporalFoldStabilityResult(
+            folds_requested=requested,
+            folds_evaluated=evaluated,
+            folds_with_selected_observations=with_selected,
+            selected_observations_per_fold=counts,
+            actual_value=GATE_VALUE_NOT_AVAILABLE,
+            evidence_status="UNAVAILABLE",
+            evidence_gate_status="FAIL",
+            threshold_gate_status="NOT_APPLICABLE",
+            evidence_reason=unavailable,
+            threshold_reason=(
+                "Temporal-fold stability threshold cannot be evaluated because valid "
+                "temporal-fold evidence is unavailable."
+            ),
+            evidence_unavailable_reason=unavailable,
+        )
+    assert actual is not None
+    passed = compare_gate_values(actual, ">=", threshold)
+    actual_label = _percent(actual)
+    threshold_label = _percent(threshold)
+    return TemporalFoldStabilityResult(
+        folds_requested=requested,
+        folds_evaluated=evaluated,
+        folds_with_selected_observations=with_selected,
+        selected_observations_per_fold=counts,
+        actual_value=actual,
+        evidence_status="AVAILABLE",
+        evidence_gate_status="PASS",
+        threshold_gate_status="PASS" if passed else "FAIL",
+        evidence_reason=(
+            "Temporal-fold stability evidence is available from "
+            f"{evaluated} evaluable chronological folds."
+        ),
+        threshold_reason=(
+            f"Temporal-fold positive fraction {actual_label} meets the minimum {threshold_label}."
+            if passed
+            else f"Temporal-fold positive fraction {actual_label} is below the minimum "
+            f"{threshold_label}."
+        ),
+        evidence_unavailable_reason="",
+    )
+
+
 def threshold_reason(
     *,
     metric_label: str,
@@ -300,8 +414,26 @@ def gate_results_to_jsonable(results: tuple[GateResult, ...]) -> list[dict[str, 
 
 
 def gate_result_integrity_warning(result: GateResult) -> str:
+    if result.status == "PASS" and result.actual_value in {
+        None,
+        GATE_VALUE_NOT_AVAILABLE,
+        GATE_VALUE_NOT_APPLICABLE,
+        "Not available",
+        "Not applicable",
+    }:
+        return (
+            "Legacy gate evidence warning: PASS status uses unavailable or inapplicable evidence."
+        )
     actual = _coerce_float(result.actual_value)
     threshold = _coerce_float(result.threshold)
+    if result.status == "PASS" and actual is not None:
+        if math.isnan(actual):
+            return "Legacy gate evidence warning: PASS status uses unavailable or NaN evidence."
+        if math.isinf(actual) and not _valid_infinite_pass(result, actual):
+            return "Legacy gate evidence warning: PASS status uses unsupported nonfinite evidence."
+    reason_warning = _status_reason_integrity_warning(result)
+    if reason_warning:
+        return reason_warning
     if actual is None or threshold is None or math.isnan(actual) or math.isnan(threshold):
         return ""
     if result.comparator in {">=", ">", "<=", "<", "=="}:
@@ -317,10 +449,80 @@ def gate_result_integrity_warning(result: GateResult) -> str:
     return ""
 
 
+def _valid_infinite_pass(result: GateResult, actual: float) -> bool:
+    return (
+        result.gate_id == "profit_factor_min_090"
+        and result.metric_name == "holdout_profit_factor"
+        and result.comparator in {">=", ">"}
+        and actual > 0.0
+    )
+
+
+def _status_reason_integrity_warning(result: GateResult) -> str:
+    reason = result.reason.lower()
+    if result.status == "PASS" and any(
+        phrase in reason
+        for phrase in (
+            "unavailable",
+            "not applicable",
+            "cannot be evaluated",
+            "is below the minimum",
+            "exceeds the maximum",
+            "fails",
+            "missing",
+            "invalid",
+        )
+    ):
+        return "Legacy gate evidence warning: PASS reason contradicts status."
+    if result.status == "FAIL" and any(
+        phrase in reason
+        for phrase in (
+            "passes",
+            "meets the minimum",
+            "is within the maximum",
+            "is available from",
+        )
+    ):
+        return "Legacy gate evidence warning: FAIL reason contradicts status."
+    if result.status == "NOT_APPLICABLE" and any(
+        phrase in reason for phrase in ("passes", "meets the minimum", "is within the maximum")
+    ):
+        return "Legacy gate evidence warning: NOT_APPLICABLE reason contradicts status."
+    return ""
+
+
+def gate_results_integrity_warnings(results: tuple[GateResult, ...]) -> tuple[str, ...]:
+    warnings = [
+        f"{result.gate_id}: {warning}"
+        for result in results
+        if result.mandatory and (warning := gate_result_integrity_warning(result))
+    ]
+    gates = {result.gate_id: result for result in results}
+    temporal_threshold = gates.get("temporal_fold_stability_min_050")
+    temporal_evidence = gates.get("temporal_fold_stability_evidence_available")
+    not_naive = gates.get("not_naive_control")
+    learned_model = not_naive is None or not_naive.status == "PASS"
+    if (
+        learned_model
+        and temporal_threshold is not None
+        and temporal_threshold.mandatory
+        and temporal_threshold.actual_value
+        in {None, GATE_VALUE_NOT_AVAILABLE, GATE_VALUE_NOT_APPLICABLE}
+        and (temporal_evidence is None or temporal_evidence.status != "FAIL")
+    ):
+        warnings.append(
+            "temporal_fold_stability_evidence_available: mandatory learned-model temporal "
+            "evidence is missing without a failing availability gate"
+        )
+    return tuple(warnings)
+
+
 def display_gate_value(value: object) -> str:
     exported = export_gate_value(value)
     if exported == GATE_VALUE_NOT_AVAILABLE:
         return "Not available"
+    if exported == GATE_VALUE_NOT_APPLICABLE:
+        return "Not applicable"
     if exported == GATE_VALUE_POSITIVE_INFINITY:
         return "∞"
     if exported == GATE_VALUE_NEGATIVE_INFINITY:
@@ -391,11 +593,7 @@ def legacy_gate_results(quality_gates: dict[str, bool]) -> tuple[GateResult, ...
 
 
 def quality_gate_bool_map(results: tuple[GateResult, ...]) -> dict[str, bool]:
-    return {
-        result.gate_id: result.status in {"PASS", "NOT_APPLICABLE"}
-        for result in results
-        if result.mandatory
-    }
+    return {result.gate_id: result.status == "PASS" for result in results if result.mandatory}
 
 
 def promotion_eligibility(results: tuple[GateResult, ...]) -> PromotionEligibility:
@@ -417,6 +615,8 @@ def promotion_eligibility(results: tuple[GateResult, ...]) -> PromotionEligibili
         f"{result.gate_id}: {result.reason}"
         for result in (*failed, *not_configured, *not_applicable)
     ]
+    integrity_warnings = gate_results_integrity_warnings(tuple(mandatory))
+    blocked.extend(integrity_warnings)
     prediction_gate_ids = {
         result.gate_id for result in results if result.category == "prediction sanity"
     }
@@ -431,6 +631,7 @@ def promotion_eligibility(results: tuple[GateResult, ...]) -> PromotionEligibili
         eligible=not failed
         and not not_configured
         and not not_applicable
+        and not integrity_warnings
         and not (has_legacy_ood_gate and not has_v2_ood_schema_gate),
         mandatory_passed=len(passed),
         mandatory_failed=len(failed),

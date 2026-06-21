@@ -126,6 +126,26 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             ),
             "prediction_bounds_training_only": metrics.get("prediction_bounds_training_only"),
             "prediction_path_metric_sign_valid": metrics.get("prediction_path_metric_sign_valid"),
+            "temporal_fold_schema_version": metrics.get("temporal_fold_schema_version"),
+            "temporal_fold_folds_requested": metrics.get("temporal_fold_folds_requested"),
+            "temporal_fold_folds_evaluated": metrics.get("temporal_fold_folds_evaluated"),
+            "temporal_fold_folds_with_selected_observations": metrics.get(
+                "temporal_fold_folds_with_selected_observations"
+            ),
+            "temporal_fold_selected_observations_per_fold": metrics.get(
+                "temporal_fold_selected_observations_per_fold_json"
+            ),
+            "temporal_fold_records": metrics.get("temporal_fold_records_json"),
+            "temporal_fold_evidence_status": metrics.get("temporal_fold_evidence_status"),
+            "temporal_fold_positive_fraction": metrics.get("temporal_fold_positive_fraction"),
+            "temporal_fold_evidence_unavailable_reason": metrics.get(
+                "temporal_fold_evidence_unavailable_reason"
+            ),
+            "temporal_fold_threshold": metrics.get("temporal_fold_threshold"),
+            "temporal_fold_evidence_gate_status": metrics.get("temporal_fold_evidence_gate_status"),
+            "temporal_fold_threshold_gate_status": metrics.get(
+                "temporal_fold_threshold_gate_status"
+            ),
             "mandatory_gates_passed": eligibility.mandatory_passed,
             "mandatory_gates_failed": eligibility.mandatory_failed,
             "mandatory_gates_not_configured": eligibility.not_configured,

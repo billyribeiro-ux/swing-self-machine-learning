@@ -17,9 +17,11 @@ import swing_rsi.engine.scanner as scanner_module
 import swing_rsi.engine.selection as selection_module
 from swing_rsi.config import ProjectPaths
 from swing_rsi.engine.gates import (
+    GATE_VALUE_NOT_APPLICABLE,
     GATE_VALUE_NOT_AVAILABLE,
     compare_gate_values,
     gate_result_integrity_warning,
+    gate_results_integrity_warnings,
     make_gate,
     profit_factor_result,
     promotion_eligibility,
@@ -528,7 +530,25 @@ def _base_gate_metrics(**overrides: object) -> dict[str, object]:
         "sector_concentration_top": 0.4,
         "holdout_double_cost_lcb_90": 0.005,
         "prediction_turnover": 0.1,
+        "temporal_fold_schema_version": "temporal_fold_stability_v1",
+        "temporal_fold_folds_requested": 3,
+        "temporal_fold_folds_evaluated": 3,
+        "temporal_fold_folds_with_selected_observations": 3,
+        "temporal_fold_selected_observations_per_fold_json": "[4, 3, 3]",
+        "temporal_fold_records_json": (
+            '[{"fold":1,"selected_count":4,"mean_return":0.01,"positive":true,'
+            '"result":"positive"},'
+            '{"fold":2,"selected_count":3,"mean_return":0.02,"positive":true,'
+            '"result":"positive"},'
+            '{"fold":3,"selected_count":3,"mean_return":-0.01,"positive":false,'
+            '"result":"negative_or_zero"}]'
+        ),
         "temporal_fold_positive_fraction": 0.7,
+        "temporal_fold_evidence_status": "AVAILABLE",
+        "temporal_fold_evidence_unavailable_reason": "",
+        "temporal_fold_threshold": 0.5,
+        "temporal_fold_evidence_gate_status": "PASS",
+        "temporal_fold_threshold_gate_status": "PASS",
         "exceptional_period_concentration_top": 0.3,
         "rsi_control_columns_available": True,
         "prediction_unit_contract": "decimal_return",
@@ -584,6 +604,16 @@ def _exceptional_period_gate(gates: tuple[Any, ...]) -> Any:
     return next(
         gate for gate in gates if gate.gate_id == "exceptional_period_concentration_max_060"
     )
+
+
+def _temporal_evidence_gate(gates: tuple[Any, ...]) -> Any:
+    return next(
+        gate for gate in gates if gate.gate_id == "temporal_fold_stability_evidence_available"
+    )
+
+
+def _temporal_threshold_gate(gates: tuple[Any, ...]) -> Any:
+    return next(gate for gate in gates if gate.gate_id == "temporal_fold_stability_min_050")
 
 
 def test_profit_factor_gains_without_losses_is_positive_infinity_and_passes() -> None:
@@ -768,6 +798,354 @@ def test_concentration_reason_text_matches_status() -> None:
     assert "exceeds the maximum 60.00%" in _exceptional_period_gate(failed).reason
     assert _exceptional_period_gate(passed).status == "PASS"
     assert "is within the maximum 60.00%" in _exceptional_period_gate(passed).reason
+
+
+def test_temporal_fold_valid_fraction_above_minimum_passes_both_gates() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(temporal_fold_positive_fraction=0.75),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    assert _temporal_evidence_gate(gates).status == "PASS"
+    assert "available from 3 evaluable chronological folds" in _temporal_evidence_gate(gates).reason
+    assert _temporal_threshold_gate(gates).status == "PASS"
+    assert "75.00% meets the minimum 50.00%" in _temporal_threshold_gate(gates).reason
+
+
+def test_temporal_fold_valid_fraction_equal_to_minimum_passes_threshold() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(temporal_fold_positive_fraction=0.50),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    assert _temporal_evidence_gate(gates).status == "PASS"
+    assert _temporal_threshold_gate(gates).status == "PASS"
+
+
+def test_temporal_fold_valid_fraction_below_minimum_fails_threshold_only() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(temporal_fold_positive_fraction=0.49),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    assert _temporal_evidence_gate(gates).status == "PASS"
+    assert _temporal_threshold_gate(gates).status == "FAIL"
+    assert "49.00% is below the minimum 50.00%" in _temporal_threshold_gate(gates).reason
+
+
+def test_temporal_fold_zero_selected_rows_fails_evidence_and_blocks_promotion() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            selected_holdout_samples=0,
+            temporal_fold_folds_evaluated=0,
+            temporal_fold_folds_with_selected_observations=0,
+            temporal_fold_selected_observations_per_fold_json="[0, 0, 0]",
+            temporal_fold_records_json="[]",
+            temporal_fold_positive_fraction=GATE_VALUE_NOT_AVAILABLE,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    eligibility = promotion_eligibility(gates)
+
+    assert _temporal_evidence_gate(gates).status == "FAIL"
+    assert _temporal_threshold_gate(gates).status == "NOT_APPLICABLE"
+    assert _temporal_threshold_gate(gates).actual_value == GATE_VALUE_NOT_AVAILABLE
+    assert eligibility.eligible is False
+    assert any(
+        "temporal_fold_stability_evidence_available" in item for item in eligibility.blocked_reasons
+    )
+
+
+def test_temporal_fold_insufficient_selected_rows_fails_evidence() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            selected_holdout_samples=2,
+            temporal_fold_folds_evaluated=2,
+            temporal_fold_folds_with_selected_observations=2,
+            temporal_fold_selected_observations_per_fold_json="[1, 1, 0]",
+            temporal_fold_records_json="[]",
+            temporal_fold_positive_fraction=GATE_VALUE_NOT_AVAILABLE,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    assert _temporal_evidence_gate(gates).status == "FAIL"
+    assert "only 2 folds contained selected observations" in _temporal_evidence_gate(gates).reason
+    assert _temporal_threshold_gate(gates).status == "NOT_APPLICABLE"
+    assert promotion_eligibility(gates).eligible is False
+
+
+@pytest.mark.parametrize(
+    ("value", "reason_fragment"),
+    [
+        (None, "fold metric is missing"),
+        (float("nan"), "fold metric is nonfinite"),
+        (float("inf"), "fold metric is nonfinite"),
+        (float("-inf"), "fold metric is nonfinite"),
+    ],
+)
+def test_temporal_fold_missing_nan_or_infinite_metric_fails_evidence(
+    value: object,
+    reason_fragment: str,
+) -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(temporal_fold_positive_fraction=value),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    assert _temporal_evidence_gate(gates).status == "FAIL"
+    assert reason_fragment in _temporal_evidence_gate(gates).reason
+    assert _temporal_threshold_gate(gates).status == "NOT_APPLICABLE"
+
+
+def test_temporal_fold_naive_control_is_not_applicable_and_not_promotable() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            selected_holdout_samples=0,
+            temporal_fold_folds_evaluated=0,
+            temporal_fold_folds_with_selected_observations=0,
+            temporal_fold_selected_observations_per_fold_json="[0, 0, 0]",
+            temporal_fold_positive_fraction=GATE_VALUE_NOT_AVAILABLE,
+        ),
+        calibration_metrics={"brier_skill_score": 0.0, "holdout_brier": 0.25},
+        family="naive_base_rate",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    eligibility = promotion_eligibility(gates)
+
+    assert _temporal_evidence_gate(gates).status == "NOT_APPLICABLE"
+    assert _temporal_threshold_gate(gates).status == "NOT_APPLICABLE"
+    assert _temporal_evidence_gate(gates).mandatory is False
+    assert _temporal_threshold_gate(gates).mandatory is False
+    assert eligibility.eligible is False
+    assert any("not_naive_control" in item for item in eligibility.blocked_reasons)
+
+
+def test_quantitative_gate_unavailable_or_not_applicable_actual_cannot_pass() -> None:
+    unavailable = make_gate(
+        gate_id="temporal_fold_stability_min_050",
+        gate_name="Temporal Fold Positive Fraction Minimum",
+        category="temporal stability",
+        scope="selected_candidates",
+        metric_name="temporal_fold_positive_fraction",
+        threshold=0.50,
+        comparator=">=",
+        actual_value=GATE_VALUE_NOT_AVAILABLE,
+        status="PASS",
+        mandatory=True,
+        evidence_source="legacy",
+        reason="Temporal fold stability passes or is not applicable due insufficient selected rows.",
+        configuration_hash_value="legacy",
+    )
+    not_applicable = make_gate(
+        gate_id="temporal_fold_stability_min_050",
+        gate_name="Temporal Fold Positive Fraction Minimum",
+        category="temporal stability",
+        scope="selected_candidates",
+        metric_name="temporal_fold_positive_fraction",
+        threshold=0.50,
+        comparator=">=",
+        actual_value=GATE_VALUE_NOT_APPLICABLE,
+        status="PASS",
+        mandatory=True,
+        evidence_source="legacy",
+        reason="Temporal fold stability passes.",
+        configuration_hash_value="legacy",
+    )
+
+    assert "unavailable or inapplicable" in gate_result_integrity_warning(unavailable)
+    assert "unavailable or inapplicable" in gate_result_integrity_warning(not_applicable)
+
+
+def test_status_aware_temporal_fold_reasons_match_status() -> None:
+    passed = _build_gate_results(
+        metrics=_base_gate_metrics(temporal_fold_positive_fraction=0.75),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    failed = _build_gate_results(
+        metrics=_base_gate_metrics(temporal_fold_positive_fraction=0.25),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    not_applicable = _build_gate_results(
+        metrics=_base_gate_metrics(
+            selected_holdout_samples=0,
+            temporal_fold_folds_evaluated=0,
+            temporal_fold_folds_with_selected_observations=0,
+            temporal_fold_selected_observations_per_fold_json="[0, 0, 0]",
+            temporal_fold_positive_fraction=GATE_VALUE_NOT_AVAILABLE,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+
+    assert _temporal_threshold_gate(passed).status == "PASS"
+    assert "meets the minimum" in _temporal_threshold_gate(passed).reason
+    assert _temporal_threshold_gate(failed).status == "FAIL"
+    assert "below the minimum" in _temporal_threshold_gate(failed).reason
+    assert _temporal_threshold_gate(not_applicable).status == "NOT_APPLICABLE"
+    assert "cannot be evaluated" in _temporal_threshold_gate(not_applicable).reason
+
+
+def test_dashboard_display_distinguishes_temporal_fold_evidence_states() -> None:
+    frame = pd.DataFrame(
+        {
+            "temporal_fold_positive_fraction": [
+                0.75,
+                GATE_VALUE_NOT_AVAILABLE,
+                GATE_VALUE_NOT_APPLICABLE,
+            ]
+        }
+    )
+
+    display = display_frame(frame)
+
+    assert display["Temporal Fold Positive Fraction"].tolist() == [
+        "75.00%",
+        "Not available",
+        "Not applicable",
+    ]
+
+
+def test_model_audit_exports_preserve_temporal_fold_evidence_states(tmp_path: Path) -> None:
+    gates = (
+        make_gate(
+            gate_id="temporal_fold_stability_evidence_available",
+            gate_name="Temporal Fold Stability Evidence Available",
+            category="temporal stability",
+            scope="selected_candidates",
+            metric_name="temporal_fold_evidence_status",
+            threshold="AVAILABLE",
+            comparator="is available",
+            actual_value="AVAILABLE",
+            status="PASS",
+            mandatory=True,
+            evidence_source="test",
+            reason="Temporal-fold stability evidence is available from 3 evaluable chronological folds.",
+            configuration_hash_value="test",
+        ),
+        make_gate(
+            gate_id="temporal_fold_stability_evidence_unavailable",
+            gate_name="Temporal Fold Stability Evidence Available",
+            category="temporal stability",
+            scope="selected_candidates",
+            metric_name="temporal_fold_evidence_status",
+            threshold="AVAILABLE",
+            comparator="is available",
+            actual_value="UNAVAILABLE",
+            status="FAIL",
+            mandatory=True,
+            evidence_source="test",
+            reason="Temporal-fold stability evidence is unavailable because only 0 folds contained selected observations.",
+            configuration_hash_value="test",
+        ),
+        make_gate(
+            gate_id="temporal_fold_stability_evidence_not_applicable",
+            gate_name="Temporal Fold Stability Evidence Available",
+            category="temporal stability",
+            scope="selected_candidates",
+            metric_name="temporal_fold_evidence_status",
+            threshold="AVAILABLE",
+            comparator="is available",
+            actual_value=GATE_VALUE_NOT_APPLICABLE,
+            status="NOT_APPLICABLE",
+            mandatory=False,
+            evidence_source="test",
+            reason="Temporal-fold trading stability is not applicable to the naive zero-selection control.",
+            configuration_hash_value="test",
+        ),
+    )
+    db = ProjectPaths(tmp_path).engine_db
+    register_model(db, _audit_model("model-temporal-export", gates))
+
+    audit = build_model_audit(tmp_path, model_id="model-temporal-export")
+    export_paths = export_model_audit(audit, tmp_path / "reports" / "model_audit")
+    csv_path = next(path for path in export_paths if path.name == "full_gate_audit.csv")
+    json_path = next(path for path in export_paths if path.name == "full_gate_audit.json")
+    csv_text = csv_path.read_text(encoding="utf-8")
+    json_rows = json.loads(json_path.read_text(encoding="utf-8"))
+    actual_values = {row["actual_value"] for row in json_rows}
+
+    assert {"AVAILABLE", "UNAVAILABLE", GATE_VALUE_NOT_APPLICABLE} <= actual_values
+    assert "AVAILABLE" in csv_text
+    assert "UNAVAILABLE" in csv_text
+    assert GATE_VALUE_NOT_APPLICABLE in csv_text
+
+
+def test_promotion_eligibility_uses_temporal_fold_evidence_gate() -> None:
+    gates = _build_gate_results(
+        metrics=_base_gate_metrics(
+            selected_holdout_samples=0,
+            temporal_fold_folds_evaluated=0,
+            temporal_fold_folds_with_selected_observations=0,
+            temporal_fold_selected_observations_per_fold_json="[0, 0, 0]",
+            temporal_fold_positive_fraction=GATE_VALUE_NOT_AVAILABLE,
+        ),
+        calibration_metrics={"brier_skill_score": 0.05, "holdout_brier": 0.20},
+        family="extra_trees",
+        config=DiscoveryConfig(),
+        config_hash="test",
+    )
+    eligibility = promotion_eligibility(gates)
+
+    assert _temporal_evidence_gate(gates).status == "FAIL"
+    assert eligibility.eligible is False
+    assert any(
+        reason.startswith("temporal_fold_stability_evidence_available")
+        for reason in eligibility.blocked_reasons
+    )
+
+
+def test_legacy_temporal_fold_inconsistent_row_remains_unchanged_and_blocks() -> None:
+    legacy_gate = make_gate(
+        gate_id="temporal_fold_stability_min_050",
+        gate_name="Temporal Fold Positive Fraction Minimum",
+        category="temporal stability",
+        scope="selected_candidates",
+        metric_name="temporal_fold_positive_fraction",
+        threshold=0.50,
+        comparator=">=",
+        actual_value=GATE_VALUE_NOT_AVAILABLE,
+        status="PASS",
+        mandatory=True,
+        evidence_source="legacy_model_evaluation",
+        reason="Temporal fold stability passes or is not applicable due insufficient selected rows.",
+        configuration_hash_value="legacy",
+    )
+
+    eligibility = promotion_eligibility((legacy_gate,))
+
+    assert legacy_gate.status == "PASS"
+    assert legacy_gate.actual_value == GATE_VALUE_NOT_AVAILABLE
+    assert gate_result_integrity_warning(legacy_gate)
+    assert eligibility.eligible is False
+    assert gate_results_integrity_warnings((legacy_gate,))
 
 
 def test_dashboard_display_distinguishes_infinity_from_unavailable() -> None:

@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-21 — Temporal-fold stability separates evidence availability from threshold comparison
+
+Decision: Temporal-fold stability now persists a mandatory learned-model evidence-availability gate separately from the `temporal_fold_stability_min_050` threshold gate. The existing three chronological fold layout and 0.50 positive-fold threshold remain unchanged. If selected-row evidence is missing, nonfinite, zero-selection, or insufficient to populate all requested folds, the evidence gate fails for learned models and the threshold gate is `NOT_APPLICABLE`; naive zero-selection controls mark both temporal-fold gates `NOT_APPLICABLE` and remain blocked by `not_naive_control`.
+
+Reason: A threshold comparison cannot pass when the metric is unavailable. Separating evidence availability from threshold satisfaction keeps gate status, actual value, comparator, threshold, reason text, promotion eligibility, dashboard display, and model-audit exports internally consistent while preserving legacy artifacts for audit.
+
 ## 2026-06-21 — Canonical gate evidence uses explicit profit-factor availability
 
 Decision: Profit-factor quality gates distinguish available, unavailable, and not-applicable evidence before applying the comparator. Selected returns with gains and no losses have profit factor `Infinity` and pass `>= 0.90`. Zero selected rows and all-zero selected returns are unavailable for learned models and fail mandatory profit-factor evidence. Zero-selection naive controls mark profit factor `NOT_APPLICABLE` while remaining promotion-ineligible through the existing naive-control gate. Concentration gates now generate status-aware reasons for pass, fail, and not-applicable evidence.
