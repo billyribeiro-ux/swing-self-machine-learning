@@ -45,12 +45,15 @@ Research must decide explicitly between raw OHLC with corporate-action events an
 - Expectancy
 - Profit factor
 - Maximum drawdown of the sequential trade equity curve
+- Portfolio maximum drawdown from daily portfolio equity when evaluating scanner candidates
 - Average MFE and MAE
 - Positive-year fraction
 - Lower confidence bound on mean return
 - Exposure and turnover for portfolio scanner backtests
 - Returns by model version, sector, year, and regime when enough data is available
 - Candidate audit counts for rejected/skipped scanner candidates
+
+For model-quality gates, scanner-candidate maximum drawdown must come from chronological portfolio simulation. Sequential compounding of selected cross-sectional rows is invalid for portfolio drawdown and may only be reported as `selected_row_sequence_drawdown`.
 
 ## Bias controls
 

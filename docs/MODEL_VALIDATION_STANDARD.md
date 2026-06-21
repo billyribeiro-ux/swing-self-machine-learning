@@ -20,6 +20,121 @@ Historical walk-forward validation is legacy research evaluation. It is not the 
 
 Before any model is promoted, reserve a final untouched time period that was not used for feature design, parameter ranges, threshold tuning, or model selection.
 
+## Evaluation layers
+
+Autonomous scanner validation separates:
+
+- prediction-level diagnostics over every eligible holdout row;
+- selected-candidate diagnostics over rows passing the frozen selection policy;
+- portfolio-level diagnostics from chronological portfolio simulation only.
+
+The default frozen selection policy is explicit and persisted: probability threshold `0.55`, expected-return threshold `0.001`, target-before-stop threshold `0.50`, minimum dollar volume `5,000,000`, per-date limit `5`, global holdout top-N limit `5,000`, and selected-rate ceiling `20%`. A model that breaches the selected-rate ceiling fails the mandatory selection-coverage gate.
+
+Candidate ordering is canonical and shared by holdout selection, scanner caps, and portfolio replay: composite utility descending, symbol ascending, direction ascending, model ID ascending, then stable candidate identity hash ascending. Probability and expected return are not tie-breakers unless the persisted tie-breaking policy is explicitly changed.
+
+Maximum drawdown used for promotion gates must come from daily portfolio equity. Sequential compounding of selected cross-sectional rows is allowed only as the diagnostic `selected_row_sequence_drawdown`.
+
+## Research date eligibility
+
+Raw data may begin before `research_start` for trailing-feature warm-up. Model-eligible training, calibration, holdout, label, quality, and historical portfolio rows must begin on or after the configured research start and must not use labels extending beyond the configured research end.
+
+The current autonomous default research start is `2016-06-20`.
+
+## Predictive skill
+
+Every classifier is compared against the matching naive control on the exact same holdout rows. Store model Brier, naive Brier, absolute Brier improvement, relative Brier improvement, and Brier skill score. A model with worse holdout Brier than the matching naive control fails the mandatory predictive-skill gate.
+
+## Target-specific feature screening
+
+Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. It must not reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
+
+The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
+
+## Prediction OOD governance V2
+
+Autonomous model artifacts created under `prediction_ood_governance_v2` no longer require zero predictions outside the training `q01` / `q99` reference envelope. The `q01` / `q99` range remains the out-of-distribution reference envelope, but it is not an absolute mathematical domain. Requiring zero exceedances across thousands of holdout predictions makes one ordinary tail estimate fail an otherwise auditable model, so the old `prediction_out_of_distribution_absent` gate is deprecated for new artifacts.
+
+Every exceedance remains visible and auditable. Raw predictions are never silently clipped, replaced, or hidden.
+
+For each regression head, direction, horizon, and model artifact:
+
+- heads are evaluated independently: expected return, expected MFE, and expected MAE;
+- returns are decimal returns, so `0.05` means `5%`;
+- expected return is compared only with expected-return target bounds;
+- expected MFE is compared only with MFE target bounds;
+- expected MAE is compared only with MAE target bounds;
+- bullish and bearish heads use the matching direction and horizon target distributions;
+- bounds are fitted from training targets only.
+
+For each head:
+
+```text
+L = training target q01
+U = training target q99
+R = max(U - L, epsilon)
+
+low_overshoot = max(0, L - prediction) / R
+high_overshoot = max(0, prediction - U) / R
+ood_severity = max(low_overshoot, high_overshoot)
+is_ood = ood_severity > 0
+```
+
+The fixed Wilson constant for calibration-derived rate limits is:
+
+```text
+z = 2.326347874
+```
+
+For each head, calibration predictions define the frozen OOD rate limit:
+
+```text
+rate_limit =
+    min(
+        0.05,
+        max(
+            0.02,
+            wilson_upper_99(k_calibration_ood, n_calibration) + 0.005
+        )
+    )
+```
+
+The calibration OOD rate must be no greater than `0.05`. The holdout OOD rate must be no greater than the frozen `rate_limit`. The formula is fixed before inspecting holdout results and the limit is stored with the immutable artifact.
+
+For each head, calibration predictions also define the frozen severity limit:
+
+```text
+calibration_q99_severity = 0
+    when there are no nonzero calibration OOD severities
+
+calibration_q99_severity =
+    q99 of nonzero calibration OOD severities otherwise
+
+severity_q99_limit =
+    min(
+        0.50,
+        max(
+            0.10,
+            calibration_q99_severity + 0.05
+        )
+    )
+```
+
+The holdout q99 OOD severity must be no greater than the frozen `severity_q99_limit`. The maximum holdout OOD severity must be no greater than `1.00`. A severity greater than `1.00` means the prediction exceeded the `q01` / `q99` boundary by more than one full robust training-target span and is a catastrophic-extrapolation failure.
+
+The following integrity defects remain zero-tolerance mandatory failures:
+
+- nonfinite predictions;
+- probability predictions outside `[0, 1]`;
+- unit-contract failures, including percent values fed into model evaluation;
+- double inverse transformations;
+- wrong head-to-bound mapping;
+- wrong direction or horizon target bounds;
+- OOD bounds derived from calibration, holdout, scanner, or future data;
+- MFE predictions below zero;
+- MAE predictions above zero.
+
+Scanner rows use the frozen artifact metadata. A live prediction outside the `q01` / `q99` reference envelope may remain eligible only when it passes every integrity gate and its severity is within the frozen per-head severity limit. The scanner must retain the OOD warning, affected head, raw value, reference bound, severity, and frozen limit.
+
 ## Stability requirements
 
 Prefer broad stable feature/model behavior over one isolated optimum. RSI parameter stability remains a baseline diagnostic; autonomous models must also report feature stability, calibration, symbol concentration, sector concentration, year/regime stability, and cost sensitivity.
@@ -55,3 +170,5 @@ REJECTED
 Only explicit promotion can create a champion. Discovery never silently replaces a deployed model.
 
 Legacy RSI reports may still use older research labels, but the autonomous registry uses the states above.
+
+Promotion eligibility is computed only from persisted canonical gate results. Missing mandatory gates, failed mandatory gates, mandatory `NOT_CONFIGURED`, and mandatory `NOT_APPLICABLE` block promotion.

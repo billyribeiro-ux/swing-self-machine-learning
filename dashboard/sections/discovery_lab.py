@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 from dashboard.ui.components import render_page_header, repository_root, st
@@ -9,6 +11,7 @@ from swing_rsi.application.engine_service import (
     list_registered_models,
     run_model_discovery,
 )
+from swing_rsi.engine.gates import promotion_eligibility
 
 
 def render_page() -> None:
@@ -54,26 +57,107 @@ def render_page() -> None:
     if not models:
         streamlit.info("No model registry entries yet.")
         return
-    streamlit.dataframe(
-        display_frame(
-            pd.DataFrame(
-                [
-                    {
-                        "model_id": model.model_id,
-                        "state": model.state,
-                        "direction": model.direction,
-                        "horizon": model.horizon,
-                        "family": model.family,
-                        **model.metrics,
-                        **model.calibration_metrics,
-                    }
-                    for model in models
-                ]
-            )
-        ),
-        width="stretch",
-        hide_index=True,
-    )
+    rows: list[dict[str, object]] = []
+    screen_rows: list[dict[str, object]] = []
+    for model in models:
+        eligibility = promotion_eligibility(model.gate_results)
+        rows.append(
+            {
+                "model_id": model.model_id,
+                "state": model.state,
+                "direction": model.direction,
+                "horizon": model.horizon,
+                "family": model.family,
+                "research_start": model.metrics.get("research_start"),
+                "research_end": model.metrics.get("research_end"),
+                "holdout_samples": model.metrics.get("holdout_samples"),
+                "selected_samples": model.metrics.get("selected_holdout_samples"),
+                "selected_rate": model.metrics.get("selected_observation_rate"),
+                "model_brier": model.calibration_metrics.get("holdout_brier"),
+                "naive_brier": model.calibration_metrics.get("naive_brier"),
+                "brier_skill_score": model.calibration_metrics.get("brier_skill_score"),
+                "mean_selected_return": model.metrics.get("holdout_mean_net_return"),
+                "lower_confidence_bound": model.metrics.get("holdout_mean_return_lcb_90"),
+                "profit_factor": model.metrics.get("holdout_profit_factor"),
+                "portfolio_max_drawdown": model.metrics.get("portfolio_max_drawdown"),
+                "selected_row_sequence_drawdown": model.metrics.get(
+                    "selected_row_sequence_drawdown"
+                ),
+                "temporal_fold_evidence_status": model.metrics.get("temporal_fold_evidence_status"),
+                "temporal_fold_folds_requested": model.metrics.get("temporal_fold_folds_requested"),
+                "temporal_fold_folds_evaluated": model.metrics.get("temporal_fold_folds_evaluated"),
+                "temporal_fold_folds_with_selected_observations": model.metrics.get(
+                    "temporal_fold_folds_with_selected_observations"
+                ),
+                "temporal_fold_selected_observations_per_fold": model.metrics.get(
+                    "temporal_fold_selected_observations_per_fold_json"
+                ),
+                "temporal_fold_positive_fraction": model.metrics.get(
+                    "temporal_fold_positive_fraction"
+                ),
+                "temporal_fold_threshold": model.metrics.get("temporal_fold_threshold"),
+                "temporal_fold_evidence_gate_status": model.metrics.get(
+                    "temporal_fold_evidence_gate_status"
+                ),
+                "temporal_fold_threshold_gate_status": model.metrics.get(
+                    "temporal_fold_threshold_gate_status"
+                ),
+                "temporal_fold_evidence_unavailable_reason": model.metrics.get(
+                    "temporal_fold_evidence_unavailable_reason"
+                ),
+                "ood_governance": model.metrics.get("prediction_ood_governance_version"),
+                "prediction_ood_total": model.metrics.get("prediction_sanity_ood_total"),
+                "prediction_values_finite": model.metrics.get("prediction_values_finite"),
+                "probability_contract_valid": model.metrics.get(
+                    "prediction_probability_contract_valid"
+                ),
+                "mandatory_gates_failed": eligibility.mandatory_failed,
+                "mandatory_gates_not_configured": eligibility.not_configured,
+                "promotion_eligible": eligibility.eligible,
+            }
+        )
+        family_counts: dict[str, object] = {}
+        raw_counts = model.metrics.get("target_before_stop_selected_feature_family_counts_json")
+        if isinstance(raw_counts, str) and raw_counts.strip():
+            try:
+                parsed = json.loads(raw_counts)
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                family_counts = parsed
+        screen_rows.append(
+            {
+                "model_id": model.model_id,
+                "direction": model.direction,
+                "horizon": model.horizon,
+                "family": model.family,
+                "target": model.metrics.get("target_before_stop_screening_target"),
+                "screen_schema": model.metrics.get(
+                    "target_before_stop_feature_screen_schema_version"
+                ),
+                "selected_features": model.metrics.get("target_before_stop_selected_feature_count"),
+                "selected_families": ", ".join(
+                    f"{family}:{count}" for family, count in sorted(family_counts.items())
+                ),
+                "manifest_hash": model.metrics.get("target_before_stop_screening_manifest_hash"),
+                "configuration_hash": model.metrics.get(
+                    "target_before_stop_screening_configuration_hash"
+                ),
+            }
+        )
+    tabs = streamlit.tabs(["Model Metrics", "Target-Before-Stop Feature Screen"])
+    with tabs[0]:
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(rows)),
+            width="stretch",
+            hide_index=True,
+        )
+    with tabs[1]:
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(screen_rows)),
+            width="stretch",
+            hide_index=True,
+        )
 
 
 if __name__ == "__main__":

@@ -52,6 +52,32 @@ def render_page() -> None:
     streamlit.write(row.get("top_confirming_relationships", "n/a"))
     streamlit.subheader("Divergences")
     streamlit.write(row.get("top_divergences", "n/a"))
+    streamlit.subheader("Prediction OOD Governance")
+    ood_fields = [
+        "ood_warning",
+        "ood_affected_heads",
+        "ood_max_severity",
+        "ood_warning_details",
+        "expected_return_ood_severity",
+        "expected_return_ood_bound_low",
+        "expected_return_ood_bound_high",
+        "expected_return_ood_severity_limit",
+        "expected_mfe_ood_severity",
+        "expected_mfe_ood_bound_low",
+        "expected_mfe_ood_bound_high",
+        "expected_mfe_ood_severity_limit",
+        "expected_mae_ood_severity",
+        "expected_mae_ood_bound_low",
+        "expected_mae_ood_bound_high",
+        "expected_mae_ood_severity_limit",
+    ]
+    streamlit.dataframe(
+        display_frame(
+            pd.DataFrame([{"Metric": field, "Value": row.get(field, "")} for field in ood_fields])
+        ),
+        width="stretch",
+        hide_index=True,
+    )
     streamlit.subheader("Historical Analogs")
     try:
         analogs = pd.DataFrame(json.loads(str(row.get("historical_analogs", "[]"))))

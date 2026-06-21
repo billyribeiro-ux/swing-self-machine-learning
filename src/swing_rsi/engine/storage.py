@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS models (
     metrics_json TEXT NOT NULL,
     calibration_metrics_json TEXT NOT NULL,
     quality_gates_json TEXT NOT NULL,
+    gate_results_json TEXT NOT NULL DEFAULT '[]',
     artifact_path TEXT NOT NULL,
     code_commit_hash TEXT,
     created_at_utc TEXT NOT NULL,
@@ -120,12 +121,34 @@ def _migrate_scanner_candidates_primary_key(connection: sqlite3.Connection) -> N
     connection.execute("DROP TABLE scanner_candidates_old")
 
 
+def _add_missing_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {row["name"] for row in rows}
+    if column not in existing:
+        try:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+
 def initialize_engine_db(path: str | Path) -> Path:
     db_path = Path(path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         connection.executescript(SCHEMA)
+        _add_missing_column(
+            connection,
+            "models",
+            "gate_results_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
         _migrate_scanner_candidates_primary_key(connection)
     return db_path
 

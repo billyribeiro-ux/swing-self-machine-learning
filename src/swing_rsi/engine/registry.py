@@ -6,6 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from swing_rsi.engine.gates import (
+    GateResult,
+    gate_results_from_jsonable,
+    gate_results_to_jsonable,
+    legacy_gate_results,
+    promotion_eligibility,
+)
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
 ModelState = Literal["EXPERIMENTAL", "CANDIDATE", "CHALLENGER", "CHAMPION", "RETIRED", "REJECTED"]
@@ -38,6 +45,7 @@ class RegisteredModel:
     created_at_utc: str
     promoted_at_utc: str | None = None
     retirement_reason: str | None = None
+    gate_results: tuple[GateResult, ...] = ()
 
 
 def make_model_id(
@@ -78,9 +86,9 @@ def register_model(db_path: str | Path, model: RegisteredModel) -> None:
                 model_id, task, horizon, direction, family, state, training_start, training_end,
                 validation_start, validation_end, holdout_start, holdout_end, universe_snapshot_id,
                 feature_manifest_hash, raw_manifest_hashes_json, hyperparameters_json, metrics_json,
-                calibration_metrics_json, quality_gates_json, artifact_path, code_commit_hash,
-                created_at_utc, promoted_at_utc, retirement_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                calibration_metrics_json, quality_gates_json, gate_results_json, artifact_path,
+                code_commit_hash, created_at_utc, promoted_at_utc, retirement_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 model.model_id,
@@ -102,6 +110,7 @@ def register_model(db_path: str | Path, model: RegisteredModel) -> None:
                 dumps(model.metrics),
                 dumps(model.calibration_metrics),
                 dumps(model.quality_gates),
+                dumps(gate_results_to_jsonable(model.gate_results)),
                 model.artifact_path,
                 model.code_commit_hash,
                 model.created_at_utc,
@@ -123,6 +132,16 @@ def _row_to_model(row: Any) -> RegisteredModel:
     keys = row.keys()
     item = {key: row[key] for key in keys}
     state = cast(ModelState, str(item["state"]))
+    metrics = _metric_dict(loads(str(item["metrics_json"])))
+    calibration_metrics = _metric_dict(loads(str(item["calibration_metrics_json"])))
+    quality_gates = {
+        str(key): bool(value)
+        for key, value in _object_dict(loads(str(item["quality_gates_json"]))).items()
+    }
+    gate_payload = loads(str(item["gate_results_json"])) if "gate_results_json" in item else []
+    gates = gate_results_from_jsonable(gate_payload)
+    if not gates and quality_gates:
+        gates = legacy_gate_results(quality_gates)
     return RegisteredModel(
         model_id=str(item["model_id"]),
         task=str(item["task"]),
@@ -142,12 +161,10 @@ def _row_to_model(row: Any) -> RegisteredModel:
             str(value) for value in cast(list[object], loads(str(item["raw_manifest_hashes_json"])))
         ),
         hyperparameters=_object_dict(loads(str(item["hyperparameters_json"]))),
-        metrics=_metric_dict(loads(str(item["metrics_json"]))),
-        calibration_metrics=_metric_dict(loads(str(item["calibration_metrics_json"]))),
-        quality_gates={
-            str(key): bool(value)
-            for key, value in _object_dict(loads(str(item["quality_gates_json"]))).items()
-        },
+        metrics=metrics,
+        calibration_metrics=calibration_metrics,
+        quality_gates=quality_gates,
+        gate_results=gates,
         artifact_path=str(item["artifact_path"]),
         code_commit_hash=str(item["code_commit_hash"]) if item["code_commit_hash"] else None,
         created_at_utc=str(item["created_at_utc"]),
@@ -179,9 +196,12 @@ def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
         raise ValueError(f"Unknown model: {model_id}")
     if selected.state not in {"CHALLENGER", "CANDIDATE"}:
         raise ValueError(f"Only challenger/candidate models can be promoted, not {selected.state}")
-    failed = [name for name, passed in selected.quality_gates.items() if not passed]
-    if failed:
-        raise ValueError(f"Model cannot be promoted because quality gates failed: {failed}")
+    eligibility = promotion_eligibility(selected.gate_results)
+    if not eligibility.eligible:
+        raise ValueError(
+            "Model cannot be promoted because mandatory gate results block promotion: "
+            f"{list(eligibility.blocked_reasons)}"
+        )
 
     promoted_at = datetime.now(UTC).isoformat()
     with engine_connection(db_path) as connection:

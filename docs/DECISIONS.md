@@ -1,5 +1,35 @@
 # Decision Log
 
+## 2026-06-21 — Target-before-stop uses its own train-only feature screen
+
+Decision: The target-before-stop classifier now owns a separate train-only feature screen keyed to `label_{direction}_target_before_stop_{horizon}`. The primary positive-return classifier, target-before-stop classifier, expected-return head, MFE head, and MAE head persist separate head feature manifests, with legacy artifacts labeled as shared-screen artifacts when target-specific metadata is absent.
+
+Reason: Positive-return classification and target-before-stop classification are different prediction tasks. Reusing the primary classifier's selected columns for target-before-stop can exclude eligible families before they receive a fair target-specific score. The correction is target-specific screening without changing labels, thresholds, calibration, model families, target/stop multiples, or OOD Governance V2.
+
+## 2026-06-21 — Temporal-fold stability separates evidence availability from threshold comparison
+
+Decision: Temporal-fold stability now persists a mandatory learned-model evidence-availability gate separately from the `temporal_fold_stability_min_050` threshold gate. The existing three chronological fold layout and 0.50 positive-fold threshold remain unchanged. If selected-row evidence is missing, nonfinite, zero-selection, or insufficient to populate all requested folds, the evidence gate fails for learned models and the threshold gate is `NOT_APPLICABLE`; naive zero-selection controls mark both temporal-fold gates `NOT_APPLICABLE` and remain blocked by `not_naive_control`.
+
+Reason: A threshold comparison cannot pass when the metric is unavailable. Separating evidence availability from threshold satisfaction keeps gate status, actual value, comparator, threshold, reason text, promotion eligibility, dashboard display, and model-audit exports internally consistent while preserving legacy artifacts for audit.
+
+## 2026-06-21 — Canonical gate evidence uses explicit profit-factor availability
+
+Decision: Profit-factor quality gates distinguish available, unavailable, and not-applicable evidence before applying the comparator. Selected returns with gains and no losses have profit factor `Infinity` and pass `>= 0.90`. Zero selected rows and all-zero selected returns are unavailable for learned models and fail mandatory profit-factor evidence. Zero-selection naive controls mark profit factor `NOT_APPLICABLE` while remaining promotion-ineligible through the existing naive-control gate. Concentration gates now generate status-aware reasons for pass, fail, and not-applicable evidence.
+
+Reason: Gate status, actual value, comparator, threshold, and reason must not contradict one another. Positive infinity is a valid mathematical profit factor when losses are zero and gains exist; unavailable evidence must not be encoded as infinity.
+
+## 2026-06-21 — Prediction OOD governance uses calibrated rate and severity limits
+
+Decision: Replace the zero-tolerance `prediction_out_of_distribution_absent` promotion rule for new artifacts with governance schema `prediction_ood_governance_v2`. Training `q01` / `q99` remains the reference OOD envelope, but ordinary exceedances are evaluated by per-head OOD rate and severity limits derived from calibration predictions. Integrity defects remain mandatory zero-tolerance failures: nonfinite predictions, probability values outside `[0, 1]`, decimal/percent unit misuse, wrong head-to-bound mapping, non-training OOD bounds, double inverse transformation, MFE predictions below zero, and MAE predictions above zero. Raw predictions are never clipped.
+
+Reason: A robust `q01` / `q99` envelope is a diagnostic reference, not an absolute mathematical domain. Requiring zero exceedances across thousands of predictions makes one normal tail estimate fail an entire model and masks the more important distinction between ordinary tails, severe extrapolation, and implementation defects. Calibration-derived limits keep the rule fixed before holdout evaluation while preserving every exceedance for audit.
+
+## 2026-06-20 — Model promotion requires canonical portfolio-aware gates
+
+Decision: Autonomous model promotion is computed only from persisted canonical gate records. Portfolio maximum drawdown must come from chronological daily portfolio equity. Cross-sectional selected-row compounding is retained only as `selected_row_sequence_drawdown` and cannot satisfy the portfolio drawdown gate.
+
+Reason: Same-date panel predictions are not sequential full-capital trades. Using their compounded row sequence produced near--100% drawdowns that were mathematically invalid as portfolio evidence and obscured the real promotion blockers.
+
 ## 2026-06-20 — Scanner review mode uses newest candidate generation only
 
 Decision: When no champion exists and scanner review mode is explicitly enabled with `--include-challengers`, load only the newest `CANDIDATE`/`CHALLENGER` generation for the active feature-manifest hash. Keep older model artifacts registered for audit history, but do not mix them into the current scanner run.
@@ -129,3 +159,13 @@ Reason: A filename such as `AAPL.csv` is not a provider ticker. Normalization pr
 Decision: Automatically sized expanding walk-forward splits calculate test size from `sample_count - gap` before dividing by `n_splits + 1`, and the resulting canonical split plan is shared by dashboard preflight validation and actual execution.
 
 Reason: The previous default calculation sized test folds from all samples and then subtracted the gap, which could reject valid configurations. The split plan must preserve the requested gap, keep chronological non-overlapping test folds, and end the final test fold at the final available sample without silently changing user-selected dates or fold settings.
+
+## 2026-06-20 — Scanner actionability requires persisted gate eligibility
+
+Decision: The autonomous model selection policy is explicitly configured and persisted with each model, and live scanner actionability now requires both promoted registry state and promotion-eligible canonical gate results.
+
+Reason: Candidate rows must not become paper signals merely because a model has a favorable state string. Selection coverage, expected return, target-before-stop probability, liquidity, and date-level candidate caps are model-governance controls and must be evaluated from the same persisted gate results used by promotion.
+
+Decision: Candidate policy checks and deterministic candidate ordering live in one shared selection module.
+
+Reason: Holdout selection, live scanner actionability, scanner caps, and portfolio replay must not drift. The canonical order is composite utility descending, symbol ascending, direction ascending, model ID ascending, and stable candidate identity hash ascending.
