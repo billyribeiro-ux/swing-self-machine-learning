@@ -199,3 +199,9 @@ Reason: Candidate rows must not become paper signals merely because a model has 
 Decision: Candidate policy checks and deterministic candidate ordering live in one shared selection module.
 
 Reason: Holdout selection, live scanner actionability, scanner caps, and portfolio replay must not drift. The canonical order is composite utility descending, symbol ascending, direction ascending, model ID ascending, and stable candidate identity hash ascending.
+
+## 2026-06-22 — MFE and MAE use domain-preserving magnitude models
+
+Decision: Preserve historical MFE and MAE labels unchanged, but train MFE on favorable magnitude and MAE on adverse magnitude under `path_metric_magnitude_domain_v1`. Linear-family path-magnitude heads use Tweedie regression with a log link, HistGradientBoosting uses Poisson loss, ExtraTrees trains directly on nonnegative magnitudes, and naive controls use nonnegative magnitude summaries.
+
+Reason: MFE is physically nonnegative and MAE is physically nonpositive. The previous unconstrained path regressors could emit negative MFE or positive MAE predictions. Domain correctness must be achieved by target representation and estimator choice, not post-hoc clipping.

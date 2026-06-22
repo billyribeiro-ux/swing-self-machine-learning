@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added Domain-Preserving MFE and MAE Magnitude Modeling V1: MFE and MAE now train on nonnegative internal magnitudes, linear-family magnitude heads use Tweedie regression with a log link, HistGradientBoosting magnitude heads use Poisson loss, ExtraTrees trains on nonnegative magnitudes, and naive controls map nonnegative summaries back to canonical signed outputs.
+- Added MFE/MAE domain metadata, estimator hashes, prediction mapping metadata, domain-integrity gates, scanner domain rejection reasons, scanner identity hashes for path-domain metadata, model-audit export fields, and promotion/final-holdout enrollment blockers for missing domain metadata.
+- Added regression coverage for unchanged MFE/MAE labels, nonnegative magnitude targets, nonnegative magnitude predictions across current families, no clipping in prediction mapping, canonical MFE/MAE sign outputs, scanner rejection of missing/invalid domain metadata, and legacy unconstrained artifact readability.
 - Added target-specific train-only feature screening for expected-return, MFE, and MAE regression heads, including path-head feature manifests, train-only mutual-information regression audits, scanner path-manifest identity, model-audit exports, and dashboard review tabs.
 - Added regression coverage for path-head target isolation, full eligible-universe scoring before the cap, train-only filtering/imputation/correlation pruning, deterministic column-order behavior, scanner missing-feature rejection, scanner identity changes from path manifests, and legacy artifact promotion blocking.
 - Added Prospective Final-Holdout Sample Governance V1: frozen run-level sample policy `prospective_final_holdout_sample_v1`, canonical sufficiency/provenance/integrity gates, non-promotable early diagnostics, diagnostic-only evaluation, status progress counts, promotion checks for sample gates, and regression coverage for threshold boundaries and bypass prevention.

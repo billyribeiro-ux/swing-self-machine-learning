@@ -63,9 +63,20 @@ Every classifier is compared against the matching naive control on the exact sam
 
 ## Target-specific feature screening
 
-Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. The expected-return, MFE, and MAE regressors use their exact continuous path targets for the same train-only screening stages. No head may reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
+Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. Expected-return regressors use the signed directional return target. MFE regressors use favorable magnitude, equal to the existing MFE label. MAE regressors use adverse magnitude, equal to negative existing MAE. No head may reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
 
 The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Classification heads use `mutual_info_classif`; regression heads use `mutual_info_regression`. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
+
+## Path magnitude domain modeling
+
+MFE and MAE historical labels are not rewritten. Their external contract remains MFE `>= 0` and MAE `<= 0` in decimal-return units. Model training derives internal nonnegative magnitude targets only for the MFE and MAE heads:
+
+- `mfe_magnitude_target = existing MFE label`;
+- `mae_magnitude_target = -1 * existing MAE label`.
+
+Under `path_metric_magnitude_domain_v1`, linear-family path-magnitude heads use `TweedieRegressor(power=1.5, link="log")`, HistGradientBoosting path-magnitude heads use `HistGradientBoostingRegressor(loss="poisson")`, ExtraTrees path-magnitude heads train directly on nonnegative magnitudes, and naive controls use nonnegative training-magnitude summaries. Expected-return modeling remains signed.
+
+Predictions are mapped back to canonical external units before OOD, scanner, attribution, and gate evaluation. Invalid magnitude output or invalid signed output is a hard integrity failure; no post-prediction clipping may be used to repair it.
 
 ## Target-before-stop calibration governance
 

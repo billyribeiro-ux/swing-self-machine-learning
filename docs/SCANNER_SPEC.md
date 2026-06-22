@@ -37,7 +37,8 @@ Snapshots include:
 - signal close context;
 - calibrated probability;
 - expected return;
-- expected MFE and MAE;
+- expected MFE and MAE in canonical signed external units;
+- internal favorable and adverse magnitude predictions for audit;
 - target-before-stop probability from the separate target-before-stop classifier;
 - target-before-stop feature-screen schema and selected-feature manifest hash;
 - expected-return, MFE, and MAE feature-screen schemas and selected-feature manifest hashes;
@@ -68,9 +69,11 @@ The target-before-stop probability must be generated from the target-before-stop
 
 Expected-return, MFE, and MAE predictions must be generated from their own frozen selected-feature manifests. The scanner must not pass one shared feature matrix into all heads. If a required path-metric feature is missing from the latest snapshot, the candidate is rejected with `expected_return_required_feature_missing`, `mfe_required_feature_missing`, or `mae_required_feature_missing`, and the missing feature names remain auditable in the snapshot.
 
+MFE and MAE heads must also carry `path_metric_magnitude_domain_v1` metadata. The scanner validates internal magnitudes before mapping to signed external outputs, validates MFE `>= 0` and MAE `<= 0`, and never clips invalid predictions. Missing or invalid domain evidence rejects the row with `mfe_domain_metadata_missing`, `mae_domain_metadata_missing`, `mfe_magnitude_prediction_invalid`, `mae_magnitude_prediction_invalid`, `mfe_prediction_sign_contract_failed`, or `mae_prediction_sign_contract_failed`.
+
 The target-before-stop probability must also use the model artifact's frozen selected calibrator. Identity leaves the raw target-before-stop probability unchanged, sigmoid uses the frozen sigmoid calibrator, and isotonic uses the frozen isotonic calibrator. A new-schema artifact missing calibration-governance metadata is rejected with `target_before_stop_calibration_metadata_missing`; legacy shared-screen artifacts remain labeled as legacy review artifacts rather than being treated as equivalent to new governance-aware artifacts.
 
-Scanner cache identity includes the target-before-stop screening schema, selected-feature manifest hash, calibration governance schema, selected calibrator method, calibration manifest hash, calibrator artifact hash, and path-metric screening schemas and selected-feature manifest hashes for every loaded model. Changing the selected target-before-stop calibrator or any path-metric feature manifest changes the scanner snapshot identity.
+Scanner cache identity includes the target-before-stop screening schema, selected-feature manifest hash, calibration governance schema, selected calibrator method, calibration manifest hash, calibrator artifact hash, path-metric screening schemas and selected-feature manifest hashes, and MFE/MAE domain schema, estimator hashes, magnitude target metadata, and prediction mapping versions for every loaded model. Changing the selected target-before-stop calibrator, any path-metric feature manifest, or any path-domain estimator/mapping hash changes the scanner snapshot identity.
 
 ## Prospective Final-Holdout Scanner Mode
 
