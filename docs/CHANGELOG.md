@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added target-specific train-only feature screening for expected-return, MFE, and MAE regression heads, including path-head feature manifests, train-only mutual-information regression audits, scanner path-manifest identity, model-audit exports, and dashboard review tabs.
+- Added regression coverage for path-head target isolation, full eligible-universe scoring before the cap, train-only filtering/imputation/correlation pruning, deterministic column-order behavior, scanner missing-feature rejection, scanner identity changes from path manifests, and legacy artifact promotion blocking.
 - Added Prospective Final-Holdout Sample Governance V1: frozen run-level sample policy `prospective_final_holdout_sample_v1`, canonical sufficiency/provenance/integrity gates, non-promotable early diagnostics, diagnostic-only evaluation, status progress counts, promotion checks for sample gates, and regression coverage for threshold boundaries and bypass prevention.
 - Added Prospective Final Holdout and Shadow Paper Forward Validation V1: final-holdout run/model registry tables, strict no-backfill enforcement with ingestion provenance, `SHADOW_FINAL_HOLDOUT` event lifecycle, final-holdout init/update/status/evaluate CLI commands, promotion evidence checks, and a dashboard section labeled as prospective shadow validation rather than a live recommendation.
 - Added an explicit final-holdout promotion guard: new discovery artifacts persist `DEVELOPMENT_HOLDOUT`, canonical gates require `FINAL_HOLDOUT`, missing holdout-status metadata blocks eligibility, and manual promotion refuses non-final holdout models before mutating registry state.

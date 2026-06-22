@@ -14,10 +14,10 @@ The implemented vertical slice lives under `src/swing_rsi/engine/` and is orches
 6. Merge features and labels only for historical model discovery.
 7. Split chronologically into train, calibration, and holdout slices with purge/embargo of overlapping label horizons.
 8. Train baseline and nonlinear local models, including the naive historical base-rate control.
-9. Fit head-specific train-only feature screens where heads use different targets. The target-before-stop classifier screens against `label_{direction}_target_before_stop_{horizon}` rather than reusing positive-return features.
+9. Fit head-specific train-only feature screens where heads use different targets. The target-before-stop classifier screens against `label_{direction}_target_before_stop_{horizon}`, and the expected-return, MFE, and MAE regressors screen against their own continuous path targets rather than reusing positive-return features.
 10. Calibrate classification probability on the calibration slice. The target-before-stop head selects among identity, sigmoid, and isotonic calibrators using only internal chronological folds inside the calibration slice and the precommitted one-standard-error rule.
 11. Evaluate holdout quality gates. Target-before-stop holdout metrics from the current repeatedly inspected split are labeled development-holdout diagnostics.
-12. Register model artifacts as `CANDIDATE`, `CHALLENGER`, or `REJECTED` with quality gates, feature-stability diagnostics, target-specific screen diagnostics, target-before-stop calibration-governance metadata, and holdout permutation-importance summaries.
+12. Register model artifacts as `CANDIDATE`, `CHALLENGER`, or `REJECTED` with quality gates, feature-stability diagnostics, per-head target-specific screen diagnostics, target-before-stop calibration-governance metadata, and holdout permutation-importance summaries.
 13. Scan the latest feature snapshot with champion models, or with review candidates only when explicitly requested.
 14. Persist immutable scanner snapshots, append-only paper-forward events, and drift-check summaries.
 15. Enroll eligible frozen models into prospective final-holdout runs only after a baseline market date is recorded.

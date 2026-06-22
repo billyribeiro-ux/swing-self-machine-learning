@@ -62,6 +62,8 @@ The discovery runner applies missingness filtering, zero-variance filtering, nea
 
 No feature family is an automatic trading rule. Tree and linear model families discover relationships from the training slice, then the selected feature set and manifest hash are stored with each model.
 
-Feature screening is target-specific for heads with distinct prediction targets. The target-before-stop classifier starts from the complete eligible numeric feature universe, excluding `label_` columns, metadata, unsupported string/object columns, and registry-prohibited fields. Every eligible feature family is scored on training rows only before the configured feature cap is applied.
+Feature screening is target-specific for heads with distinct prediction targets. The target-before-stop classifier and the expected-return, MFE, and MAE path-metric regressors each start from the complete eligible numeric feature universe, excluding `label_` columns, metadata, unsupported string/object columns, and registry-prohibited fields. Every eligible feature family is scored on training rows only before the configured feature cap is applied.
 
 The target-before-stop screen may select market-relative, sector-relative, inverse/leveraged, breadth, relationship-graph, regime, RSI, trend, volume, volatility, candle, or technical features only when the train-only scoring and pruning order selects them naturally. There are no family quotas, and a family with no target-specific signal is allowed to have zero selected features.
+
+Path-metric regression screens use the same eligibility, train-only missingness/variance/imputation, deterministic score ordering, and correlation-pruning contract, but score surviving features with `mutual_info_regression` against the head's exact continuous training target. Expected return, MFE, and MAE may overlap naturally, but none may inherit the primary classifier's feature list for convenience.

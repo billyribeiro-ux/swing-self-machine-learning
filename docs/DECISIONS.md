@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-22 — Path-metric heads use target-specific train-only feature screens
+
+Decision: Expected-return, MFE, and MAE regressors now use independent train-only feature screens keyed to their exact continuous path targets. The screens start from the complete eligible numeric feature universe, exclude labels and prohibited metadata, fit missingness/variance/imputation on training rows only, score surviving features with `mutual_info_regression`, prune correlations in score order, and persist separate manifests under `path_metric_target_specific_feature_screen_v1`.
+
+Reason: The path-metric diagnosis found no label or unit defect, but did find that expected return, MFE, and MAE reused the primary positive-return classifier's feature screen. These regression heads predict different targets, so reusing classifier-selected columns can exclude eligible features before target-specific scoring. This correction changes feature selection only; it does not change labels, ATR normalization, regression estimators, losses, target/stop definitions, quality gates, or OOD Governance V2.
+
 ## 2026-06-21 — Prospective final-holdout sample sufficiency is precommitted
 
 Decision: Prospective final-holdout runs now freeze sample governance policy `prospective_final_holdout_sample_v1` at run creation. A model becomes ready for final-holdout evaluation only after 100 matured outcomes, 60 distinct signal dates, 126 completed market sessions, 4 calendar months, 20 positive and 20 negative target-before-stop outcomes, valid provenance for every included prediction, zero backfilled predictions, zero unresolved data-integrity events, and unchanged frozen artifacts/governance hashes. Early diagnostics are non-promotable and require 30 matured outcomes and 20 signal dates.

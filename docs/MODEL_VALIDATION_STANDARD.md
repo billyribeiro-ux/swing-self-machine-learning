@@ -63,9 +63,9 @@ Every classifier is compared against the matching naive control on the exact sam
 
 ## Target-specific feature screening
 
-Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. It must not reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
+Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. The expected-return, MFE, and MAE regressors use their exact continuous path targets for the same train-only screening stages. No head may reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
 
-The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
+The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Classification heads use `mutual_info_classif`; regression heads use `mutual_info_regression`. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
 
 ## Target-before-stop calibration governance
 
