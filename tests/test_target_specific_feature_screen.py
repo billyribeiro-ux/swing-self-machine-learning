@@ -98,7 +98,8 @@ def _path_metric_frame(rows: int = 220) -> pd.DataFrame:
         data[f"noise_{position:02d}"] = np.random.default_rng(position).normal(size=rows)
     data["late_return_signal"] = expected_return + np.random.default_rng(501).normal(0, 0.001, rows)
     data["late_mfe_signal"] = mfe + np.random.default_rng(502).normal(0, 0.001, rows)
-    data["late_mae_signal"] = mae + np.random.default_rng(503).normal(0, 0.001, rows)
+    data["late_mae_signal"] = np.random.default_rng(503).normal(0, 1.0, rows)
+    data["late_mae_magnitude_signal"] = -mae + np.random.default_rng(504).normal(0, 0.001, rows)
     data["positive_return_signal"] = data["label_bull_positive_return_10"]
     data["tbs_signal"] = data["label_bull_target_before_stop_10"]
     return pd.DataFrame(data)
@@ -130,7 +131,7 @@ def test_primary_and_target_before_stop_heads_can_select_different_features() ->
     [
         ("expected_return", "label_bull_forward_return_10", "late_return_signal"),
         ("mfe", "label_bull_mfe_10", "late_mfe_signal"),
-        ("mae", "label_bull_mae_10", "late_mae_signal"),
+        ("mae", "label_bull_mae_10__adverse_magnitude", "late_mae_magnitude_signal"),
     ],
 )
 def test_path_metric_screen_uses_exact_continuous_target(
@@ -139,9 +140,14 @@ def test_path_metric_screen_uses_exact_continuous_target(
     signal: str,
 ) -> None:
     frame = _path_metric_frame()
+    target = (
+        (-frame["label_bull_mae_10"]).rename(target_column)
+        if target_column.endswith("__adverse_magnitude")
+        else frame[target_column]
+    )
     result = _screen_regression(
         frame,
-        frame[target_column],
+        target,
         head_name=head,
         max_selected=5,
     )
@@ -179,11 +185,16 @@ def test_expected_return_mfe_and_mae_can_select_different_features() -> None:
         max_selected=3,
     )
     mfe = _screen_regression(frame, frame["label_bull_mfe_10"], head_name="mfe", max_selected=3)
-    mae = _screen_regression(frame, frame["label_bull_mae_10"], head_name="mae", max_selected=3)
+    mae = _screen_regression(
+        frame,
+        (-frame["label_bull_mae_10"]).rename("label_bull_mae_10__adverse_magnitude"),
+        head_name="mae",
+        max_selected=3,
+    )
 
     assert "late_return_signal" in expected.selected_features
     assert "late_mfe_signal" in mfe.selected_features
-    assert "late_mae_signal" in mae.selected_features
+    assert "late_mae_magnitude_signal" in mae.selected_features
     assert set(expected.selected_features) != set(mfe.selected_features)
     assert set(mfe.selected_features) != set(mae.selected_features)
 
@@ -258,14 +269,16 @@ def test_path_metric_cross_market_family_feature_can_be_selected(
     family: str,
 ) -> None:
     rows = 180
-    target = pd.Series(
-        np.sin(np.arange(rows) / 9.0),
-        name={
-            "expected_return": "label_bull_forward_return_10",
-            "mfe": "label_bull_mfe_10",
-            "mae": "label_bull_mae_10",
-        }[head],
-    )
+    raw_signal = np.sin(np.arange(rows) / 9.0)
+    if head == "expected_return":
+        target = pd.Series(raw_signal, name="label_bull_forward_return_10")
+    elif head == "mfe":
+        target = pd.Series(np.abs(raw_signal) + 0.001, name="label_bull_mfe_10")
+    else:
+        target = pd.Series(
+            np.abs(raw_signal) + 0.001,
+            name="label_bull_mae_10__adverse_magnitude",
+        )
     data = {f"noise_{i:02d}": np.random.default_rng(i).normal(size=rows) for i in range(70)}
     data[feature] = target.to_numpy(dtype=float)
     frame = pd.DataFrame(data)
@@ -486,7 +499,7 @@ def test_path_metric_screen_metadata_and_hashes_are_json_serializable() -> None:
     frame = _path_metric_frame()
     result = _screen_regression(
         frame,
-        frame["label_bull_mae_10"],
+        (-frame["label_bull_mae_10"]).rename("label_bull_mae_10__adverse_magnitude"),
         head_name="mae",
         max_selected=5,
     )
@@ -496,5 +509,5 @@ def test_path_metric_screen_metadata_and_hashes_are_json_serializable() -> None:
     json.dumps(result.audit_records(), sort_keys=True)
     assert payload["screening_schema_version"] == "path_metric_target_specific_feature_screen_v1"
     assert payload["head_name"] == "mae"
-    assert payload["target_label_name"] == "label_bull_mae_10"
+    assert payload["target_label_name"] == "label_bull_mae_10__adverse_magnitude"
     assert payload["selected_feature_manifest_hash"] == result.selected_feature_manifest_hash

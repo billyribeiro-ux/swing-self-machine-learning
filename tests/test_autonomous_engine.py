@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
@@ -31,11 +32,15 @@ from swing_rsi.engine.models import (
     EXPECTED_RETURN_HEAD,
     MAE_HEAD,
     MFE_HEAD,
+    PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+    PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
     PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     BaseRateClassifier,
     DiscoveryConfig,
     ModelBundle,
+    _path_magnitude_prediction,
+    build_path_magnitude_estimator,
     discover_models,
     load_model_bundle,
     model_plugins,
@@ -284,6 +289,7 @@ def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> Registered
             "mfe_screening_manifest_hash": "mfe-manifest",
             "mae_feature_screen_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
             "mae_screening_manifest_hash": "mae-manifest",
+            **_path_domain_metrics(),
         },
         calibration_metrics={"holdout_brier": 0.2},
         quality_gates={gate.gate_id: gate.status == "PASS" for gate in gates},
@@ -496,8 +502,14 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
         learned.metrics["target_before_stop_feature_screen_audit_json"]
     )
     assert learned.metrics["expected_return_screening_target"] == ("label_bull_forward_return_10")
-    assert learned.metrics["mfe_screening_target"] == "label_bull_mfe_10"
-    assert learned.metrics["mae_screening_target"] == "label_bull_mae_10"
+    assert learned.metrics["mfe_screening_target"] == ("label_bull_mfe_10__favorable_magnitude")
+    assert learned.metrics["mae_screening_target"] == "label_bull_mae_10__adverse_magnitude"
+    assert learned.metrics["mfe_external_target_name"] == "label_bull_mfe_10"
+    assert learned.metrics["mae_external_target_name"] == "label_bull_mae_10"
+    assert learned.metrics["mfe_domain_schema_version"] == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+    assert learned.metrics["mae_domain_schema_version"] == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+    assert learned.metrics["mfe_holdout_signed_domain_violation_count"] == 0
+    assert learned.metrics["mae_holdout_signed_domain_violation_count"] == 0
     assert learned.metrics["expected_return_feature_screen_schema_version"] == (
         PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION
     )
@@ -607,6 +619,39 @@ def _ood_metrics(
     return metrics
 
 
+def _path_domain_metrics() -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for head, external_target, internal_target, definition in (
+        (
+            "mfe",
+            "label_bull_mfe_10",
+            "label_bull_mfe_10__favorable_magnitude",
+            "favorable_magnitude_equals_existing_mfe",
+        ),
+        (
+            "mae",
+            "label_bull_mae_10",
+            "label_bull_mae_10__adverse_magnitude",
+            "adverse_magnitude_equals_negative_existing_mae",
+        ),
+    ):
+        payload.update(
+            {
+                f"{head}_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                f"{head}_external_target_name": external_target,
+                f"{head}_internal_magnitude_target_name": internal_target,
+                f"{head}_internal_target_definition": definition,
+                f"{head}_magnitude_estimator_class": "ConstantRegressor",
+                f"{head}_magnitude_estimator_loss": "test_constant_magnitude",
+                f"{head}_magnitude_estimator_hash": f"{head}-estimator-hash",
+                f"{head}_prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                f"{head}_calibration_domain_integrity_valid": True,
+                f"{head}_holdout_domain_integrity_valid": True,
+            }
+        )
+    return payload
+
+
 def _policy_metrics(
     policy: SelectionPolicy | None = None,
     *,
@@ -635,6 +680,7 @@ def _policy_metrics(
         "selection_policy_configuration_hash": policy_hash,
         "generation": generation,
         "artifact_hash": artifact_hash,
+        **_path_domain_metrics(),
     }
     if include_tbs_calibration:
         metrics.update(
@@ -696,6 +742,7 @@ def _bundle(
     calibration_manifest_hash: str = "calibration-manifest-a",
     calibrator_artifact_hash: str = "calibrator-artifact-a",
     include_feature_screen_metadata: bool = True,
+    include_path_domain_metadata: bool = True,
 ) -> ModelBundle:
     target_feature_columns = target_feature_columns or ("f1", "dollar_volume")
     expected_return_feature_columns = expected_return_feature_columns or ("f1", "dollar_volume")
@@ -707,7 +754,7 @@ def _bundle(
             "target_signal": [0.25, 0.75, 0.90],
             "return_signal": [0.01, 0.02, 0.03],
             "mfe_signal": [0.03, 0.04, 0.05],
-            "mae_signal": [-0.01, -0.02, -0.03],
+            "mae_signal": [0.01, 0.02, 0.03],
             "dollar_volume": [10_000_000.0] * 3,
         }
     )
@@ -737,7 +784,7 @@ def _bundle(
         target_before_stop_calibrator=target_calibrator or IdentityCalibrator(),
         return_model=return_model or ConstantRegressor(expected_return),
         mfe_model=mfe_model or ConstantRegressor(0.04),
-        mae_model=mae_model or ConstantRegressor(-0.015),
+        mae_model=mae_model or ConstantRegressor(0.015),
         training_medians={"f1": 1.0, "dollar_volume": 10_000_000.0},
         training_means={"f1": 1.0, "dollar_volume": 10_000_000.0},
         training_stds={"f1": 1.0, "dollar_volume": 1.0},
@@ -776,6 +823,7 @@ def _bundle(
                     if include_tbs_calibration
                     else {}
                 ),
+                **_path_domain_metrics(),
             }
         ),
         calibration_metrics={},
@@ -823,6 +871,38 @@ def _bundle(
             if include_feature_screen_metadata
             else {}
         ),
+        path_domain_metadata=(
+            {
+                MFE_HEAD: {
+                    "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                    "head_name": MFE_HEAD,
+                    "external_target_name": "label_bull_mfe_10",
+                    "internal_magnitude_target_name": ("label_bull_mfe_10__favorable_magnitude"),
+                    "internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+                    "estimator_class": type(mfe_model or ConstantRegressor(0.04)).__name__,
+                    "estimator_loss": "test_constant_magnitude",
+                    "estimator_hash": "mfe-estimator-hash",
+                    "selected_feature_manifest_hash": mfe_manifest,
+                    "prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                },
+                MAE_HEAD: {
+                    "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                    "head_name": MAE_HEAD,
+                    "external_target_name": "label_bull_mae_10",
+                    "internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
+                    "internal_target_definition": (
+                        "adverse_magnitude_equals_negative_existing_mae"
+                    ),
+                    "estimator_class": type(mae_model or ConstantRegressor(0.015)).__name__,
+                    "estimator_loss": "test_constant_magnitude",
+                    "estimator_hash": "mae-estimator-hash",
+                    "selected_feature_manifest_hash": mae_manifest,
+                    "prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                },
+            }
+            if include_path_domain_metadata
+            else {}
+        ),
     )
 
 
@@ -835,7 +915,7 @@ def _scanner_feature_panel(symbols: tuple[str, ...] = ("AAPL",)) -> pd.DataFrame
             "target_signal": [0.75] * len(symbols),
             "return_signal": [0.021] * len(symbols),
             "mfe_signal": [0.052] * len(symbols),
-            "mae_signal": [-0.018] * len(symbols),
+            "mae_signal": [0.018] * len(symbols),
             "dollar_volume": [20_000_000.0] * len(symbols),
             "sector": ["technology"] * len(symbols),
             "market_regime_label": ["mixed"] * len(symbols),
@@ -940,7 +1020,7 @@ def test_path_metric_heads_receive_own_selected_columns() -> None:
             "target_signal": [0.82],
             "return_signal": [0.031],
             "mfe_signal": [0.064],
-            "mae_signal": [-0.027],
+            "mae_signal": [0.027],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -958,9 +1038,89 @@ def test_path_metric_heads_receive_own_selected_columns() -> None:
     assert prediction["expected_return"] == pytest.approx(0.031)
     assert prediction["expected_mfe"] == pytest.approx(0.064)
     assert prediction["expected_mae"] == pytest.approx(-0.027)
+    assert prediction["expected_mae_internal_magnitude"] == pytest.approx(0.027)
     assert prediction["expected_return_feature_manifest_hash"] == "return-manifest"
     assert prediction["mfe_feature_manifest_hash"] == "mfe-manifest"
     assert prediction["mae_feature_manifest_hash"] == "mae-manifest"
+
+
+@pytest.mark.parametrize(
+    "family",
+    ["naive_base_rate", "logistic_regression", "hist_gradient_boosting", "extra_trees"],
+)
+@pytest.mark.parametrize("head", [MFE_HEAD, MAE_HEAD])
+def test_path_magnitude_estimators_emit_nonnegative_magnitudes(
+    family: str,
+    head: str,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "feature_a": np.linspace(0.0, 1.0, 40),
+            "feature_b": np.sin(np.linspace(0.0, 4.0, 40)),
+        }
+    )
+    target = pd.Series(np.linspace(0.001, 0.08, 40), name=f"{head}_magnitude")
+    estimator, spec = build_path_magnitude_estimator(family=family, head_name=head, seed=17)
+
+    estimator.fit(frame, target)
+    prediction = estimator.predict(frame)
+
+    assert spec.schema_version == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+    assert np.isfinite(prediction).all()
+    assert (prediction >= 0.0).all()
+    if family == "logistic_regression":
+        assert spec.estimator_class == "TweedieRegressor"
+    if family == "hist_gradient_boosting":
+        assert spec.loss == "poisson"
+
+
+def test_predict_bundle_rejects_invalid_magnitude_without_clipping() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(mfe_model=ConstantRegressor(-0.02), mae_model=ConstantRegressor(-0.03))
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["expected_mfe_internal_magnitude"] == pytest.approx(-0.02)
+    assert prediction["expected_mfe"] == pytest.approx(-0.02)
+    assert bool(prediction["expected_mfe_magnitude_prediction_invalid"]) is True
+    assert bool(prediction["expected_mfe_signed_prediction_invalid"]) is True
+    assert prediction["expected_mae_internal_magnitude"] == pytest.approx(-0.03)
+    assert prediction["expected_mae"] == pytest.approx(0.03)
+    assert bool(prediction["expected_mae_magnitude_prediction_invalid"]) is True
+    assert bool(prediction["expected_mae_signed_prediction_invalid"]) is True
+
+
+def test_path_magnitude_prediction_mapping_uses_no_clipping() -> None:
+    source = inspect.getsource(_path_magnitude_prediction)
+
+    assert ".clip" not in source
+    assert "np.clip" not in source
+
+
+def test_predict_bundle_marks_missing_path_domain_metadata_for_legacy_artifacts() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(include_path_domain_metadata=False, mae_model=ConstantRegressor(-0.015))
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["mfe_domain_schema_version"] == "legacy_unconstrained_path_metric_model"
+    assert bool(prediction["mfe_domain_metadata_missing"]) is True
+    assert bool(prediction["mae_domain_metadata_missing"]) is True
+    assert prediction["expected_mae"] == pytest.approx(-0.015)
 
 
 def test_predict_bundle_flags_missing_path_metric_features_without_substitution() -> None:
@@ -1109,6 +1269,48 @@ def test_scanner_rejects_missing_path_metric_features_explicitly(tmp_path: Path)
     assert bool(row["expected_return_required_feature_missing"]) is True
     assert bool(row["mfe_required_feature_missing"]) is True
     assert bool(row["mae_required_feature_missing"]) is True
+
+
+def test_scanner_rejects_missing_path_domain_metadata_explicitly(tmp_path: Path) -> None:
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(_bundle(include_path_domain_metadata=False, mae_model=ConstantRegressor(-0.015)),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "mfe_domain_metadata_missing" in row["exclusion_reason"]
+    assert "mae_domain_metadata_missing" in row["exclusion_reason"]
+    assert bool(row["mfe_domain_metadata_missing"]) is True
+    assert bool(row["mae_domain_metadata_missing"]) is True
+
+
+def test_scanner_rejects_invalid_path_magnitude_predictions_explicitly(tmp_path: Path) -> None:
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(_bundle(mfe_model=ConstantRegressor(-0.02), mae_model=ConstantRegressor(-0.03)),),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "mfe_magnitude_prediction_invalid" in row["exclusion_reason"]
+    assert "mae_magnitude_prediction_invalid" in row["exclusion_reason"]
+    assert "mfe_prediction_sign_contract_failed" in row["exclusion_reason"]
+    assert "mae_prediction_sign_contract_failed" in row["exclusion_reason"]
+    assert bool(row["expected_mfe_magnitude_prediction_invalid"]) is True
+    assert bool(row["expected_mae_magnitude_prediction_invalid"]) is True
 
 
 def test_scanner_rejects_missing_target_before_stop_calibration_metadata(tmp_path: Path) -> None:
@@ -1680,6 +1882,18 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    domain_bundle = _bundle(policy=SelectionPolicy(per_date_limit=2))
+    domain_metadata = {
+        key: dict(value) for key, value in domain_bundle.path_domain_metadata.items()
+    }
+    domain_metadata[MAE_HEAD]["estimator_hash"] = "changed-mae-estimator-hash"
+    path_domain = run_scanner(
+        **base_kwargs,
+        bundles=(replace(domain_bundle, path_domain_metadata=domain_metadata),),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -1694,9 +1908,10 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 target_manifest.scan_id,
                 calibration_manifest.scan_id,
                 path_manifest.scan_id,
+                path_domain.scan_id,
             }
         )
-        == 10
+        == 11
     )
 
 
@@ -1886,6 +2101,36 @@ def test_scanner_legacy_or_mismatched_cached_metadata_is_not_reused(
         mismatched_policy.scan_id,
     }
     assert mismatched_ood.created_at_utc != "existing"
+    with engine_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM scanner_snapshots WHERE scan_id = ?",
+            (mismatched_ood.scan_id,),
+        ).fetchone()
+        metadata = json.loads(row["metadata_json"])
+        metadata["path_metric_domain_metadata_hash"] = "mismatched"
+        connection.execute(
+            "UPDATE scanner_snapshots SET metadata_json = ? WHERE scan_id = ?",
+            (json.dumps(metadata, sort_keys=True), mismatched_ood.scan_id),
+        )
+
+    mismatched_domain = run_scanner(
+        feature_panel,
+        bundles=(_bundle(),),
+        db_path=db_path,
+        output_dir=output_dir,
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+    )
+
+    assert mismatched_domain.scan_id not in {
+        baseline.scan_id,
+        rerun.scan_id,
+        mismatched_config.scan_id,
+        mismatched_policy.scan_id,
+        mismatched_ood.scan_id,
+    }
+    assert mismatched_domain.created_at_utc != "existing"
 
 
 def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -> None:
@@ -1910,7 +2155,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 6
+    assert metadata["scanner_identity_schema_version"] == 7
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
@@ -1923,6 +2168,8 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     assert metadata["target_before_stop_calibration_metadata_hash"]
     assert metadata["path_metric_feature_metadata_json"]
     assert metadata["path_metric_feature_metadata_hash"]
+    assert metadata["path_metric_domain_metadata_json"]
+    assert metadata["path_metric_domain_metadata_hash"]
     assert metadata["persisted_model_policy_hashes"] == {"model-a": "policy-hash"}
     identity = metadata["canonical_scan_execution_identity"]
     assert identity["prediction_ood_governance_schema_version"] == PREDICTION_OOD_GOVERNANCE_VERSION
@@ -1948,6 +2195,10 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
             "selected_feature_manifest_hash"
         ]
         == "return-manifest"
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"]["prediction_mapping_version"]
+        == PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION
     )
     assert identity["effective_selection_policies"]["model-a"]["expected_return_threshold"] == 0.001
     assert identity["raw_scanner_config"]["minimum_dollar_volume"] == 5_000_000.0

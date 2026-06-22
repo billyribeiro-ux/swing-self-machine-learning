@@ -45,6 +45,8 @@ from swing_rsi.engine.selection import SelectionPolicy
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
 PATH_METRIC_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_v1"
+PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
+PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION = "path_metric_magnitude_sign_mapping_v1"
 
 
 class ConstantClassifier:
@@ -174,6 +176,26 @@ def _policy_metrics(
         "mfe_screening_manifest_hash": "mfe-manifest",
         "mae_feature_screen_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
         "mae_screening_manifest_hash": "mae-manifest",
+        "mfe_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "mfe_external_target_name": "label_bull_mfe_10",
+        "mfe_internal_magnitude_target_name": "label_bull_mfe_10__favorable_magnitude",
+        "mfe_internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+        "mfe_magnitude_estimator_class": "ConstantRegressor",
+        "mfe_magnitude_estimator_loss": "test_constant_magnitude",
+        "mfe_magnitude_estimator_hash": "mfe-estimator-hash",
+        "mfe_prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+        "mfe_calibration_domain_integrity_valid": True,
+        "mfe_holdout_domain_integrity_valid": True,
+        "mae_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "mae_external_target_name": "label_bull_mae_10",
+        "mae_internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
+        "mae_internal_target_definition": "adverse_magnitude_equals_negative_existing_mae",
+        "mae_magnitude_estimator_class": "ConstantRegressor",
+        "mae_magnitude_estimator_loss": "test_constant_magnitude",
+        "mae_magnitude_estimator_hash": "mae-estimator-hash",
+        "mae_prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+        "mae_calibration_domain_integrity_valid": True,
+        "mae_holdout_domain_integrity_valid": True,
         "holdout_status": DEVELOPMENT_HOLDOUT_STATUS,
     }
 
@@ -208,7 +230,7 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
         target_before_stop_calibrator=IdentityCalibrator(),
         return_model=ConstantRegressor(0.02),
         mfe_model=ConstantRegressor(0.04),
-        mae_model=ConstantRegressor(-0.015),
+        mae_model=ConstantRegressor(0.015),
         training_medians={"f1": 1.0, "dollar_volume": 20_000_000.0},
         training_means={"f1": 1.0, "dollar_volume": 20_000_000.0},
         training_stds={"f1": 1.0, "dollar_volume": 1.0},
@@ -255,6 +277,32 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
                 "selected_feature_count": 2,
                 "selected_feature_families": {"test": 1, "liquidity": 1},
                 "selected_feature_manifest_hash": "mae-manifest",
+            },
+        },
+        path_domain_metadata={
+            "mfe": {
+                "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                "head_name": "mfe",
+                "external_target_name": "label_bull_mfe_10",
+                "internal_magnitude_target_name": "label_bull_mfe_10__favorable_magnitude",
+                "internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+                "estimator_class": "ConstantRegressor",
+                "estimator_loss": "test_constant_magnitude",
+                "estimator_hash": "mfe-estimator-hash",
+                "selected_feature_manifest_hash": "mfe-manifest",
+                "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+            },
+            "mae": {
+                "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                "head_name": "mae",
+                "external_target_name": "label_bull_mae_10",
+                "internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
+                "internal_target_definition": "adverse_magnitude_equals_negative_existing_mae",
+                "estimator_class": "ConstantRegressor",
+                "estimator_loss": "test_constant_magnitude",
+                "estimator_hash": "mae-estimator-hash",
+                "selected_feature_manifest_hash": "mae-manifest",
+                "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
             },
         },
     )
