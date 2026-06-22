@@ -15,11 +15,13 @@ from swing_rsi.engine.models import (
     EXPECTED_RETURN_HEAD,
     MAE_HEAD,
     MFE_HEAD,
+    PATH_MAGNITUDE_HEADS,
     PATH_METRIC_HEADS,
     TARGET_BEFORE_STOP_HEAD,
     ModelBundle,
     bundle_feature_screen_metadata,
     bundle_head_feature_manifest,
+    bundle_path_domain_metadata,
     bundle_tbs_calibration_metadata,
     predict_bundle,
 )
@@ -41,8 +43,8 @@ from swing_rsi.engine.selection import (
 )
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 6
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v6-path-feature-manifests"
+SCANNER_IDENTITY_SCHEMA_VERSION = 7
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v7-path-domain-metadata"
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,28 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
     ):
         if bool(item.get(f"{head_name}_feature_screen_metadata_missing", False)):
             rejection_reasons.append(reason)
+    for head_name, output_column, metadata_reason, magnitude_reason, signed_reason in (
+        (
+            "mfe",
+            "expected_mfe",
+            "mfe_domain_metadata_missing",
+            "mfe_magnitude_prediction_invalid",
+            "mfe_prediction_sign_contract_failed",
+        ),
+        (
+            "mae",
+            "expected_mae",
+            "mae_domain_metadata_missing",
+            "mae_magnitude_prediction_invalid",
+            "mae_prediction_sign_contract_failed",
+        ),
+    ):
+        if bool(item.get(f"{head_name}_domain_metadata_missing", False)):
+            rejection_reasons.append(metadata_reason)
+        if bool(item.get(f"{output_column}_magnitude_prediction_invalid", False)):
+            rejection_reasons.append(magnitude_reason)
+        if bool(item.get(f"{output_column}_signed_prediction_invalid", False)):
+            rejection_reasons.append(signed_reason)
     target_missing = bool(item.get("target_before_stop_required_feature_missing", False))
     if target_missing:
         rejection_reasons.append("target_before_stop_required_feature_missing")
@@ -230,9 +254,9 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
         if not math.isfinite(value):
             rejection_reasons.append("nonfinite_prediction")
         if head == "mfe" and not sign_valid:
-            rejection_reasons.append("mfe_sign_contract_failed")
+            rejection_reasons.append("mfe_prediction_sign_contract_failed")
         if head == "mae" and not sign_valid:
-            rejection_reasons.append("mae_sign_contract_failed")
+            rejection_reasons.append("mae_prediction_sign_contract_failed")
         if is_ood:
             warning_heads.append(head)
             if math.isfinite(severity):
@@ -277,6 +301,7 @@ def _build_scan_execution_identity(
     model_target_before_stop_feature_metadata: dict[str, dict[str, object]],
     model_target_before_stop_calibration_metadata: dict[str, dict[str, object]],
     model_path_feature_metadata: dict[str, dict[str, object]],
+    model_path_domain_metadata: dict[str, dict[str, object]],
     scanner_config: ScannerConfig,
     universe_snapshot_id: str,
     feature_manifest_hash: str,
@@ -314,6 +339,10 @@ def _build_scan_execution_identity(
         model_id: model_path_feature_metadata.get(model_id, {}) for model_id in model_ids
     }
     path_feature_metadata_hash = _stable_hash(path_feature_metadata_payload)
+    path_domain_metadata_payload = {
+        model_id: model_path_domain_metadata.get(model_id, {}) for model_id in model_ids
+    }
+    path_domain_metadata_hash = _stable_hash(path_domain_metadata_payload)
     identity_payload: dict[str, object] = {
         "scanner_identity_schema_version": SCANNER_IDENTITY_SCHEMA_VERSION,
         "scanner_implementation_version": SCANNER_IMPLEMENTATION_VERSION,
@@ -347,6 +376,8 @@ def _build_scan_execution_identity(
         "target_before_stop_calibration_metadata_hash": tbs_calibration_metadata_hash,
         "path_metric_feature_metadata": path_feature_metadata_payload,
         "path_metric_feature_metadata_hash": path_feature_metadata_hash,
+        "path_metric_domain_metadata": path_domain_metadata_payload,
+        "path_metric_domain_metadata_hash": path_domain_metadata_hash,
         "effective_selection_policies": effective_policy_payload,
         "raw_scanner_config": raw_config,
         "raw_scanner_config_hash": raw_config_hash,
@@ -368,6 +399,8 @@ def _build_scan_execution_identity(
         "target_before_stop_calibration_metadata_hash": tbs_calibration_metadata_hash,
         "path_metric_feature_metadata_json": dumps(path_feature_metadata_payload),
         "path_metric_feature_metadata_hash": path_feature_metadata_hash,
+        "path_metric_domain_metadata_json": dumps(path_domain_metadata_payload),
+        "path_metric_domain_metadata_hash": path_domain_metadata_hash,
         "effective_model_policy_json": dumps(effective_policy_payload),
         "effective_policy_bundle_hash": effective_policy_bundle_hash,
         "canonical_scan_execution_identity": identity_payload,
@@ -413,6 +446,8 @@ def _metadata_matches_scan_identity(
         == expected_metadata["target_before_stop_calibration_metadata_hash"]
         and metadata.get("path_metric_feature_metadata_hash")
         == expected_metadata["path_metric_feature_metadata_hash"]
+        and metadata.get("path_metric_domain_metadata_hash")
+        == expected_metadata["path_metric_domain_metadata_hash"]
         and metadata.get("feature_manifest_hash") == expected_metadata["feature_manifest_hash"]
         and metadata.get("universe_snapshot_id") == expected_metadata["universe_snapshot_id"]
         and metadata.get("model_generation_ids") == expected_metadata["model_generation_ids"]
@@ -582,6 +617,7 @@ def run_scanner(
         model_id: bundle_tbs_calibration_metadata(bundles_by_id[model_id]) for model_id in model_ids
     }
     normalized_path_feature_metadata = {}
+    normalized_path_domain_metadata = {}
     for model_id in model_ids:
         bundle = bundles_by_id[model_id]
         head_payload: dict[str, object] = {}
@@ -597,6 +633,26 @@ def run_scanner(
                 "selected_feature_manifest_hash": bundle_head_feature_manifest(bundle, head),
             }
         normalized_path_feature_metadata[model_id] = head_payload
+        domain_payload: dict[str, object] = {}
+        for head in PATH_MAGNITUDE_HEADS:
+            metadata = bundle_path_domain_metadata(bundle, head)
+            domain_payload[head] = {
+                "domain_schema_version": metadata.get(
+                    "domain_schema_version", "legacy_unconstrained_path_metric_model"
+                ),
+                "external_target_name": metadata.get("external_target_name", ""),
+                "internal_magnitude_target_name": metadata.get(
+                    "internal_magnitude_target_name", ""
+                ),
+                "estimator_class": metadata.get("estimator_class", ""),
+                "estimator_loss": metadata.get("estimator_loss", ""),
+                "estimator_hash": metadata.get("estimator_hash", ""),
+                "prediction_mapping_version": metadata.get("prediction_mapping_version", ""),
+                "selected_feature_manifest_hash": metadata.get(
+                    "selected_feature_manifest_hash", ""
+                ),
+            }
+        normalized_path_domain_metadata[model_id] = domain_payload
     identity, metadata = _build_scan_execution_identity(
         as_of_date=as_of.date().isoformat(),
         model_ids=model_ids,
@@ -608,6 +664,7 @@ def run_scanner(
         model_target_before_stop_feature_metadata=normalized_tbs_feature_metadata,
         model_target_before_stop_calibration_metadata=normalized_tbs_calibration_metadata,
         model_path_feature_metadata=normalized_path_feature_metadata,
+        model_path_domain_metadata=normalized_path_domain_metadata,
         scanner_config=config,
         universe_snapshot_id=universe_snapshot_id,
         feature_manifest_hash=feature_manifest_hash,
@@ -711,6 +768,10 @@ def run_scanner(
             MFE_HEAD: bundle_feature_screen_metadata(bundle, MFE_HEAD),
             MAE_HEAD: bundle_feature_screen_metadata(bundle, MAE_HEAD),
         }
+        path_domain_metadata = {
+            MFE_HEAD: bundle_path_domain_metadata(bundle, MFE_HEAD),
+            MAE_HEAD: bundle_path_domain_metadata(bundle, MAE_HEAD),
+        }
         path_selected_families_text: dict[str, str] = {}
         for head, screen_metadata in path_screen_metadata.items():
             selected_families = screen_metadata.get("selected_feature_families", {})
@@ -797,6 +858,21 @@ def run_scanner(
                 "expected_mfe_transformed": float(
                     item.get("expected_mfe_transformed", item["expected_mfe"])
                 ),
+                "expected_mfe_internal_magnitude": float(
+                    item.get("expected_mfe_internal_magnitude", float("nan"))
+                ),
+                "expected_mfe_magnitude_prediction_invalid": bool(
+                    item.get("expected_mfe_magnitude_prediction_invalid", False)
+                ),
+                "expected_mfe_signed_prediction_invalid": bool(
+                    item.get("expected_mfe_signed_prediction_invalid", False)
+                ),
+                "expected_mfe_magnitude_domain_valid": bool(
+                    item.get("expected_mfe_magnitude_domain_valid", False)
+                ),
+                "expected_mfe_signed_domain_valid": bool(
+                    item.get("expected_mfe_signed_domain_valid", False)
+                ),
                 "expected_mfe_out_of_distribution": bool(
                     item.get("expected_mfe_out_of_distribution", False)
                 ),
@@ -820,10 +896,41 @@ def run_scanner(
                 "mfe_feature_screen_metadata_missing": bool(
                     item.get("mfe_feature_screen_metadata_missing", False)
                 ),
+                "mfe_domain_schema_version": item.get("mfe_domain_schema_version", ""),
+                "mfe_domain_metadata_missing": bool(item.get("mfe_domain_metadata_missing", False)),
+                "mfe_external_target_name": item.get("mfe_external_target_name", ""),
+                "mfe_internal_magnitude_target_name": item.get(
+                    "mfe_internal_magnitude_target_name", ""
+                ),
+                "mfe_internal_target_definition": item.get("mfe_internal_target_definition", ""),
+                "mfe_magnitude_estimator_class": item.get("mfe_magnitude_estimator_class", ""),
+                "mfe_magnitude_estimator_loss": item.get("mfe_magnitude_estimator_loss", ""),
+                "mfe_magnitude_estimator_hash": item.get("mfe_magnitude_estimator_hash", ""),
+                "mfe_prediction_mapping_version": item.get("mfe_prediction_mapping_version", ""),
+                "mfe_domain_metadata_hash": (
+                    _stable_hash(path_domain_metadata[MFE_HEAD])
+                    if path_domain_metadata[MFE_HEAD]
+                    else ""
+                ),
                 "expected_mae": float(item["expected_mae"]),
                 "expected_mae_raw": float(item.get("expected_mae_raw", item["expected_mae"])),
                 "expected_mae_transformed": float(
                     item.get("expected_mae_transformed", item["expected_mae"])
+                ),
+                "expected_mae_internal_magnitude": float(
+                    item.get("expected_mae_internal_magnitude", float("nan"))
+                ),
+                "expected_mae_magnitude_prediction_invalid": bool(
+                    item.get("expected_mae_magnitude_prediction_invalid", False)
+                ),
+                "expected_mae_signed_prediction_invalid": bool(
+                    item.get("expected_mae_signed_prediction_invalid", False)
+                ),
+                "expected_mae_magnitude_domain_valid": bool(
+                    item.get("expected_mae_magnitude_domain_valid", False)
+                ),
+                "expected_mae_signed_domain_valid": bool(
+                    item.get("expected_mae_signed_domain_valid", False)
                 ),
                 "expected_mae_out_of_distribution": bool(
                     item.get("expected_mae_out_of_distribution", False)
@@ -847,6 +954,22 @@ def run_scanner(
                 ),
                 "mae_feature_screen_metadata_missing": bool(
                     item.get("mae_feature_screen_metadata_missing", False)
+                ),
+                "mae_domain_schema_version": item.get("mae_domain_schema_version", ""),
+                "mae_domain_metadata_missing": bool(item.get("mae_domain_metadata_missing", False)),
+                "mae_external_target_name": item.get("mae_external_target_name", ""),
+                "mae_internal_magnitude_target_name": item.get(
+                    "mae_internal_magnitude_target_name", ""
+                ),
+                "mae_internal_target_definition": item.get("mae_internal_target_definition", ""),
+                "mae_magnitude_estimator_class": item.get("mae_magnitude_estimator_class", ""),
+                "mae_magnitude_estimator_loss": item.get("mae_magnitude_estimator_loss", ""),
+                "mae_magnitude_estimator_hash": item.get("mae_magnitude_estimator_hash", ""),
+                "mae_prediction_mapping_version": item.get("mae_prediction_mapping_version", ""),
+                "mae_domain_metadata_hash": (
+                    _stable_hash(path_domain_metadata[MAE_HEAD])
+                    if path_domain_metadata[MAE_HEAD]
+                    else ""
                 ),
                 "target_before_stop_probability": target_before_stop_probability,
                 "target_before_stop_raw_probability": item.get(

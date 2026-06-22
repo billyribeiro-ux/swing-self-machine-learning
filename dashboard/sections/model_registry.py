@@ -519,6 +519,13 @@ def render_page() -> None:
                         f"{prefix}_selected_feature",
                         f"{prefix}_top_25",
                         f"{prefix}_permutation",
+                        f"{prefix}_domain",
+                        f"{prefix}_external_target",
+                        f"{prefix}_internal_magnitude",
+                        f"{prefix}_internal_target",
+                        f"{prefix}_magnitude_estimator",
+                        f"{prefix}_prediction_mapping",
+                        f"{prefix}_holdout_domain",
                     ),
                 )
                 if not summary.empty:

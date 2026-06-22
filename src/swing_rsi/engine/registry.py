@@ -41,6 +41,8 @@ FINAL_HOLDOUT_SAMPLE_GATE_IDS = (
 )
 PATH_METRIC_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_v1"
 PATH_METRIC_SCREEN_PREFIXES = ("expected_return", "mfe", "mae")
+PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
+PATH_MAGNITUDE_DOMAIN_PREFIXES = ("mfe", "mae")
 
 
 @dataclass(frozen=True)
@@ -327,6 +329,23 @@ def _path_feature_screen_blocker(model: RegisteredModel) -> str | None:
     return None
 
 
+def _path_magnitude_domain_blocker(model: RegisteredModel) -> str | None:
+    missing: list[str] = []
+    for prefix in PATH_MAGNITUDE_DOMAIN_PREFIXES:
+        schema = str(model.metrics.get(f"{prefix}_domain_schema_version") or "")
+        estimator_hash = str(model.metrics.get(f"{prefix}_magnitude_estimator_hash") or "")
+        mapping_version = str(model.metrics.get(f"{prefix}_prediction_mapping_version") or "")
+        if schema != PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION:
+            missing.append(f"{prefix}:schema")
+        if not estimator_hash:
+            missing.append(f"{prefix}:estimator_hash")
+        if not mapping_version:
+            missing.append(f"{prefix}:prediction_mapping")
+    if missing:
+        return f"missing domain-preserving MFE/MAE metadata: {missing}"
+    return None
+
+
 def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
     models = list_models(db_path)
     selected = next((model for model in models if model.model_id == model_id), None)
@@ -351,6 +370,12 @@ def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
         raise ValueError(
             "Model cannot be promoted because artifact metadata is incomplete: "
             f"{path_screen_blocker}"
+        )
+    path_domain_blocker = _path_magnitude_domain_blocker(selected)
+    if path_domain_blocker is not None:
+        raise ValueError(
+            "Model cannot be promoted because artifact metadata is incomplete: "
+            f"{path_domain_blocker}"
         )
     freeze_blocker = _final_holdout_freeze_blocker(db_path, selected)
     if freeze_blocker is not None:

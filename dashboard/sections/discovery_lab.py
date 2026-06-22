@@ -178,6 +178,17 @@ def render_page() -> None:
                     "configuration_hash": model.metrics.get(
                         f"{prefix}_screening_configuration_hash"
                     ),
+                    "domain_schema": model.metrics.get(f"{prefix}_domain_schema_version", ""),
+                    "internal_magnitude_target": model.metrics.get(
+                        f"{prefix}_internal_magnitude_target_name", ""
+                    ),
+                    "magnitude_estimator": model.metrics.get(
+                        f"{prefix}_magnitude_estimator_class", ""
+                    ),
+                    "magnitude_loss": model.metrics.get(f"{prefix}_magnitude_estimator_loss", ""),
+                    "domain_integrity": model.metrics.get(
+                        f"{prefix}_holdout_domain_integrity_valid", ""
+                    ),
                 }
             )
         candidate_results: list[dict[str, object]] = []

@@ -151,9 +151,59 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "mfe_selected_feature_count": metrics.get("mfe_selected_feature_count"),
             "mfe_screening_target": metrics.get("mfe_screening_target"),
             "mfe_screening_manifest_hash": metrics.get("mfe_screening_manifest_hash"),
+            "mfe_domain_schema_version": metrics.get("mfe_domain_schema_version"),
+            "mfe_external_target_name": metrics.get("mfe_external_target_name"),
+            "mfe_internal_magnitude_target_name": metrics.get("mfe_internal_magnitude_target_name"),
+            "mfe_internal_target_definition": metrics.get("mfe_internal_target_definition"),
+            "mfe_magnitude_estimator_class": metrics.get("mfe_magnitude_estimator_class"),
+            "mfe_magnitude_estimator_loss": metrics.get("mfe_magnitude_estimator_loss"),
+            "mfe_magnitude_estimator_hash": metrics.get("mfe_magnitude_estimator_hash"),
+            "mfe_prediction_mapping_version": metrics.get("mfe_prediction_mapping_version"),
+            "mfe_magnitude_training_target_min": metrics.get("mfe_magnitude_training_target_min"),
+            "mfe_magnitude_training_target_max": metrics.get("mfe_magnitude_training_target_max"),
+            "mfe_holdout_internal_magnitude_prediction_min": metrics.get(
+                "mfe_holdout_internal_magnitude_prediction_min"
+            ),
+            "mfe_holdout_internal_magnitude_prediction_max": metrics.get(
+                "mfe_holdout_internal_magnitude_prediction_max"
+            ),
+            "mfe_holdout_canonical_prediction_min": metrics.get(
+                "mfe_holdout_canonical_prediction_min"
+            ),
+            "mfe_holdout_canonical_prediction_max": metrics.get(
+                "mfe_holdout_canonical_prediction_max"
+            ),
+            "mfe_holdout_signed_domain_violation_count": metrics.get(
+                "mfe_holdout_signed_domain_violation_count"
+            ),
             "mae_selected_feature_count": metrics.get("mae_selected_feature_count"),
             "mae_screening_target": metrics.get("mae_screening_target"),
             "mae_screening_manifest_hash": metrics.get("mae_screening_manifest_hash"),
+            "mae_domain_schema_version": metrics.get("mae_domain_schema_version"),
+            "mae_external_target_name": metrics.get("mae_external_target_name"),
+            "mae_internal_magnitude_target_name": metrics.get("mae_internal_magnitude_target_name"),
+            "mae_internal_target_definition": metrics.get("mae_internal_target_definition"),
+            "mae_magnitude_estimator_class": metrics.get("mae_magnitude_estimator_class"),
+            "mae_magnitude_estimator_loss": metrics.get("mae_magnitude_estimator_loss"),
+            "mae_magnitude_estimator_hash": metrics.get("mae_magnitude_estimator_hash"),
+            "mae_prediction_mapping_version": metrics.get("mae_prediction_mapping_version"),
+            "mae_magnitude_training_target_min": metrics.get("mae_magnitude_training_target_min"),
+            "mae_magnitude_training_target_max": metrics.get("mae_magnitude_training_target_max"),
+            "mae_holdout_internal_magnitude_prediction_min": metrics.get(
+                "mae_holdout_internal_magnitude_prediction_min"
+            ),
+            "mae_holdout_internal_magnitude_prediction_max": metrics.get(
+                "mae_holdout_internal_magnitude_prediction_max"
+            ),
+            "mae_holdout_canonical_prediction_min": metrics.get(
+                "mae_holdout_canonical_prediction_min"
+            ),
+            "mae_holdout_canonical_prediction_max": metrics.get(
+                "mae_holdout_canonical_prediction_max"
+            ),
+            "mae_holdout_signed_domain_violation_count": metrics.get(
+                "mae_holdout_signed_domain_violation_count"
+            ),
             "model_brier": calibration.get("holdout_brier"),
             "naive_brier": calibration.get("naive_brier"),
             "absolute_brier_improvement": calibration.get("absolute_brier_improvement"),

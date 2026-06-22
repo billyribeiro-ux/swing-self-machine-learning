@@ -43,6 +43,7 @@ FINAL_HOLDOUT_SCHEMA_VERSION = "prospective_final_holdout_v1"
 FINAL_HOLDOUT_SAMPLE_POLICY_VERSION = "prospective_final_holdout_sample_v1"
 SHADOW_FINAL_HOLDOUT_MODE = "SHADOW_FINAL_HOLDOUT"
 FINAL_HOLDOUT_EVENT_PREFIX = "FINAL_HOLDOUT_"
+PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
 
 RunStatus = Literal[
     "CREATED",
@@ -374,6 +375,11 @@ def _development_gate_blockers(model: RegisteredModel) -> tuple[str, ...]:
         blockers.append("selection_policy_missing")
     if not model.metrics.get("target_before_stop_calibration_governance_schema"):
         blockers.append("target_before_stop_calibration_governance_missing")
+    for prefix in ("mfe", "mae"):
+        if model.metrics.get(f"{prefix}_domain_schema_version") != (
+            PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+        ):
+            blockers.append(f"{prefix}_domain_metadata_missing")
     if model.metrics.get("prediction_ood_governance_version") != PREDICTION_OOD_GOVERNANCE_VERSION:
         blockers.append("prediction_ood_governance_v2_missing")
     mandatory = [gate for gate in model.gate_results if gate.mandatory]

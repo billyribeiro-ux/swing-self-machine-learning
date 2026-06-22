@@ -11,7 +11,7 @@ from typing import Any, cast
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
 from sklearn.ensemble import (
     ExtraTreesClassifier,
     ExtraTreesRegressor,
@@ -21,7 +21,7 @@ from sklearn.ensemble import (
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.impute import SimpleImputer
 from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import LogisticRegression, Ridge, TweedieRegressor
 from sklearn.metrics import brier_score_loss, log_loss, mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -83,6 +83,8 @@ from swing_rsi.engine.splits import (
 TEMPORAL_FOLD_STABILITY_SCHEMA_VERSION = "temporal_fold_stability_v1"
 TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS = 3
 TEMPORAL_FOLD_STABILITY_THRESHOLD = 0.50
+PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
+PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION = "path_metric_magnitude_sign_mapping_v1"
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,7 @@ class ModelBundle:
     head_feature_manifests: dict[str, str] = field(default_factory=dict)
     feature_screen_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
     feature_screen_records: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
+    path_domain_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,7 @@ EXPECTED_RETURN_HEAD = "expected_return"
 MFE_HEAD = "mfe"
 MAE_HEAD = "mae"
 PATH_METRIC_HEADS = (EXPECTED_RETURN_HEAD, MFE_HEAD, MAE_HEAD)
+PATH_MAGNITUDE_HEADS = (MFE_HEAD, MAE_HEAD)
 PATH_HEAD_TO_METRIC_PREFIX = {
     EXPECTED_RETURN_HEAD: "return",
     MFE_HEAD: "mfe",
@@ -164,6 +168,62 @@ PATH_HEAD_OUTPUT_COLUMNS = {
     MFE_HEAD: "expected_mfe",
     MAE_HEAD: "expected_mae",
 }
+
+
+@dataclass(frozen=True)
+class PathMagnitudeEstimatorSpec:
+    family: str
+    head_name: str
+    estimator_class: str
+    loss: str
+    hyperparameters: dict[str, object]
+    schema_version: str = PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+    prediction_mapping_version: str = PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION
+
+    @property
+    def configuration_hash(self) -> str:
+        return configuration_hash(asdict(self))
+
+
+@dataclass(frozen=True)
+class PathMagnitudePrediction:
+    internal_magnitude: pd.Series
+    canonical_signed: pd.Series
+    nonfinite_count: int
+    magnitude_domain_violation_count: int
+    signed_domain_violation_count: int
+
+    @property
+    def valid(self) -> bool:
+        return (
+            self.nonfinite_count == 0
+            and self.magnitude_domain_violation_count == 0
+            and self.signed_domain_violation_count == 0
+        )
+
+    def diagnostics(self, prefix: str) -> dict[str, float | int | bool]:
+        magnitude = pd.to_numeric(self.internal_magnitude, errors="coerce")
+        signed = pd.to_numeric(self.canonical_signed, errors="coerce")
+        return {
+            f"{prefix}_internal_magnitude_prediction_min": _series_min(magnitude),
+            f"{prefix}_internal_magnitude_prediction_max": _series_max(magnitude),
+            f"{prefix}_canonical_prediction_min": _series_min(signed),
+            f"{prefix}_canonical_prediction_max": _series_max(signed),
+            f"{prefix}_prediction_nonfinite_count": self.nonfinite_count,
+            f"{prefix}_magnitude_domain_violation_count": (self.magnitude_domain_violation_count),
+            f"{prefix}_signed_domain_violation_count": self.signed_domain_violation_count,
+            f"{prefix}_domain_integrity_valid": self.valid,
+        }
+
+
+def _series_min(values: pd.Series) -> float:
+    finite = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    return float(finite.min()) if not finite.empty else math.nan
+
+
+def _series_max(values: pd.Series) -> float:
+    finite = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    return float(finite.max()) if not finite.empty else math.nan
 
 
 def bundle_head_feature_columns(bundle: ModelBundle, head: str) -> tuple[str, ...]:
@@ -196,6 +256,12 @@ def bundle_feature_screen_records(bundle: ModelBundle, head: str) -> tuple[dict[
     if not value:
         return ()
     return tuple(dict(record) for record in value if isinstance(record, dict))
+
+
+def bundle_path_domain_metadata(bundle: ModelBundle, head: str) -> dict[str, object]:
+    metadata = getattr(bundle, "path_domain_metadata", {}) or {}
+    value = metadata.get(head)
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def bundle_tbs_calibration_metadata(bundle: ModelBundle) -> dict[str, object]:
@@ -300,6 +366,211 @@ class BaseRateClassifier(ClassifierMixin, BaseEstimator):  # type: ignore[misc]
         positive = np.full(len(frame), self.probability, dtype=float)
         negative = 1.0 - positive
         return np.column_stack([negative, positive])
+
+
+class MeanMagnitudeRegressor(RegressorMixin, BaseEstimator):  # type: ignore[misc]
+    """Naive nonnegative magnitude regressor for path-metric controls."""
+
+    def __init__(self) -> None:
+        self.mean_ = 0.0
+        self.is_fitted_ = False
+
+    def fit(self, frame: pd.DataFrame, target: pd.Series) -> MeanMagnitudeRegressor:
+        _ = frame
+        numeric = pd.to_numeric(target, errors="coerce").replace([np.inf, -np.inf], np.nan)
+        if numeric.isna().any() or bool((numeric.dropna() < 0.0).any()):
+            raise ValueError("MeanMagnitudeRegressor requires finite nonnegative targets")
+        self.mean_ = float(numeric.mean())
+        self.is_fitted_ = True
+        return self
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        return np.full(len(frame), self.mean_, dtype=float)
+
+
+def _model_step(model: Any) -> Any:
+    if isinstance(model, Pipeline):
+        return model.steps[-1][1]
+    return model
+
+
+def _estimator_class_name(model: Any) -> str:
+    return type(_model_step(model)).__name__
+
+
+def _estimator_loss(model: Any) -> str:
+    step = _model_step(model)
+    loss = getattr(step, "loss", None)
+    if loss is not None:
+        return str(loss)
+    if isinstance(step, TweedieRegressor):
+        return f"tweedie_power_{step.power:g}_link_{step.link}"
+    if isinstance(step, ExtraTreesRegressor):
+        return "squared_error_leaf_average"
+    if isinstance(step, MeanMagnitudeRegressor):
+        return "training_mean_magnitude"
+    return "unknown"
+
+
+def _simple_estimator_params(model: Any) -> dict[str, object]:
+    step = _model_step(model)
+    keys = (
+        "alpha",
+        "fit_intercept",
+        "link",
+        "power",
+        "max_iter",
+        "tol",
+        "loss",
+        "learning_rate",
+        "min_samples_leaf",
+        "l2_regularization",
+        "random_state",
+        "n_estimators",
+        "n_jobs",
+    )
+    params: dict[str, object] = {}
+    for key in keys:
+        if hasattr(step, key):
+            value = getattr(step, key)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                params[key] = value
+    return params
+
+
+def _pipeline_preprocessing_hash(model: Any) -> str:
+    if not isinstance(model, Pipeline):
+        return configuration_hash({"preprocessing": "none"})
+    steps: list[dict[str, object]] = []
+    for name, step in model.steps[:-1]:
+        fitted_attrs: dict[str, object] = {}
+        for attr in ("statistics_", "mean_", "scale_", "var_"):
+            if hasattr(step, attr):
+                value = getattr(step, attr)
+                if isinstance(value, np.ndarray):
+                    fitted_attrs[attr] = np.asarray(value, dtype=float).round(12).tolist()
+        steps.append(
+            {
+                "name": name,
+                "class": type(step).__name__,
+                "params": {
+                    key: value
+                    for key, value in getattr(step, "get_params", lambda: {})().items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                },
+                "fitted_attrs": fitted_attrs,
+            }
+        )
+    return configuration_hash(
+        {
+            "steps": steps,
+        }
+    )
+
+
+def _estimator_hash(model: Any) -> str:
+    step = _model_step(model)
+    payload: dict[str, object] = {
+        "class": type(step).__name__,
+        "params": _simple_estimator_params(model),
+        "fitted_object_hash": joblib.hash(model),
+    }
+    for attr in ("n_iter_", "train_score_", "mean_"):
+        if hasattr(step, attr):
+            value = getattr(step, attr)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                payload[attr] = value
+            elif isinstance(value, np.ndarray):
+                payload[attr] = np.asarray(value, dtype=float).round(12).tolist()[:10]
+    return configuration_hash(payload)
+
+
+def _convergence_diagnostics(model: Any) -> dict[str, object]:
+    step = _model_step(model)
+    diagnostics: dict[str, object] = {
+        "estimator_class": type(step).__name__,
+        "converged": True,
+    }
+    if hasattr(step, "n_iter_"):
+        n_iter = int(step.n_iter_)
+        diagnostics["n_iter"] = n_iter
+        max_iter = getattr(step, "max_iter", None)
+        if isinstance(max_iter, int):
+            diagnostics["max_iter"] = max_iter
+            diagnostics["converged"] = n_iter < max_iter
+    return diagnostics
+
+
+def build_path_magnitude_estimator(
+    *,
+    family: str,
+    head_name: str,
+    seed: int,
+) -> tuple[Pipeline, PathMagnitudeEstimatorSpec]:
+    if family == "naive_base_rate":
+        estimator = Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                ("model", MeanMagnitudeRegressor()),
+            ]
+        )
+    elif family == "hist_gradient_boosting":
+        estimator = Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "model",
+                    HistGradientBoostingRegressor(
+                        loss="poisson",
+                        max_iter=80,
+                        learning_rate=0.05,
+                        min_samples_leaf=20,
+                        l2_regularization=0.1,
+                        random_state=seed,
+                    ),
+                ),
+            ]
+        )
+    elif family == "extra_trees":
+        estimator = Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "model",
+                    ExtraTreesRegressor(
+                        n_estimators=120,
+                        min_samples_leaf=10,
+                        random_state=seed,
+                        n_jobs=1,
+                    ),
+                ),
+            ]
+        )
+    else:
+        estimator = Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                ("scaler", StandardScaler()),
+                (
+                    "model",
+                    TweedieRegressor(
+                        power=1.5,
+                        link="log",
+                        alpha=1.0,
+                        max_iter=1000,
+                        tol=1e-6,
+                    ),
+                ),
+            ]
+        )
+    spec = PathMagnitudeEstimatorSpec(
+        family=family,
+        head_name=head_name,
+        estimator_class=_estimator_class_name(estimator),
+        loss=_estimator_loss(estimator),
+        hyperparameters=_simple_estimator_params(estimator),
+    )
+    return estimator, spec
 
 
 def _clean_feature_columns(
@@ -824,6 +1095,7 @@ def _regression_permutation_importance_by_family(
     target: str,
     baseline_mae: float,
     seed: int,
+    prediction_sign: float = 1.0,
 ) -> list[dict[str, float | int | str]]:
     rng = np.random.default_rng(seed)
     family_records: dict[str, dict[str, float | int | str]] = {}
@@ -834,7 +1106,10 @@ def _regression_permutation_importance_by_family(
         values = permuted[column].to_numpy(copy=True)
         rng.shuffle(values)
         permuted[column] = values
-        prediction = pd.Series(regressor.predict(permuted), index=holdout.index)
+        prediction = pd.Series(
+            np.asarray(regressor.predict(permuted), dtype=float) * prediction_sign,
+            index=holdout.index,
+        )
         delta = float(mean_absolute_error(holdout[target], prediction) - baseline_mae)
         if not math.isfinite(delta):
             continue
@@ -930,7 +1205,8 @@ def _mutual_information_screen(
 def _screen_path_metric_head(
     *,
     training_frame: pd.DataFrame,
-    target_column: str,
+    target: pd.Series,
+    target_name: str,
     head_name: str,
     direction: str,
     horizon: int,
@@ -940,8 +1216,8 @@ def _screen_path_metric_head(
 ) -> FeatureScreenResult:
     screen = screen_features_for_target(
         training_frame,
-        training_frame[target_column],
-        target_name=target_column,
+        target.rename(target_name),
+        target_name=target_name,
         head_name=head_name,
         direction=direction,
         horizon=horizon,
@@ -957,6 +1233,197 @@ def _screen_path_metric_head(
     if not screen.selected_features:
         raise ValueError(f"{head_name} feature screen selected no features")
     return screen
+
+
+def _path_magnitude_target_name(*, external_target: str, head_name: str) -> str:
+    if head_name == MFE_HEAD:
+        return f"{external_target}__favorable_magnitude"
+    if head_name == MAE_HEAD:
+        return f"{external_target}__adverse_magnitude"
+    raise ValueError(f"Unsupported path magnitude head: {head_name}")
+
+
+def _path_magnitude_target(
+    external_target: pd.Series,
+    *,
+    head_name: str,
+    external_target_name: str,
+) -> pd.Series:
+    numeric = pd.to_numeric(external_target, errors="coerce")
+    if head_name == MFE_HEAD:
+        magnitude = numeric.copy()
+    elif head_name == MAE_HEAD:
+        magnitude = -numeric
+    else:
+        raise ValueError(f"Unsupported path magnitude head: {head_name}")
+    magnitude.name = _path_magnitude_target_name(
+        external_target=external_target_name,
+        head_name=head_name,
+    )
+    return magnitude
+
+
+def _validate_path_magnitude_training_target(
+    *,
+    feature_frame: pd.DataFrame,
+    magnitude_target: pd.Series,
+    head_name: str,
+) -> None:
+    if len(feature_frame) != len(magnitude_target) or not feature_frame.index.equals(
+        magnitude_target.index
+    ):
+        raise ValueError("path_magnitude_target_alignment_failed")
+    reject_label_columns([str(column) for column in feature_frame.columns])
+    numeric = pd.to_numeric(magnitude_target, errors="coerce")
+    values = numeric.to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError("path_magnitude_target_nonfinite")
+    if bool((values < 0.0).any()):
+        reason = (
+            "mfe_magnitude_target_invalid"
+            if head_name == MFE_HEAD
+            else "mae_magnitude_target_invalid"
+        )
+        raise ValueError(f"{reason}: path_magnitude_target_negative")
+    if not bool((values > 0.0).any()):
+        raise ValueError("path_magnitude_target_all_zero")
+
+
+def _path_magnitude_prediction(
+    estimator: Any,
+    features: pd.DataFrame,
+    *,
+    head_name: str,
+    index: pd.Index,
+) -> PathMagnitudePrediction:
+    magnitude = pd.Series(
+        np.asarray(estimator.predict(features), dtype=float),
+        index=index,
+    )
+    canonical = magnitude if head_name == MFE_HEAD else -magnitude
+    canonical = pd.Series(np.asarray(canonical, dtype=float), index=index)
+    magnitude_values = magnitude.to_numpy(dtype=float, na_value=np.nan)
+    signed_values = canonical.to_numpy(dtype=float, na_value=np.nan)
+    nonfinite_count = int((~np.isfinite(magnitude_values)).sum())
+    nonfinite_count += int((~np.isfinite(signed_values)).sum())
+    magnitude_violation = int((np.isfinite(magnitude_values) & (magnitude_values < 0.0)).sum())
+    if head_name == MFE_HEAD:
+        signed_violation = int((np.isfinite(signed_values) & (signed_values < 0.0)).sum())
+    elif head_name == MAE_HEAD:
+        signed_violation = int((np.isfinite(signed_values) & (signed_values > 0.0)).sum())
+    else:
+        raise ValueError(f"Unsupported path magnitude head: {head_name}")
+    return PathMagnitudePrediction(
+        internal_magnitude=magnitude,
+        canonical_signed=canonical,
+        nonfinite_count=nonfinite_count,
+        magnitude_domain_violation_count=magnitude_violation,
+        signed_domain_violation_count=signed_violation,
+    )
+
+
+def _path_domain_metadata(
+    *,
+    head_name: str,
+    external_target_name: str,
+    magnitude_target: pd.Series,
+    estimator: Any,
+    spec: PathMagnitudeEstimatorSpec,
+    selected_feature_manifest_hash: str,
+    calibration_prediction: PathMagnitudePrediction,
+    holdout_prediction: PathMagnitudePrediction,
+) -> dict[str, object]:
+    target_values = pd.to_numeric(magnitude_target, errors="coerce")
+    definition = (
+        "favorable_magnitude_equals_existing_mfe"
+        if head_name == MFE_HEAD
+        else "adverse_magnitude_equals_negative_existing_mae"
+    )
+    return {
+        "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "head_name": head_name,
+        "external_target_name": external_target_name,
+        "internal_magnitude_target_name": str(magnitude_target.name),
+        "internal_target_definition": definition,
+        "estimator_class": spec.estimator_class,
+        "estimator_loss": spec.loss,
+        "estimator_hyperparameters": spec.hyperparameters,
+        "selected_feature_manifest_hash": selected_feature_manifest_hash,
+        "preprocessing_hash": _pipeline_preprocessing_hash(estimator),
+        "estimator_hash": _estimator_hash(estimator),
+        "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+        "transformation_chain": (
+            f"{external_target_name} -> {magnitude_target.name} -> "
+            f"{spec.estimator_class} -> internal_magnitude_prediction -> canonical_signed_output"
+        ),
+        "training_target_min": _series_min(target_values),
+        "training_target_max": _series_max(target_values),
+        "training_target_positive_count": int((target_values > 0.0).sum()),
+        "convergence_diagnostics": _convergence_diagnostics(estimator),
+        "calibration_domain_diagnostics": calibration_prediction.diagnostics(
+            f"{head_name}_calibration"
+        ),
+        "holdout_domain_diagnostics": holdout_prediction.diagnostics(f"{head_name}_holdout"),
+    }
+
+
+def _path_domain_metric_payload(
+    *,
+    head_name: str,
+    metadata: dict[str, object],
+) -> dict[str, float | int | str | bool | None]:
+    prefix = head_name
+    convergence = metadata.get("convergence_diagnostics")
+    convergence_payload = convergence if isinstance(convergence, dict) else {}
+    calibration_diag = metadata.get("calibration_domain_diagnostics")
+    holdout_diag = metadata.get("holdout_domain_diagnostics")
+    calibration_payload = calibration_diag if isinstance(calibration_diag, dict) else {}
+    holdout_payload = holdout_diag if isinstance(holdout_diag, dict) else {}
+    training_min = metadata.get("training_target_min")
+    training_max = metadata.get("training_target_max")
+    training_positive = metadata.get("training_target_positive_count")
+    return {
+        f"{prefix}_domain_schema_version": str(metadata.get("domain_schema_version") or ""),
+        f"{prefix}_external_target_name": str(metadata.get("external_target_name") or ""),
+        f"{prefix}_internal_magnitude_target_name": str(
+            metadata.get("internal_magnitude_target_name") or ""
+        ),
+        f"{prefix}_internal_target_definition": str(
+            metadata.get("internal_target_definition") or ""
+        ),
+        f"{prefix}_magnitude_estimator_class": str(metadata.get("estimator_class") or ""),
+        f"{prefix}_magnitude_estimator_loss": str(metadata.get("estimator_loss") or ""),
+        f"{prefix}_magnitude_estimator_hyperparameters_json": _json_dumps(
+            metadata.get("estimator_hyperparameters") or {}
+        ),
+        f"{prefix}_magnitude_preprocessing_hash": str(metadata.get("preprocessing_hash") or ""),
+        f"{prefix}_magnitude_estimator_hash": str(metadata.get("estimator_hash") or ""),
+        f"{prefix}_prediction_mapping_version": str(
+            metadata.get("prediction_mapping_version") or ""
+        ),
+        f"{prefix}_magnitude_training_target_min": float(training_min)
+        if isinstance(training_min, (int, float))
+        else None,
+        f"{prefix}_magnitude_training_target_max": float(training_max)
+        if isinstance(training_max, (int, float))
+        else None,
+        f"{prefix}_magnitude_training_target_positive_count": int(training_positive)
+        if isinstance(training_positive, int)
+        else None,
+        f"{prefix}_magnitude_convergence_status": bool(convergence_payload.get("converged", True)),
+        f"{prefix}_magnitude_convergence_diagnostics_json": _json_dumps(convergence_payload),
+        f"{prefix}_magnitude_domain_metadata_json": _json_dumps(metadata),
+        **{
+            str(key): value
+            for key, value in calibration_payload.items()
+            if isinstance(value, (float, int, bool)) or value is None
+        },
+        **{
+            str(key): value
+            for key, value in holdout_payload.items()
+            if isinstance(value, (float, int, bool)) or value is None
+        },
+    }
 
 
 def _positive_group_fraction(frame: pd.DataFrame, returns: pd.Series, group: str) -> float:
@@ -1714,6 +2181,34 @@ def _build_gate_results(
             else f"{head_title} path-metric sign contract failed.",
             evidence="prediction_ood_governance_v2",
         )
+        if head in PATH_MAGNITUDE_HEADS:
+            schema_valid = (
+                metrics.get(f"{head}_domain_schema_version") == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+            )
+            calibration_domain_valid = bool(
+                metrics.get(f"{head}_calibration_domain_integrity_valid")
+            )
+            holdout_domain_valid = bool(metrics.get(f"{head}_holdout_domain_integrity_valid"))
+            domain_valid = schema_valid and calibration_domain_valid and holdout_domain_valid
+            add(
+                f"{head}_magnitude_domain_integrity_valid",
+                f"{head_title} Magnitude Domain Integrity Valid",
+                "prediction sanity",
+                f"regression:{head}",
+                f"{head}_domain_schema_version",
+                PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                "equals and diagnostics pass",
+                metrics.get(f"{head}_domain_schema_version"),
+                _status_from_bool(domain_valid),
+                True,
+                f"{head_title} uses domain-preserving magnitude modeling and valid signed outputs."
+                if domain_valid
+                else (
+                    f"{head_title} is missing domain-preserving metadata or emitted invalid "
+                    "magnitude/signed predictions."
+                ),
+                evidence="path_metric_magnitude_domain_v1",
+            )
         add(
             f"{head}_calibration_ood_rate_acceptable",
             f"{head_title} Calibration OOD Rate Acceptable",
@@ -1929,9 +2424,20 @@ def _train_family(
     plugin_by_name = {plugin.name: plugin for plugin in model_plugins()}
     plugin = plugin_by_name[family]
     path_screen_train = split.train.dropna(subset=required).copy()
+    mfe_magnitude_train = _path_magnitude_target(
+        path_screen_train[mfe],
+        head_name=MFE_HEAD,
+        external_target_name=mfe,
+    )
+    mae_magnitude_train = _path_magnitude_target(
+        path_screen_train[mae],
+        head_name=MAE_HEAD,
+        external_target_name=mae,
+    )
     return_screen = _screen_path_metric_head(
         training_frame=path_screen_train,
-        target_column=returns,
+        target=path_screen_train[returns],
+        target_name=returns,
         head_name=EXPECTED_RETURN_HEAD,
         direction=direction,
         horizon=horizon,
@@ -1941,7 +2447,8 @@ def _train_family(
     )
     mfe_screen = _screen_path_metric_head(
         training_frame=path_screen_train,
-        target_column=mfe,
+        target=mfe_magnitude_train,
+        target_name=str(mfe_magnitude_train.name),
         head_name=MFE_HEAD,
         direction=direction,
         horizon=horizon,
@@ -1951,7 +2458,8 @@ def _train_family(
     )
     mae_screen = _screen_path_metric_head(
         training_frame=path_screen_train,
-        target_column=mae,
+        target=mae_magnitude_train,
+        target_name=str(mae_magnitude_train.name),
         head_name=MAE_HEAD,
         direction=direction,
         horizon=horizon,
@@ -1963,35 +2471,67 @@ def _train_family(
     mfe_feature_columns = mfe_screen.selected_features
     mae_feature_columns = mae_screen.selected_features
     return_model = plugin.regressor_factory(config.random_seed)
-    mfe_model = plugin.regressor_factory(config.random_seed + 1)
-    mae_model = plugin.regressor_factory(config.random_seed + 2)
+    mfe_model, mfe_estimator_spec = build_path_magnitude_estimator(
+        family=family,
+        head_name=MFE_HEAD,
+        seed=config.random_seed + 1,
+    )
+    mae_model, mae_estimator_spec = build_path_magnitude_estimator(
+        family=family,
+        head_name=MAE_HEAD,
+        seed=config.random_seed + 2,
+    )
     return_model.fit(path_screen_train[list(return_feature_columns)], path_screen_train[returns])
-    mfe_model.fit(path_screen_train[list(mfe_feature_columns)], path_screen_train[mfe])
-    mae_model.fit(path_screen_train[list(mae_feature_columns)], path_screen_train[mae])
+    mfe_train_features = path_screen_train[list(mfe_feature_columns)]
+    mae_train_features = path_screen_train[list(mae_feature_columns)]
+    _validate_path_magnitude_training_target(
+        feature_frame=mfe_train_features,
+        magnitude_target=mfe_magnitude_train,
+        head_name=MFE_HEAD,
+    )
+    _validate_path_magnitude_training_target(
+        feature_frame=mae_train_features,
+        magnitude_target=mae_magnitude_train,
+        head_name=MAE_HEAD,
+    )
+    mfe_model.fit(mfe_train_features, mfe_magnitude_train)
+    mae_model.fit(mae_train_features, mae_magnitude_train)
     calibration_expected_return = pd.Series(
         return_model.predict(calibration[list(return_feature_columns)]),
         index=calibration.index,
     )
-    calibration_expected_mfe = pd.Series(
-        mfe_model.predict(calibration[list(mfe_feature_columns)]),
+    calibration_mfe_prediction = _path_magnitude_prediction(
+        mfe_model,
+        calibration[list(mfe_feature_columns)],
+        head_name=MFE_HEAD,
         index=calibration.index,
     )
-    calibration_expected_mae = pd.Series(
-        mae_model.predict(calibration[list(mae_feature_columns)]),
+    calibration_mae_prediction = _path_magnitude_prediction(
+        mae_model,
+        calibration[list(mae_feature_columns)],
+        head_name=MAE_HEAD,
         index=calibration.index,
     )
+    calibration_expected_mfe = calibration_mfe_prediction.canonical_signed
+    calibration_expected_mae = calibration_mae_prediction.canonical_signed
     expected_return = pd.Series(
         return_model.predict(holdout[list(return_feature_columns)]),
         index=holdout.index,
     )
-    expected_mfe = pd.Series(
-        mfe_model.predict(holdout[list(mfe_feature_columns)]),
+    holdout_mfe_prediction = _path_magnitude_prediction(
+        mfe_model,
+        holdout[list(mfe_feature_columns)],
+        head_name=MFE_HEAD,
         index=holdout.index,
     )
-    expected_mae = pd.Series(
-        mae_model.predict(holdout[list(mae_feature_columns)]),
+    holdout_mae_prediction = _path_magnitude_prediction(
+        mae_model,
+        holdout[list(mae_feature_columns)],
+        head_name=MAE_HEAD,
         index=holdout.index,
     )
+    expected_mfe = holdout_mfe_prediction.canonical_signed
+    expected_mae = holdout_mae_prediction.canonical_signed
     selection_policy = selection_policy_from_config(config)
     selected_mask = _apply_selection_policy(
         holdout,
@@ -2106,6 +2646,7 @@ def _train_family(
             target=mfe,
             baseline_mae=holdout_mfe_mae,
             seed=config.random_seed + 31,
+            prediction_sign=1.0,
         ),
         MAE_HEAD: _regression_permutation_importance_by_family(
             regressor=mae_model,
@@ -2115,6 +2656,7 @@ def _train_family(
             target=mae,
             baseline_mae=holdout_mae_mae,
             seed=config.random_seed + 32,
+            prediction_sign=-1.0,
         ),
     }
     mean_selected_return = (
@@ -2328,14 +2870,46 @@ def _train_family(
             "horizon": horizon,
         },
         EXPECTED_RETURN_HEAD: return_screen.metadata(),
-        MFE_HEAD: mfe_screen.metadata(),
-        MAE_HEAD: mae_screen.metadata(),
+        MFE_HEAD: {
+            **mfe_screen.metadata(),
+            "external_target_name": mfe,
+            "internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+            "internal_magnitude_target_name": str(mfe_magnitude_train.name),
+        },
+        MAE_HEAD: {
+            **mae_screen.metadata(),
+            "external_target_name": mae,
+            "internal_target_definition": "adverse_magnitude_equals_negative_existing_mae",
+            "internal_magnitude_target_name": str(mae_magnitude_train.name),
+        },
     }
     feature_screen_records = {
         TARGET_BEFORE_STOP_HEAD: tuple(target_screen.audit_records()),
         EXPECTED_RETURN_HEAD: tuple(return_screen.audit_records()),
         MFE_HEAD: tuple(mfe_screen.audit_records()),
         MAE_HEAD: tuple(mae_screen.audit_records()),
+    }
+    path_domain_metadata = {
+        MFE_HEAD: _path_domain_metadata(
+            head_name=MFE_HEAD,
+            external_target_name=mfe,
+            magnitude_target=mfe_magnitude_train,
+            estimator=mfe_model,
+            spec=mfe_estimator_spec,
+            selected_feature_manifest_hash=head_feature_manifests[MFE_HEAD],
+            calibration_prediction=calibration_mfe_prediction,
+            holdout_prediction=holdout_mfe_prediction,
+        ),
+        MAE_HEAD: _path_domain_metadata(
+            head_name=MAE_HEAD,
+            external_target_name=mae,
+            magnitude_target=mae_magnitude_train,
+            estimator=mae_model,
+            spec=mae_estimator_spec,
+            selected_feature_manifest_hash=head_feature_manifests[MAE_HEAD],
+            calibration_prediction=calibration_mae_prediction,
+            holdout_prediction=holdout_mae_prediction,
+        ),
     }
     portfolio_policy_hash = configuration_hash(asdict(portfolio_config))
     selection_policy_hash = configuration_hash(asdict(selection_policy))
@@ -2346,6 +2920,11 @@ def _train_family(
             "portfolio_policy": asdict(portfolio_config),
         }
     )
+    path_domain_metric_payload: dict[str, float | int | str | bool | None] = {}
+    for head_name, metadata in path_domain_metadata.items():
+        path_domain_metric_payload.update(
+            _path_domain_metric_payload(head_name=head_name, metadata=metadata)
+        )
     path_screen_metric_payload: dict[str, float | int | str | bool | None] = {}
     for head_name, screen in path_screens.items():
         metric_key = PATH_HEAD_TARGET_METRIC_KEYS[head_name]
@@ -2674,6 +3253,7 @@ def _train_family(
         **selection_metrics,
         **portfolio_metrics,
         **prediction_metrics,
+        **path_domain_metric_payload,
         **path_screen_metric_payload,
     }
     calibration_metrics: dict[str, float | int | str | bool | None] = {
@@ -2749,6 +3329,7 @@ def _train_family(
         head_feature_manifests=head_feature_manifests,
         feature_screen_metadata=feature_screen_metadata,
         feature_screen_records=feature_screen_records,
+        path_domain_metadata=path_domain_metadata,
     )
     return bundle
 
@@ -2765,6 +3346,8 @@ def load_model_bundle(path: str | Path) -> ModelBundle:
         object.__setattr__(loaded, "feature_screen_metadata", {})
     if not hasattr(loaded, "feature_screen_records"):
         object.__setattr__(loaded, "feature_screen_records", {})
+    if not hasattr(loaded, "path_domain_metadata"):
+        object.__setattr__(loaded, "path_domain_metadata", {})
     return loaded
 
 
@@ -2895,6 +3478,7 @@ def discover_models(
                     head_feature_manifests=bundle.head_feature_manifests,
                     feature_screen_metadata=bundle.feature_screen_metadata,
                     feature_screen_records=bundle.feature_screen_records,
+                    path_domain_metadata=bundle.path_domain_metadata,
                 )
                 artifact_path = Path(artifact_dir) / f"{model_id}.joblib"
                 save_model_bundle(bundle, artifact_path)
@@ -3036,12 +3620,43 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         metric_prefix: str,
         values: np.ndarray | None,
         missing_features: list[str],
+        domain_metadata: dict[str, object] | None = None,
+        domain_prediction: PathMagnitudePrediction | None = None,
     ) -> None:
         output[f"{output_column}_required_feature_missing"] = bool(missing_features)
         output[f"{output_column}_missing_features"] = ";".join(missing_features[:10])
         if metric_prefix in {"mfe", "mae"}:
             output[f"{metric_prefix}_required_feature_missing"] = bool(missing_features)
             output[f"{metric_prefix}_missing_features"] = ";".join(missing_features[:10])
+            domain = domain_metadata or {}
+            domain_schema = str(
+                domain.get("domain_schema_version") or "legacy_unconstrained_path_metric_model"
+            )
+            output[f"{metric_prefix}_domain_schema_version"] = domain_schema
+            output[f"{metric_prefix}_domain_metadata_missing"] = (
+                domain_schema != PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+            )
+            output[f"{metric_prefix}_external_target_name"] = str(
+                domain.get("external_target_name") or ""
+            )
+            output[f"{metric_prefix}_internal_magnitude_target_name"] = str(
+                domain.get("internal_magnitude_target_name") or ""
+            )
+            output[f"{metric_prefix}_internal_target_definition"] = str(
+                domain.get("internal_target_definition") or ""
+            )
+            output[f"{metric_prefix}_magnitude_estimator_class"] = str(
+                domain.get("estimator_class") or ""
+            )
+            output[f"{metric_prefix}_magnitude_estimator_loss"] = str(
+                domain.get("estimator_loss") or ""
+            )
+            output[f"{metric_prefix}_magnitude_estimator_hash"] = str(
+                domain.get("estimator_hash") or ""
+            )
+            output[f"{metric_prefix}_prediction_mapping_version"] = str(
+                domain.get("prediction_mapping_version") or ""
+            )
         if values is None:
             numeric = np.full(len(frame), math.nan)
         else:
@@ -3087,6 +3702,33 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             output[f"{output_column}_sign_contract_valid"] = numeric <= 0.0
         else:
             output[f"{output_column}_sign_contract_valid"] = True
+        if metric_prefix in {"mfe", "mae"}:
+            if domain_prediction is None:
+                magnitude = np.full(len(frame), math.nan)
+                magnitude_nonfinite = np.full(len(frame), False)
+                magnitude_violation = np.full(len(frame), False)
+            else:
+                magnitude = domain_prediction.internal_magnitude.to_numpy(dtype=float)
+                magnitude_nonfinite = ~np.isfinite(magnitude)
+                magnitude_violation = np.isfinite(magnitude) & (magnitude < 0.0)
+            signed_nonfinite = ~np.isfinite(numeric)
+            if metric_prefix == "mfe":
+                signed_violation = np.isfinite(numeric) & (numeric < 0.0)
+            else:
+                signed_violation = np.isfinite(numeric) & (numeric > 0.0)
+            output[f"{output_column}_internal_magnitude"] = magnitude
+            output[f"{output_column}_magnitude_prediction_invalid"] = (
+                magnitude_nonfinite | magnitude_violation
+            )
+            output[f"{output_column}_signed_prediction_invalid"] = (
+                signed_nonfinite | signed_violation
+            )
+            output[f"{output_column}_magnitude_domain_valid"] = ~(
+                magnitude_nonfinite | magnitude_violation
+            )
+            output[f"{output_column}_signed_domain_valid"] = ~(signed_nonfinite | signed_violation)
+            output[f"{output_column}_magnitude_domain_violation"] = magnitude_violation
+            output[f"{output_column}_signed_domain_violation"] = signed_violation
 
     add_regression_prediction(
         "expected_return",
@@ -3096,20 +3738,58 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         else bundle.return_model.predict(frame[list(expected_return_features)]),
         [column for column in expected_return_features if column not in frame.columns],
     )
+    mfe_missing_features = [column for column in mfe_features if column not in frame.columns]
+    mfe_domain_metadata = bundle_path_domain_metadata(bundle, MFE_HEAD)
+    mfe_has_domain = (
+        str(mfe_domain_metadata.get("domain_schema_version") or "")
+        == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+    )
+    mfe_domain_prediction: PathMagnitudePrediction | None = None
+    if mfe_missing_features:
+        mfe_values = None
+    elif mfe_has_domain:
+        mfe_domain_prediction = _path_magnitude_prediction(
+            bundle.mfe_model,
+            frame[list(mfe_features)],
+            head_name=MFE_HEAD,
+            index=frame.index,
+        )
+        mfe_values = mfe_domain_prediction.canonical_signed.to_numpy(dtype=float)
+    else:
+        mfe_values = bundle.mfe_model.predict(frame[list(mfe_features)])
     add_regression_prediction(
         "expected_mfe",
         "mfe",
-        None
-        if any(column not in frame.columns for column in mfe_features)
-        else bundle.mfe_model.predict(frame[list(mfe_features)]),
-        [column for column in mfe_features if column not in frame.columns],
+        mfe_values,
+        mfe_missing_features,
+        domain_metadata=mfe_domain_metadata,
+        domain_prediction=mfe_domain_prediction,
     )
+    mae_missing_features = [column for column in mae_features if column not in frame.columns]
+    mae_domain_metadata = bundle_path_domain_metadata(bundle, MAE_HEAD)
+    mae_has_domain = (
+        str(mae_domain_metadata.get("domain_schema_version") or "")
+        == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+    )
+    mae_domain_prediction: PathMagnitudePrediction | None = None
+    if mae_missing_features:
+        mae_values = None
+    elif mae_has_domain:
+        mae_domain_prediction = _path_magnitude_prediction(
+            bundle.mae_model,
+            frame[list(mae_features)],
+            head_name=MAE_HEAD,
+            index=frame.index,
+        )
+        mae_values = mae_domain_prediction.canonical_signed.to_numpy(dtype=float)
+    else:
+        mae_values = bundle.mae_model.predict(frame[list(mae_features)])
     add_regression_prediction(
         "expected_mae",
         "mae",
-        None
-        if any(column not in frame.columns for column in mae_features)
-        else bundle.mae_model.predict(frame[list(mae_features)]),
-        [column for column in mae_features if column not in frame.columns],
+        mae_values,
+        mae_missing_features,
+        domain_metadata=mae_domain_metadata,
+        domain_prediction=mae_domain_prediction,
     )
     return output
