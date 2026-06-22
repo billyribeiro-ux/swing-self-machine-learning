@@ -347,6 +347,7 @@ def render_page() -> None:
                 "Stability",
                 "Feature Diagnostics",
                 "Target-Before-Stop Screen",
+                "Path-Metric Screens",
                 "Target-Before-Stop Calibration",
                 "Prediction Sanity",
                 "Artifact Metadata",
@@ -504,6 +505,43 @@ def render_page() -> None:
                 f"{selected_model.model_id}_target_before_stop_feature_screen.csv",
             )
         with tabs[7]:
+            path_rows: list[pd.DataFrame] = []
+            for head, prefix in (
+                ("Expected Return", "expected_return"),
+                ("MFE", "mfe"),
+                ("MAE", "mae"),
+            ):
+                summary = _metric_subset(
+                    selected_model,
+                    (
+                        f"{prefix}_feature_screen",
+                        f"{prefix}_screening",
+                        f"{prefix}_selected_feature",
+                        f"{prefix}_top_25",
+                        f"{prefix}_permutation",
+                    ),
+                )
+                if not summary.empty:
+                    summary.insert(0, "Head", head)
+                    path_rows.append(summary)
+                top_mi = _json_records(
+                    selected_model.metrics.get(f"{prefix}_top_25_train_mi_features_json")
+                )
+                if not top_mi.empty:
+                    top_mi.insert(0, "Head", head)
+                    path_rows.append(top_mi)
+            path_screen_frame = (
+                pd.concat(path_rows, ignore_index=True) if path_rows else pd.DataFrame()
+            )
+            streamlit.dataframe(
+                display_frame(path_screen_frame.head(1_000)), width="stretch", hide_index=True
+            )
+            _download_frame(
+                "Export path-metric feature screens",
+                path_screen_frame,
+                f"{selected_model.model_id}_path_metric_feature_screens.csv",
+            )
+        with tabs[8]:
             streamlit.warning(
                 "Current holdout metrics are DEVELOPMENT HOLDOUT DIAGNOSTICS, not final validation."
             )
@@ -542,7 +580,7 @@ def render_page() -> None:
                 method_comparison,
                 f"{selected_model.model_id}_target_before_stop_calibration_methods.csv",
             )
-        with tabs[8]:
+        with tabs[9]:
             sanity = _metric_subset(
                 selected_model,
                 (
@@ -555,7 +593,7 @@ def render_page() -> None:
                 ),
             )
             streamlit.dataframe(display_frame(sanity), width="stretch", hide_index=True)
-        with tabs[9]:
+        with tabs[10]:
             streamlit.dataframe(
                 display_frame(_detail_rows(selected_model)),
                 width="stretch",

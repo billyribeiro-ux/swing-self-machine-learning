@@ -39,6 +39,8 @@ FINAL_HOLDOUT_SAMPLE_GATE_IDS = (
     "final_holdout_frozen_artifacts_unchanged",
     "final_holdout_sample_sufficient",
 )
+PATH_METRIC_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_v1"
+PATH_METRIC_SCREEN_PREFIXES = ("expected_return", "mfe", "mae")
 
 
 @dataclass(frozen=True)
@@ -311,6 +313,20 @@ def _final_holdout_freeze_blocker(db_path: str | Path, model: RegisteredModel) -
     return None
 
 
+def _path_feature_screen_blocker(model: RegisteredModel) -> str | None:
+    missing: list[str] = []
+    for prefix in PATH_METRIC_SCREEN_PREFIXES:
+        schema = str(model.metrics.get(f"{prefix}_feature_screen_schema_version") or "")
+        manifest = str(model.metrics.get(f"{prefix}_screening_manifest_hash") or "")
+        if schema != PATH_METRIC_SCREEN_SCHEMA_VERSION:
+            missing.append(f"{prefix}:schema")
+        if not manifest:
+            missing.append(f"{prefix}:manifest")
+    if missing:
+        return f"missing target-specific path-metric feature screen metadata: {missing}"
+    return None
+
+
 def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
     models = list_models(db_path)
     selected = next((model for model in models if model.model_id == model_id), None)
@@ -329,6 +345,12 @@ def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
         raise ValueError(
             "Model cannot be promoted because mandatory gate results block promotion: "
             f"{list(eligibility.blocked_reasons)}"
+        )
+    path_screen_blocker = _path_feature_screen_blocker(selected)
+    if path_screen_blocker is not None:
+        raise ValueError(
+            "Model cannot be promoted because artifact metadata is incomplete: "
+            f"{path_screen_blocker}"
         )
     freeze_blocker = _final_holdout_freeze_blocker(db_path, selected)
     if freeze_blocker is not None:

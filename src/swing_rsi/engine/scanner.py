@@ -12,6 +12,10 @@ import pandas as pd
 
 from swing_rsi.engine.attribution import explain_candidate
 from swing_rsi.engine.models import (
+    EXPECTED_RETURN_HEAD,
+    MAE_HEAD,
+    MFE_HEAD,
+    PATH_METRIC_HEADS,
     TARGET_BEFORE_STOP_HEAD,
     ModelBundle,
     bundle_feature_screen_metadata,
@@ -37,8 +41,8 @@ from swing_rsi.engine.selection import (
 )
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 5
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v5-tbs-calibration-governance"
+SCANNER_IDENTITY_SCHEMA_VERSION = 6
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v6-path-feature-manifests"
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,26 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
     rejection_reasons: list[str] = []
     warning_heads: list[str] = []
     warning_details: list[dict[str, object]] = []
+    expected_return_missing = bool(item.get("expected_return_required_feature_missing", False))
+    if expected_return_missing:
+        rejection_reasons.append("expected_return_required_feature_missing")
+    mfe_missing = bool(item.get("mfe_required_feature_missing", False)) or bool(
+        item.get("expected_mfe_required_feature_missing", False)
+    )
+    if mfe_missing:
+        rejection_reasons.append("mfe_required_feature_missing")
+    mae_missing = bool(item.get("mae_required_feature_missing", False)) or bool(
+        item.get("expected_mae_required_feature_missing", False)
+    )
+    if mae_missing:
+        rejection_reasons.append("mae_required_feature_missing")
+    for head_name, reason in (
+        ("expected_return", "expected_return_feature_screen_metadata_missing"),
+        ("mfe", "mfe_feature_screen_metadata_missing"),
+        ("mae", "mae_feature_screen_metadata_missing"),
+    ):
+        if bool(item.get(f"{head_name}_feature_screen_metadata_missing", False)):
+            rejection_reasons.append(reason)
     target_missing = bool(item.get("target_before_stop_required_feature_missing", False))
     if target_missing:
         rejection_reasons.append("target_before_stop_required_feature_missing")
@@ -189,6 +213,12 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
     max_severity = 0.0
     for head in REGRESSION_HEADS:
         output_column = HEAD_OUTPUT_COLUMNS[head]
+        if (
+            (head == "return" and expected_return_missing)
+            or (head == "mfe" and mfe_missing)
+            or (head == "mae" and mae_missing)
+        ):
+            continue
         value = _finite_float(item.get(output_column))
         metadata_missing = bool(item.get(f"{output_column}_ood_metadata_missing", False))
         severity = _finite_float(item.get(f"{output_column}_ood_severity"))
@@ -246,6 +276,7 @@ def _build_scan_execution_identity(
     model_ood_metadata: dict[str, dict[str, object]],
     model_target_before_stop_feature_metadata: dict[str, dict[str, object]],
     model_target_before_stop_calibration_metadata: dict[str, dict[str, object]],
+    model_path_feature_metadata: dict[str, dict[str, object]],
     scanner_config: ScannerConfig,
     universe_snapshot_id: str,
     feature_manifest_hash: str,
@@ -279,6 +310,10 @@ def _build_scan_execution_identity(
         for model_id in model_ids
     }
     tbs_calibration_metadata_hash = _stable_hash(tbs_calibration_metadata_payload)
+    path_feature_metadata_payload = {
+        model_id: model_path_feature_metadata.get(model_id, {}) for model_id in model_ids
+    }
+    path_feature_metadata_hash = _stable_hash(path_feature_metadata_payload)
     identity_payload: dict[str, object] = {
         "scanner_identity_schema_version": SCANNER_IDENTITY_SCHEMA_VERSION,
         "scanner_implementation_version": SCANNER_IMPLEMENTATION_VERSION,
@@ -310,6 +345,8 @@ def _build_scan_execution_identity(
         "target_before_stop_feature_metadata_hash": tbs_feature_metadata_hash,
         "target_before_stop_calibration_metadata": tbs_calibration_metadata_payload,
         "target_before_stop_calibration_metadata_hash": tbs_calibration_metadata_hash,
+        "path_metric_feature_metadata": path_feature_metadata_payload,
+        "path_metric_feature_metadata_hash": path_feature_metadata_hash,
         "effective_selection_policies": effective_policy_payload,
         "raw_scanner_config": raw_config,
         "raw_scanner_config_hash": raw_config_hash,
@@ -329,6 +366,8 @@ def _build_scan_execution_identity(
         "target_before_stop_feature_metadata_hash": tbs_feature_metadata_hash,
         "target_before_stop_calibration_metadata_json": dumps(tbs_calibration_metadata_payload),
         "target_before_stop_calibration_metadata_hash": tbs_calibration_metadata_hash,
+        "path_metric_feature_metadata_json": dumps(path_feature_metadata_payload),
+        "path_metric_feature_metadata_hash": path_feature_metadata_hash,
         "effective_model_policy_json": dumps(effective_policy_payload),
         "effective_policy_bundle_hash": effective_policy_bundle_hash,
         "canonical_scan_execution_identity": identity_payload,
@@ -372,6 +411,8 @@ def _metadata_matches_scan_identity(
         == expected_metadata["target_before_stop_feature_metadata_hash"]
         and metadata.get("target_before_stop_calibration_metadata_hash")
         == expected_metadata["target_before_stop_calibration_metadata_hash"]
+        and metadata.get("path_metric_feature_metadata_hash")
+        == expected_metadata["path_metric_feature_metadata_hash"]
         and metadata.get("feature_manifest_hash") == expected_metadata["feature_manifest_hash"]
         and metadata.get("universe_snapshot_id") == expected_metadata["universe_snapshot_id"]
         and metadata.get("model_generation_ids") == expected_metadata["model_generation_ids"]
@@ -540,6 +581,22 @@ def run_scanner(
     normalized_tbs_calibration_metadata = {
         model_id: bundle_tbs_calibration_metadata(bundles_by_id[model_id]) for model_id in model_ids
     }
+    normalized_path_feature_metadata = {}
+    for model_id in model_ids:
+        bundle = bundles_by_id[model_id]
+        head_payload: dict[str, object] = {}
+        for head in PATH_METRIC_HEADS:
+            metadata = bundle_feature_screen_metadata(bundle, head)
+            head_payload[head] = {
+                "schema_version": metadata.get(
+                    "screening_schema_version", "legacy_shared_path_feature_screen"
+                ),
+                "target_label_name": metadata.get("target_label_name", ""),
+                "selected_feature_count": metadata.get("selected_feature_count", ""),
+                "selected_feature_families": metadata.get("selected_feature_families", {}),
+                "selected_feature_manifest_hash": bundle_head_feature_manifest(bundle, head),
+            }
+        normalized_path_feature_metadata[model_id] = head_payload
     identity, metadata = _build_scan_execution_identity(
         as_of_date=as_of.date().isoformat(),
         model_ids=model_ids,
@@ -550,6 +607,7 @@ def run_scanner(
         model_ood_metadata=normalized_ood_metadata,
         model_target_before_stop_feature_metadata=normalized_tbs_feature_metadata,
         model_target_before_stop_calibration_metadata=normalized_tbs_calibration_metadata,
+        model_path_feature_metadata=normalized_path_feature_metadata,
         scanner_config=config,
         universe_snapshot_id=universe_snapshot_id,
         feature_manifest_hash=feature_manifest_hash,
@@ -648,6 +706,22 @@ def run_scanner(
                 integrity_exclusion if not exclusion else f"{exclusion};{integrity_exclusion}"
             )
         bundle = bundles_by_id[model_id]
+        path_screen_metadata = {
+            EXPECTED_RETURN_HEAD: bundle_feature_screen_metadata(bundle, EXPECTED_RETURN_HEAD),
+            MFE_HEAD: bundle_feature_screen_metadata(bundle, MFE_HEAD),
+            MAE_HEAD: bundle_feature_screen_metadata(bundle, MAE_HEAD),
+        }
+        path_selected_families_text: dict[str, str] = {}
+        for head, screen_metadata in path_screen_metadata.items():
+            selected_families = screen_metadata.get("selected_feature_families", {})
+            path_selected_families_text[head] = (
+                "; ".join(
+                    f"{family}:{count}"
+                    for family, count in sorted(cast(dict[str, object], selected_families).items())
+                )
+                if isinstance(selected_families, dict)
+                else ""
+            )
         tbs_screen_metadata = bundle_feature_screen_metadata(bundle, TARGET_BEFORE_STOP_HEAD)
         tbs_selected_families = tbs_screen_metadata.get("selected_feature_families", {})
         tbs_selected_families_text = (
@@ -697,6 +771,27 @@ def run_scanner(
                 "expected_return_ood_severity_limit": item.get(
                     "expected_return_ood_severity_limit"
                 ),
+                "expected_return_feature_screen_schema": item.get(
+                    "expected_return_feature_screen_schema", ""
+                ),
+                "expected_return_feature_manifest_hash": item.get(
+                    "expected_return_feature_manifest_hash", ""
+                ),
+                "expected_return_selected_feature_count": path_screen_metadata[
+                    EXPECTED_RETURN_HEAD
+                ].get("selected_feature_count", ""),
+                "expected_return_selected_feature_families": path_selected_families_text[
+                    EXPECTED_RETURN_HEAD
+                ],
+                "expected_return_required_feature_missing": bool(
+                    item.get("expected_return_required_feature_missing", False)
+                ),
+                "expected_return_missing_features": item.get(
+                    "expected_return_missing_features", ""
+                ),
+                "expected_return_feature_screen_metadata_missing": bool(
+                    item.get("expected_return_feature_screen_metadata_missing", False)
+                ),
                 "expected_mfe": float(item["expected_mfe"]),
                 "expected_mfe_raw": float(item.get("expected_mfe_raw", item["expected_mfe"])),
                 "expected_mfe_transformed": float(
@@ -709,6 +804,22 @@ def run_scanner(
                 "expected_mfe_ood_bound_low": item.get("expected_mfe_ood_bound_low"),
                 "expected_mfe_ood_bound_high": item.get("expected_mfe_ood_bound_high"),
                 "expected_mfe_ood_severity_limit": item.get("expected_mfe_ood_severity_limit"),
+                "mfe_feature_screen_schema": item.get("mfe_feature_screen_schema", ""),
+                "mfe_feature_manifest_hash": item.get("mfe_feature_manifest_hash", ""),
+                "mfe_selected_feature_count": path_screen_metadata[MFE_HEAD].get(
+                    "selected_feature_count", ""
+                ),
+                "mfe_selected_feature_families": path_selected_families_text[MFE_HEAD],
+                "mfe_required_feature_missing": bool(
+                    item.get("mfe_required_feature_missing", False)
+                    or item.get("expected_mfe_required_feature_missing", False)
+                ),
+                "mfe_missing_features": item.get(
+                    "mfe_missing_features", item.get("expected_mfe_missing_features", "")
+                ),
+                "mfe_feature_screen_metadata_missing": bool(
+                    item.get("mfe_feature_screen_metadata_missing", False)
+                ),
                 "expected_mae": float(item["expected_mae"]),
                 "expected_mae_raw": float(item.get("expected_mae_raw", item["expected_mae"])),
                 "expected_mae_transformed": float(
@@ -721,6 +832,22 @@ def run_scanner(
                 "expected_mae_ood_bound_low": item.get("expected_mae_ood_bound_low"),
                 "expected_mae_ood_bound_high": item.get("expected_mae_ood_bound_high"),
                 "expected_mae_ood_severity_limit": item.get("expected_mae_ood_severity_limit"),
+                "mae_feature_screen_schema": item.get("mae_feature_screen_schema", ""),
+                "mae_feature_manifest_hash": item.get("mae_feature_manifest_hash", ""),
+                "mae_selected_feature_count": path_screen_metadata[MAE_HEAD].get(
+                    "selected_feature_count", ""
+                ),
+                "mae_selected_feature_families": path_selected_families_text[MAE_HEAD],
+                "mae_required_feature_missing": bool(
+                    item.get("mae_required_feature_missing", False)
+                    or item.get("expected_mae_required_feature_missing", False)
+                ),
+                "mae_missing_features": item.get(
+                    "mae_missing_features", item.get("expected_mae_missing_features", "")
+                ),
+                "mae_feature_screen_metadata_missing": bool(
+                    item.get("mae_feature_screen_metadata_missing", False)
+                ),
                 "target_before_stop_probability": target_before_stop_probability,
                 "target_before_stop_raw_probability": item.get(
                     "target_before_stop_raw_probability"

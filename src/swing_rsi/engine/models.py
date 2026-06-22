@@ -37,6 +37,7 @@ from swing_rsi.engine.calibration_governance import (
 )
 from swing_rsi.engine.feature_screen import (
     FEATURE_SCREEN_SCHEMA_VERSION,
+    PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
     FeatureScreenResult,
     screen_features_for_target,
 )
@@ -147,6 +148,22 @@ TARGET_BEFORE_STOP_HEAD = "target_before_stop"
 EXPECTED_RETURN_HEAD = "expected_return"
 MFE_HEAD = "mfe"
 MAE_HEAD = "mae"
+PATH_METRIC_HEADS = (EXPECTED_RETURN_HEAD, MFE_HEAD, MAE_HEAD)
+PATH_HEAD_TO_METRIC_PREFIX = {
+    EXPECTED_RETURN_HEAD: "return",
+    MFE_HEAD: "mfe",
+    MAE_HEAD: "mae",
+}
+PATH_HEAD_TARGET_METRIC_KEYS = {
+    EXPECTED_RETURN_HEAD: "expected_return",
+    MFE_HEAD: "mfe",
+    MAE_HEAD: "mae",
+}
+PATH_HEAD_OUTPUT_COLUMNS = {
+    EXPECTED_RETURN_HEAD: "expected_return",
+    MFE_HEAD: "expected_mfe",
+    MAE_HEAD: "expected_mae",
+}
 
 
 def bundle_head_feature_columns(bundle: ModelBundle, head: str) -> tuple[str, ...]:
@@ -160,7 +177,11 @@ def bundle_head_feature_columns(bundle: ModelBundle, head: str) -> tuple[str, ..
 def bundle_head_feature_manifest(bundle: ModelBundle, head: str) -> str:
     manifests = getattr(bundle, "head_feature_manifests", {}) or {}
     value = manifests.get(head)
-    return str(value) if value else "legacy_shared_feature_screen"
+    if value:
+        return str(value)
+    if head in PATH_METRIC_HEADS:
+        return "legacy_shared_path_feature_screen"
+    return "legacy_shared_feature_screen"
 
 
 def bundle_feature_screen_metadata(bundle: ModelBundle, head: str) -> dict[str, object]:
@@ -794,6 +815,50 @@ def _permutation_importance_by_family(
     return sorted(family_records.values(), key=lambda item: str(item["family"]))
 
 
+def _regression_permutation_importance_by_family(
+    *,
+    regressor: Any,
+    holdout: pd.DataFrame,
+    feature_columns: tuple[str, ...],
+    feature_family_by_column: dict[str, str],
+    target: str,
+    baseline_mae: float,
+    seed: int,
+) -> list[dict[str, float | int | str]]:
+    rng = np.random.default_rng(seed)
+    family_records: dict[str, dict[str, float | int | str]] = {}
+    if not feature_columns or not math.isfinite(baseline_mae):
+        return []
+    for column in feature_columns:
+        permuted = holdout[list(feature_columns)].copy()
+        values = permuted[column].to_numpy(copy=True)
+        rng.shuffle(values)
+        permuted[column] = values
+        prediction = pd.Series(regressor.predict(permuted), index=holdout.index)
+        delta = float(mean_absolute_error(holdout[target], prediction) - baseline_mae)
+        if not math.isfinite(delta):
+            continue
+        family = feature_family_by_column.get(column, "unknown")
+        record = family_records.setdefault(
+            family,
+            {
+                "family": family,
+                "features": 0,
+                "sum_delta_mae": 0.0,
+                "positive_sum_delta_mae": 0.0,
+                "top_feature": "",
+                "top_delta_mae": -math.inf,
+            },
+        )
+        record["features"] = int(record["features"]) + 1
+        record["sum_delta_mae"] = float(record["sum_delta_mae"]) + delta
+        record["positive_sum_delta_mae"] = float(record["positive_sum_delta_mae"]) + max(0.0, delta)
+        if delta > float(record["top_delta_mae"]):
+            record["top_delta_mae"] = delta
+            record["top_feature"] = column
+    return sorted(family_records.values(), key=lambda item: str(item["family"]))
+
+
 def _screen_top_features(
     screen: FeatureScreenResult,
     *,
@@ -860,6 +925,38 @@ def _mutual_information_screen(
     selected = [column for column, _ in ranked[:top_k]]
     summary = "; ".join(f"{column}={float(score):.6f}" for column, score in ranked[:10])
     return selected, summary
+
+
+def _screen_path_metric_head(
+    *,
+    training_frame: pd.DataFrame,
+    target_column: str,
+    head_name: str,
+    direction: str,
+    horizon: int,
+    feature_family_by_column: dict[str, str],
+    config: DiscoveryConfig,
+    seed_offset: int,
+) -> FeatureScreenResult:
+    screen = screen_features_for_target(
+        training_frame,
+        training_frame[target_column],
+        target_name=target_column,
+        head_name=head_name,
+        direction=direction,
+        horizon=horizon,
+        task_type="regression",
+        schema_version=PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
+        feature_family_by_column=feature_family_by_column,
+        max_selected_features=config.mutual_information_top_k,
+        random_seed=config.random_seed + seed_offset,
+        missingness_threshold=0.40,
+        variance_threshold=1e-12,
+        correlation_threshold=config.correlation_threshold,
+    )
+    if not screen.selected_features:
+        raise ValueError(f"{head_name} feature screen selected no features")
+    return screen
 
 
 def _positive_group_fraction(frame: pd.DataFrame, returns: pd.Series, group: str) -> float:
@@ -1761,6 +1858,9 @@ def _train_family(
         target_train,
         target_train[target_before_stop],
         target_name=target_before_stop,
+        head_name=TARGET_BEFORE_STOP_HEAD,
+        direction=direction,
+        horizon=horizon,
         task_type="classification",
         feature_family_by_column=feature_family_by_column,
         max_selected_features=config.mutual_information_top_k,
@@ -1828,27 +1928,70 @@ def _train_family(
 
     plugin_by_name = {plugin.name: plugin for plugin in model_plugins()}
     plugin = plugin_by_name[family]
+    path_screen_train = split.train.dropna(subset=required).copy()
+    return_screen = _screen_path_metric_head(
+        training_frame=path_screen_train,
+        target_column=returns,
+        head_name=EXPECTED_RETURN_HEAD,
+        direction=direction,
+        horizon=horizon,
+        feature_family_by_column=feature_family_by_column,
+        config=config,
+        seed_offset=10,
+    )
+    mfe_screen = _screen_path_metric_head(
+        training_frame=path_screen_train,
+        target_column=mfe,
+        head_name=MFE_HEAD,
+        direction=direction,
+        horizon=horizon,
+        feature_family_by_column=feature_family_by_column,
+        config=config,
+        seed_offset=11,
+    )
+    mae_screen = _screen_path_metric_head(
+        training_frame=path_screen_train,
+        target_column=mae,
+        head_name=MAE_HEAD,
+        direction=direction,
+        horizon=horizon,
+        feature_family_by_column=feature_family_by_column,
+        config=config,
+        seed_offset=12,
+    )
+    return_feature_columns = return_screen.selected_features
+    mfe_feature_columns = mfe_screen.selected_features
+    mae_feature_columns = mae_screen.selected_features
     return_model = plugin.regressor_factory(config.random_seed)
     mfe_model = plugin.regressor_factory(config.random_seed + 1)
     mae_model = plugin.regressor_factory(config.random_seed + 2)
-    return_model.fit(x_train, train[returns])
-    mfe_model.fit(x_train, train[mfe])
-    mae_model.fit(x_train, train[mae])
+    return_model.fit(path_screen_train[list(return_feature_columns)], path_screen_train[returns])
+    mfe_model.fit(path_screen_train[list(mfe_feature_columns)], path_screen_train[mfe])
+    mae_model.fit(path_screen_train[list(mae_feature_columns)], path_screen_train[mae])
     calibration_expected_return = pd.Series(
-        return_model.predict(calibration[feature_columns]),
+        return_model.predict(calibration[list(return_feature_columns)]),
         index=calibration.index,
     )
     calibration_expected_mfe = pd.Series(
-        mfe_model.predict(calibration[feature_columns]),
+        mfe_model.predict(calibration[list(mfe_feature_columns)]),
         index=calibration.index,
     )
     calibration_expected_mae = pd.Series(
-        mae_model.predict(calibration[feature_columns]),
+        mae_model.predict(calibration[list(mae_feature_columns)]),
         index=calibration.index,
     )
-    expected_return = pd.Series(return_model.predict(holdout[feature_columns]), index=holdout.index)
-    expected_mfe = pd.Series(mfe_model.predict(holdout[feature_columns]), index=holdout.index)
-    expected_mae = pd.Series(mae_model.predict(holdout[feature_columns]), index=holdout.index)
+    expected_return = pd.Series(
+        return_model.predict(holdout[list(return_feature_columns)]),
+        index=holdout.index,
+    )
+    expected_mfe = pd.Series(
+        mfe_model.predict(holdout[list(mfe_feature_columns)]),
+        index=holdout.index,
+    )
+    expected_mae = pd.Series(
+        mae_model.predict(holdout[list(mae_feature_columns)]),
+        index=holdout.index,
+    )
     selection_policy = selection_policy_from_config(config)
     selected_mask = _apply_selection_policy(
         holdout,
@@ -1941,6 +2084,39 @@ def _train_family(
     )
     holdout_mae = float(mean_absolute_error(holdout[returns], expected_return))
     holdout_rmse = float(mean_squared_error(holdout[returns], expected_return) ** 0.5)
+    holdout_mfe_mae = float(mean_absolute_error(holdout[mfe], expected_mfe))
+    holdout_mfe_rmse = float(mean_squared_error(holdout[mfe], expected_mfe) ** 0.5)
+    holdout_mae_mae = float(mean_absolute_error(holdout[mae], expected_mae))
+    holdout_mae_rmse = float(mean_squared_error(holdout[mae], expected_mae) ** 0.5)
+    path_permutation_by_head = {
+        EXPECTED_RETURN_HEAD: _regression_permutation_importance_by_family(
+            regressor=return_model,
+            holdout=holdout,
+            feature_columns=return_feature_columns,
+            feature_family_by_column=feature_family_by_column,
+            target=returns,
+            baseline_mae=holdout_mae,
+            seed=config.random_seed + 30,
+        ),
+        MFE_HEAD: _regression_permutation_importance_by_family(
+            regressor=mfe_model,
+            holdout=holdout,
+            feature_columns=mfe_feature_columns,
+            feature_family_by_column=feature_family_by_column,
+            target=mfe,
+            baseline_mae=holdout_mfe_mae,
+            seed=config.random_seed + 31,
+        ),
+        MAE_HEAD: _regression_permutation_importance_by_family(
+            regressor=mae_model,
+            holdout=holdout,
+            feature_columns=mae_feature_columns,
+            feature_family_by_column=feature_family_by_column,
+            target=mae,
+            baseline_mae=holdout_mae_mae,
+            seed=config.random_seed + 32,
+        ),
+    }
     mean_selected_return = (
         float(selected_returns.mean()) if not selected_returns.empty else math.nan
     )
@@ -2120,12 +2296,17 @@ def _train_family(
             selected_feature_family_counts.get(family_name, 0) + 1
         )
     target_feature_family_counts = target_screen.selected_feature_families
+    path_screens = {
+        EXPECTED_RETURN_HEAD: return_screen,
+        MFE_HEAD: mfe_screen,
+        MAE_HEAD: mae_screen,
+    }
     head_feature_columns = {
         PRIMARY_HEAD: tuple(feature_columns),
         TARGET_BEFORE_STOP_HEAD: tuple(target_feature_columns),
-        EXPECTED_RETURN_HEAD: tuple(feature_columns),
-        MFE_HEAD: tuple(feature_columns),
-        MAE_HEAD: tuple(feature_columns),
+        EXPECTED_RETURN_HEAD: tuple(return_feature_columns),
+        MFE_HEAD: tuple(mfe_feature_columns),
+        MAE_HEAD: tuple(mae_feature_columns),
     }
     head_feature_manifests = {
         PRIMARY_HEAD: configuration_hash(
@@ -2136,20 +2317,26 @@ def _train_family(
             }
         ),
         TARGET_BEFORE_STOP_HEAD: target_screen.selected_feature_manifest_hash,
-        EXPECTED_RETURN_HEAD: configuration_hash(
-            {"head": EXPECTED_RETURN_HEAD, "features": list(feature_columns)}
-        ),
-        MFE_HEAD: configuration_hash({"head": MFE_HEAD, "features": list(feature_columns)}),
-        MAE_HEAD: configuration_hash({"head": MAE_HEAD, "features": list(feature_columns)}),
+        EXPECTED_RETURN_HEAD: return_screen.selected_feature_manifest_hash,
+        MFE_HEAD: mfe_screen.selected_feature_manifest_hash,
+        MAE_HEAD: mae_screen.selected_feature_manifest_hash,
     }
     feature_screen_metadata = {
         TARGET_BEFORE_STOP_HEAD: {
             **target_screen.metadata(),
             "direction": direction,
             "horizon": horizon,
-        }
+        },
+        EXPECTED_RETURN_HEAD: return_screen.metadata(),
+        MFE_HEAD: mfe_screen.metadata(),
+        MAE_HEAD: mae_screen.metadata(),
     }
-    feature_screen_records = {TARGET_BEFORE_STOP_HEAD: tuple(target_screen.audit_records())}
+    feature_screen_records = {
+        TARGET_BEFORE_STOP_HEAD: tuple(target_screen.audit_records()),
+        EXPECTED_RETURN_HEAD: tuple(return_screen.audit_records()),
+        MFE_HEAD: tuple(mfe_screen.audit_records()),
+        MAE_HEAD: tuple(mae_screen.audit_records()),
+    }
     portfolio_policy_hash = configuration_hash(asdict(portfolio_config))
     selection_policy_hash = configuration_hash(asdict(selection_policy))
     config_hash = configuration_hash(
@@ -2159,6 +2346,42 @@ def _train_family(
             "portfolio_policy": asdict(portfolio_config),
         }
     )
+    path_screen_metric_payload: dict[str, float | int | str | bool | None] = {}
+    for head_name, screen in path_screens.items():
+        metric_key = PATH_HEAD_TARGET_METRIC_KEYS[head_name]
+        permutation_by_family = path_permutation_by_head[head_name]
+        permutation_top = "; ".join(
+            f"{record['family']}={float(record['positive_sum_delta_mae']):.6f}"
+            for record in sorted(
+                permutation_by_family,
+                key=lambda item: float(item["positive_sum_delta_mae"]),
+                reverse=True,
+            )[:8]
+        )
+        path_screen_metric_payload.update(
+            {
+                f"{metric_key}_feature_screen_schema_version": screen.spec.schema_version,
+                f"{metric_key}_screening_target": screen.spec.target_name,
+                f"{metric_key}_screening_task_type": screen.spec.task_type,
+                f"{metric_key}_screening_manifest_hash": screen.selected_feature_manifest_hash,
+                f"{metric_key}_screening_configuration_hash": screen.spec.configuration_hash,
+                f"{metric_key}_selected_feature_count": len(screen.selected_features),
+                f"{metric_key}_selected_features_json": _json_dumps(list(screen.selected_features)),
+                f"{metric_key}_selected_feature_family_counts_json": _json_dumps(
+                    screen.selected_feature_families
+                ),
+                f"{metric_key}_selected_feature_scores_json": _json_dumps(screen.selected_scores),
+                f"{metric_key}_feature_screen_metadata_json": _json_dumps(screen.metadata()),
+                f"{metric_key}_feature_screen_audit_json": _json_dumps(screen.audit_records()),
+                f"{metric_key}_top_25_train_mi_features_json": _json_dumps(
+                    _screen_top_features(screen, limit=25)
+                ),
+                f"{metric_key}_permutation_importance_by_family_json": _json_dumps(
+                    permutation_by_family
+                ),
+                f"{metric_key}_permutation_importance_top": permutation_top,
+            }
+        )
     metrics: dict[str, float | int | str | bool | None] = {
         "training_samples": len(train),
         "calibration_samples": len(calibration),
@@ -2192,6 +2415,10 @@ def _train_family(
         "portfolio_max_drawdown": portfolio_max_drawdown,
         "holdout_mae_return_model": holdout_mae,
         "holdout_rmse_return_model": holdout_rmse,
+        "holdout_mae_mfe_model": holdout_mfe_mae,
+        "holdout_rmse_mfe_model": holdout_mfe_rmse,
+        "holdout_mae_mae_model": holdout_mae_mae,
+        "holdout_rmse_mae_model": holdout_mae_rmse,
         "holdout_expected_return_mean": float(expected_return.mean()),
         "holdout_rank_correlation_predicted_realized_return": float(
             pd.Series(expected_return).corr(holdout[returns], method="spearman")
@@ -2447,6 +2674,7 @@ def _train_family(
         **selection_metrics,
         **portfolio_metrics,
         **prediction_metrics,
+        **path_screen_metric_payload,
     }
     calibration_metrics: dict[str, float | int | str | bool | None] = {
         "calibration_brier": calibration_brier,
@@ -2487,7 +2715,18 @@ def _train_family(
         family=family,
         feature_columns=tuple(feature_columns),
         feature_family_by_column={
-            column: feature_family_by_column.get(column, "unknown") for column in feature_columns
+            column: feature_family_by_column.get(column, "unknown")
+            for column in tuple(
+                dict.fromkeys(
+                    [
+                        *feature_columns,
+                        *target_feature_columns,
+                        *return_feature_columns,
+                        *mfe_feature_columns,
+                        *mae_feature_columns,
+                    ]
+                )
+            )
         },
         classifier=classifier,
         calibrator=calibrator,
@@ -2636,10 +2875,7 @@ def discover_models(
                     horizon=bundle.horizon,
                     family=bundle.family,
                     feature_columns=bundle.feature_columns,
-                    feature_family_by_column={
-                        column: feature_family_by_column.get(column, "unknown")
-                        for column in bundle.feature_columns
-                    },
+                    feature_family_by_column=bundle.feature_family_by_column,
                     classifier=bundle.classifier,
                     calibrator=bundle.calibrator,
                     target_before_stop_model=bundle.target_before_stop_model,
@@ -2719,17 +2955,7 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     expected_return_features = bundle_head_feature_columns(bundle, EXPECTED_RETURN_HEAD)
     mfe_features = bundle_head_feature_columns(bundle, MFE_HEAD)
     mae_features = bundle_head_feature_columns(bundle, MAE_HEAD)
-    required_non_target = tuple(
-        dict.fromkeys(
-            [
-                *primary_features,
-                *expected_return_features,
-                *mfe_features,
-                *mae_features,
-            ]
-        )
-    )
-    missing = [column for column in required_non_target if column not in frame.columns]
+    missing = [column for column in primary_features if column not in frame.columns]
     if missing:
         raise ValueError(f"Feature frame is missing required model columns: {missing[:5]}")
     x = frame[list(primary_features)]
@@ -2741,6 +2967,25 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     output["model_id"] = bundle.model_id
     output["calibrated_probability"] = probability
     output["primary_feature_manifest_hash"] = bundle_head_feature_manifest(bundle, PRIMARY_HEAD)
+    for head_name, output_prefix in (
+        (EXPECTED_RETURN_HEAD, "expected_return"),
+        (MFE_HEAD, "mfe"),
+        (MAE_HEAD, "mae"),
+    ):
+        metadata = bundle_feature_screen_metadata(bundle, head_name)
+        schema = str(
+            metadata.get(
+                "screening_schema_version",
+                "legacy_shared_path_feature_screen",
+            )
+        )
+        output[f"{output_prefix}_feature_manifest_hash"] = bundle_head_feature_manifest(
+            bundle, head_name
+        )
+        output[f"{output_prefix}_feature_screen_schema"] = schema
+        output[f"{output_prefix}_feature_screen_metadata_missing"] = (
+            not bool(metadata) or schema != PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION
+        )
     output["target_before_stop_feature_manifest_hash"] = bundle_head_feature_manifest(
         bundle, TARGET_BEFORE_STOP_HEAD
     )
@@ -2789,9 +3034,18 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     def add_regression_prediction(
         output_column: str,
         metric_prefix: str,
-        values: np.ndarray,
+        values: np.ndarray | None,
+        missing_features: list[str],
     ) -> None:
-        numeric = np.asarray(values, dtype=float)
+        output[f"{output_column}_required_feature_missing"] = bool(missing_features)
+        output[f"{output_column}_missing_features"] = ";".join(missing_features[:10])
+        if metric_prefix in {"mfe", "mae"}:
+            output[f"{metric_prefix}_required_feature_missing"] = bool(missing_features)
+            output[f"{metric_prefix}_missing_features"] = ";".join(missing_features[:10])
+        if values is None:
+            numeric = np.full(len(frame), math.nan)
+        else:
+            numeric = np.asarray(values, dtype=float)
         output[output_column] = numeric
         output[f"{output_column}_raw"] = numeric
         output[f"{output_column}_transformed"] = numeric
@@ -2837,16 +3091,25 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     add_regression_prediction(
         "expected_return",
         "return",
-        bundle.return_model.predict(frame[list(expected_return_features)]),
+        None
+        if any(column not in frame.columns for column in expected_return_features)
+        else bundle.return_model.predict(frame[list(expected_return_features)]),
+        [column for column in expected_return_features if column not in frame.columns],
     )
     add_regression_prediction(
         "expected_mfe",
         "mfe",
-        bundle.mfe_model.predict(frame[list(mfe_features)]),
+        None
+        if any(column not in frame.columns for column in mfe_features)
+        else bundle.mfe_model.predict(frame[list(mfe_features)]),
+        [column for column in mfe_features if column not in frame.columns],
     )
     add_regression_prediction(
         "expected_mae",
         "mae",
-        bundle.mae_model.predict(frame[list(mae_features)]),
+        None
+        if any(column not in frame.columns for column in mae_features)
+        else bundle.mae_model.predict(frame[list(mae_features)]),
+        [column for column in mae_features if column not in frame.columns],
     )
     return output

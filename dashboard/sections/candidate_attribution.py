@@ -99,6 +99,34 @@ def render_page() -> None:
         width="stretch",
         hide_index=True,
     )
+    streamlit.subheader("Path-Metric Feature Screens")
+    path_fields = [
+        "expected_return_feature_screen_schema",
+        "expected_return_feature_manifest_hash",
+        "expected_return_selected_feature_count",
+        "expected_return_selected_feature_families",
+        "expected_return_required_feature_missing",
+        "expected_return_missing_features",
+        "mfe_feature_screen_schema",
+        "mfe_feature_manifest_hash",
+        "mfe_selected_feature_count",
+        "mfe_selected_feature_families",
+        "mfe_required_feature_missing",
+        "mfe_missing_features",
+        "mae_feature_screen_schema",
+        "mae_feature_manifest_hash",
+        "mae_selected_feature_count",
+        "mae_selected_feature_families",
+        "mae_required_feature_missing",
+        "mae_missing_features",
+    ]
+    streamlit.dataframe(
+        display_frame(
+            pd.DataFrame([{"Metric": field, "Value": row.get(field, "")} for field in path_fields])
+        ),
+        width="stretch",
+        hide_index=True,
+    )
     streamlit.subheader("Historical Analogs")
     try:
         analogs = pd.DataFrame(json.loads(str(row.get("historical_analogs", "[]"))))
