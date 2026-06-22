@@ -44,6 +44,8 @@ from swing_rsi.engine.registry import RegisteredModel, promote_model, register_m
 from swing_rsi.engine.selection import SelectionPolicy
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
+PATH_METRIC_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_v1"
+
 
 class ConstantClassifier:
     def __init__(self, probability: float = 0.75) -> None:
@@ -166,6 +168,12 @@ def _policy_metrics(
         "target_before_stop_calibration_manifest_hash": calibration_hash,
         "target_before_stop_calibrator_artifact_hash": "calibrator-artifact-a",
         "target_before_stop_calibration_selection_reason": "test_identity",
+        "expected_return_feature_screen_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
+        "expected_return_screening_manifest_hash": "return-manifest",
+        "mfe_feature_screen_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
+        "mfe_screening_manifest_hash": "mfe-manifest",
+        "mae_feature_screen_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
+        "mae_screening_manifest_hash": "mae-manifest",
         "holdout_status": DEVELOPMENT_HOLDOUT_STATUS,
     }
 
@@ -229,7 +237,25 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
                 "selected_feature_count": 2,
                 "selected_feature_families": {"test": 1, "liquidity": 1},
                 "selected_feature_manifest_hash": "target-manifest",
-            }
+            },
+            "expected_return": {
+                "screening_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
+                "selected_feature_count": 2,
+                "selected_feature_families": {"test": 1, "liquidity": 1},
+                "selected_feature_manifest_hash": "return-manifest",
+            },
+            "mfe": {
+                "screening_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
+                "selected_feature_count": 2,
+                "selected_feature_families": {"test": 1, "liquidity": 1},
+                "selected_feature_manifest_hash": "mfe-manifest",
+            },
+            "mae": {
+                "screening_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
+                "selected_feature_count": 2,
+                "selected_feature_families": {"test": 1, "liquidity": 1},
+                "selected_feature_manifest_hash": "mae-manifest",
+            },
         },
     )
 

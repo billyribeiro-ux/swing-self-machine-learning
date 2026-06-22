@@ -28,6 +28,10 @@ from swing_rsi.engine.gates import (
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol_labels
 from swing_rsi.engine.manifest import hash_file
 from swing_rsi.engine.models import (
+    EXPECTED_RETURN_HEAD,
+    MAE_HEAD,
+    MFE_HEAD,
+    PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     BaseRateClassifier,
     DiscoveryConfig,
@@ -90,6 +94,14 @@ class ConstantRegressor:
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         return np.full(len(frame), self.value)
+
+
+class FeatureEchoRegressor:
+    def __init__(self, feature: str) -> None:
+        self.feature = feature
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        return frame[self.feature].to_numpy(dtype=float)
 
 
 def _universe() -> UniverseConfig:
@@ -264,6 +276,14 @@ def _registered_model(model_id: str, *, state: str = "CHALLENGER") -> Registered
         metrics={
             "holdout_mean_return_lcb_90": 0.01,
             "holdout_status": FINAL_HOLDOUT_STATUS,
+            "expected_return_feature_screen_schema_version": (
+                PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION
+            ),
+            "expected_return_screening_manifest_hash": "return-manifest",
+            "mfe_feature_screen_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
+            "mfe_screening_manifest_hash": "mfe-manifest",
+            "mae_feature_screen_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
+            "mae_screening_manifest_hash": "mae-manifest",
         },
         calibration_metrics={"holdout_brier": 0.2},
         quality_gates={gate.gate_id: gate.status == "PASS" for gate in gates},
@@ -398,6 +418,9 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
         for position, date_value in enumerate(dates):
             tbs_target = int((position + symbol_offset) % 4 == 0)
             positive_target = int((position + symbol_offset) % 5 < 3)
+            return_target = float(np.sin((position + symbol_offset) / 6.0) * 0.03)
+            mfe_target = float(0.04 + np.cos((position + symbol_offset) / 5.0) * 0.02)
+            mae_target = float(-0.03 + np.sin((position + symbol_offset) / 7.0) * 0.015)
             row: dict[str, object] = {
                 "Date": date_value,
                 "symbol": symbol,
@@ -413,10 +436,13 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
                 "dollar_volume": 100_000_000.0,
                 "primary_signal": float(positive_target),
                 "late_market_relative_signal": float(tbs_target),
+                "late_return_signal": return_target,
+                "late_mfe_signal": mfe_target,
+                "late_mae_signal": mae_target,
                 "label_bull_positive_return_10": float(positive_target),
-                "label_bull_forward_return_10": 0.02 if positive_target else -0.01,
-                "label_bull_mfe_10": 0.04,
-                "label_bull_mae_10": -0.02,
+                "label_bull_forward_return_10": return_target,
+                "label_bull_mfe_10": mfe_target,
+                "label_bull_mae_10": mae_target,
                 "label_bull_target_before_stop_10": float(tbs_target),
                 "label_end_date_10": date_value + pd.offsets.BDay(10),
             }
@@ -426,6 +452,9 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
     frame = pd.DataFrame(rows)
     family_map = {column: "returns_momentum" for column in frame.columns}
     family_map["late_market_relative_signal"] = "market_relative"
+    family_map["late_return_signal"] = "returns_momentum"
+    family_map["late_mfe_signal"] = "volatility_range"
+    family_map["late_mae_signal"] = "inverse_leveraged"
     family_map["primary_signal"] = "returns_momentum"
 
     result = discover_models(
@@ -465,6 +494,22 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
     )
     assert "late_market_relative_signal" in str(
         learned.metrics["target_before_stop_feature_screen_audit_json"]
+    )
+    assert learned.metrics["expected_return_screening_target"] == ("label_bull_forward_return_10")
+    assert learned.metrics["mfe_screening_target"] == "label_bull_mfe_10"
+    assert learned.metrics["mae_screening_target"] == "label_bull_mae_10"
+    assert learned.metrics["expected_return_feature_screen_schema_version"] == (
+        PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION
+    )
+    assert bundle.head_feature_columns["expected_return"]
+    assert bundle.head_feature_columns["mfe"]
+    assert bundle.head_feature_columns["mae"]
+    assert "late_return_signal" in bundle.head_feature_columns["expected_return"]
+    assert "late_mfe_signal" in bundle.head_feature_columns["mfe"]
+    assert "late_mae_signal" in bundle.head_feature_columns["mae"]
+    assert (
+        learned.metrics["expected_return_screening_manifest_hash"]
+        == bundle.head_feature_manifests["expected_return"]
     )
 
 
@@ -634,9 +679,18 @@ def _bundle(
     return_high: float = 0.10,
     return_severity_limit: float = 0.10,
     target_feature_columns: tuple[str, ...] | None = None,
+    expected_return_feature_columns: tuple[str, ...] | None = None,
+    mfe_feature_columns: tuple[str, ...] | None = None,
+    mae_feature_columns: tuple[str, ...] | None = None,
     target_classifier: object | None = None,
     target_calibrator: object | None = None,
+    return_model: object | None = None,
+    mfe_model: object | None = None,
+    mae_model: object | None = None,
     target_manifest: str = "target-before-stop-manifest",
+    return_manifest: str = "return-manifest",
+    mfe_manifest: str = "mfe-manifest",
+    mae_manifest: str = "mae-manifest",
     include_tbs_calibration: bool = True,
     calibration_method: str = "identity",
     calibration_manifest_hash: str = "calibration-manifest-a",
@@ -644,10 +698,16 @@ def _bundle(
     include_feature_screen_metadata: bool = True,
 ) -> ModelBundle:
     target_feature_columns = target_feature_columns or ("f1", "dollar_volume")
+    expected_return_feature_columns = expected_return_feature_columns or ("f1", "dollar_volume")
+    mfe_feature_columns = mfe_feature_columns or ("f1", "dollar_volume")
+    mae_feature_columns = mae_feature_columns or ("f1", "dollar_volume")
     training = pd.DataFrame(
         {
             "f1": [0.0, 1.0, 2.0],
             "target_signal": [0.25, 0.75, 0.90],
+            "return_signal": [0.01, 0.02, 0.03],
+            "mfe_signal": [0.03, 0.04, 0.05],
+            "mae_signal": [-0.01, -0.02, -0.03],
             "dollar_volume": [10_000_000.0] * 3,
         }
     )
@@ -675,9 +735,9 @@ def _bundle(
         calibrator=IdentityCalibrator(),
         target_before_stop_model=target_classifier or ConstantClassifier(target_probability),
         target_before_stop_calibrator=target_calibrator or IdentityCalibrator(),
-        return_model=ConstantRegressor(expected_return),
-        mfe_model=ConstantRegressor(0.04),
-        mae_model=ConstantRegressor(-0.015),
+        return_model=return_model or ConstantRegressor(expected_return),
+        mfe_model=mfe_model or ConstantRegressor(0.04),
+        mae_model=mae_model or ConstantRegressor(-0.015),
         training_medians={"f1": 1.0, "dollar_volume": 10_000_000.0},
         training_means={"f1": 1.0, "dollar_volume": 10_000_000.0},
         training_stds={"f1": 1.0, "dollar_volume": 1.0},
@@ -722,16 +782,16 @@ def _bundle(
         head_feature_columns={
             "primary_positive_return": ("f1", "dollar_volume"),
             TARGET_BEFORE_STOP_HEAD: target_feature_columns,
-            "expected_return": ("f1", "dollar_volume"),
-            "mfe": ("f1", "dollar_volume"),
-            "mae": ("f1", "dollar_volume"),
+            "expected_return": expected_return_feature_columns,
+            "mfe": mfe_feature_columns,
+            "mae": mae_feature_columns,
         },
         head_feature_manifests={
             "primary_positive_return": "primary-manifest",
             TARGET_BEFORE_STOP_HEAD: target_manifest,
-            "expected_return": "return-manifest",
-            "mfe": "mfe-manifest",
-            "mae": "mae-manifest",
+            "expected_return": return_manifest,
+            "mfe": mfe_manifest,
+            "mae": mae_manifest,
         },
         feature_screen_metadata=(
             {
@@ -740,7 +800,25 @@ def _bundle(
                     "selected_feature_count": len(target_feature_columns),
                     "selected_feature_families": {"test": len(target_feature_columns)},
                     "selected_feature_manifest_hash": target_manifest,
-                }
+                },
+                EXPECTED_RETURN_HEAD: {
+                    "screening_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
+                    "selected_feature_count": len(expected_return_feature_columns),
+                    "selected_feature_families": {"test": len(expected_return_feature_columns)},
+                    "selected_feature_manifest_hash": return_manifest,
+                },
+                MFE_HEAD: {
+                    "screening_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
+                    "selected_feature_count": len(mfe_feature_columns),
+                    "selected_feature_families": {"test": len(mfe_feature_columns)},
+                    "selected_feature_manifest_hash": mfe_manifest,
+                },
+                MAE_HEAD: {
+                    "screening_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
+                    "selected_feature_count": len(mae_feature_columns),
+                    "selected_feature_families": {"test": len(mae_feature_columns)},
+                    "selected_feature_manifest_hash": mae_manifest,
+                },
             }
             if include_feature_screen_metadata
             else {}
@@ -755,6 +833,9 @@ def _scanner_feature_panel(symbols: tuple[str, ...] = ("AAPL",)) -> pd.DataFrame
             "symbol": list(symbols),
             "f1": [2.0] * len(symbols),
             "target_signal": [0.75] * len(symbols),
+            "return_signal": [0.021] * len(symbols),
+            "mfe_signal": [0.052] * len(symbols),
+            "mae_signal": [-0.018] * len(symbols),
             "dollar_volume": [20_000_000.0] * len(symbols),
             "sector": ["technology"] * len(symbols),
             "market_regime_label": ["mixed"] * len(symbols),
@@ -850,6 +931,70 @@ def test_predict_bundle_flags_missing_target_before_stop_features_without_substi
     assert pd.isna(prediction["target_before_stop_probability"])
 
 
+def test_path_metric_heads_receive_own_selected_columns() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "target_signal": [0.82],
+            "return_signal": [0.031],
+            "mfe_signal": [0.064],
+            "mae_signal": [-0.027],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        expected_return_feature_columns=("return_signal",),
+        mfe_feature_columns=("mfe_signal",),
+        mae_feature_columns=("mae_signal",),
+        return_model=FeatureEchoRegressor("return_signal"),
+        mfe_model=FeatureEchoRegressor("mfe_signal"),
+        mae_model=FeatureEchoRegressor("mae_signal"),
+    )
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["expected_return"] == pytest.approx(0.031)
+    assert prediction["expected_mfe"] == pytest.approx(0.064)
+    assert prediction["expected_mae"] == pytest.approx(-0.027)
+    assert prediction["expected_return_feature_manifest_hash"] == "return-manifest"
+    assert prediction["mfe_feature_manifest_hash"] == "mfe-manifest"
+    assert prediction["mae_feature_manifest_hash"] == "mae-manifest"
+
+
+def test_predict_bundle_flags_missing_path_metric_features_without_substitution() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "target_signal": [0.82],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        expected_return_feature_columns=("return_signal",),
+        mfe_feature_columns=("mfe_signal",),
+        mae_feature_columns=("mae_signal",),
+        return_model=FeatureEchoRegressor("return_signal"),
+        mfe_model=FeatureEchoRegressor("mfe_signal"),
+        mae_model=FeatureEchoRegressor("mae_signal"),
+    )
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert bool(prediction["expected_return_required_feature_missing"]) is True
+    assert bool(prediction["mfe_required_feature_missing"]) is True
+    assert bool(prediction["mae_required_feature_missing"]) is True
+    assert prediction["expected_return_missing_features"] == "return_signal"
+    assert prediction["mfe_missing_features"] == "mfe_signal"
+    assert prediction["mae_missing_features"] == "mae_signal"
+    assert pd.isna(prediction["expected_return"])
+    assert pd.isna(prediction["expected_mfe"])
+    assert pd.isna(prediction["expected_mae"])
+
+
 def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_path: Path) -> None:
     feature_panel = pd.DataFrame(
         {
@@ -921,6 +1066,49 @@ def test_scanner_rejects_missing_target_before_stop_features_explicitly(tmp_path
     assert row["candidate_status"] == "REJECTED"
     assert "target_before_stop_required_feature_missing" in row["exclusion_reason"]
     assert bool(row["target_before_stop_required_feature_missing"]) is True
+
+
+def test_scanner_rejects_missing_path_metric_features_explicitly(tmp_path: Path) -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [2.0],
+            "target_signal": [0.75],
+            "dollar_volume": [20_000_000.0],
+            "sector": ["technology"],
+            "market_regime_label": ["mixed"],
+        }
+    )
+
+    snapshot = run_scanner(
+        feature_panel,
+        bundles=(
+            _bundle(
+                expected_return_feature_columns=("return_signal",),
+                mfe_feature_columns=("mfe_signal",),
+                mae_feature_columns=("mae_signal",),
+                return_model=FeatureEchoRegressor("return_signal"),
+                mfe_model=FeatureEchoRegressor("mfe_signal"),
+                mae_model=FeatureEchoRegressor("mae_signal"),
+            ),
+        ),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "expected_return_required_feature_missing" in row["exclusion_reason"]
+    assert "mfe_required_feature_missing" in row["exclusion_reason"]
+    assert "mae_required_feature_missing" in row["exclusion_reason"]
+    assert bool(row["expected_return_required_feature_missing"]) is True
+    assert bool(row["mfe_required_feature_missing"]) is True
+    assert bool(row["mae_required_feature_missing"]) is True
 
 
 def test_scanner_rejects_missing_target_before_stop_calibration_metadata(tmp_path: Path) -> None:
@@ -1480,6 +1668,18 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    path_manifest = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                policy=SelectionPolicy(per_date_limit=2),
+                return_manifest="return-manifest-b",
+            ),
+        ),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -1493,9 +1693,10 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 ood_metadata.scan_id,
                 target_manifest.scan_id,
                 calibration_manifest.scan_id,
+                path_manifest.scan_id,
             }
         )
-        == 9
+        == 10
     )
 
 
@@ -1709,7 +1910,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 5
+    assert metadata["scanner_identity_schema_version"] == 6
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
@@ -1720,6 +1921,8 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     assert metadata["target_before_stop_feature_metadata_hash"]
     assert metadata["target_before_stop_calibration_metadata_json"]
     assert metadata["target_before_stop_calibration_metadata_hash"]
+    assert metadata["path_metric_feature_metadata_json"]
+    assert metadata["path_metric_feature_metadata_hash"]
     assert metadata["persisted_model_policy_hashes"] == {"model-a": "policy-hash"}
     identity = metadata["canonical_scan_execution_identity"]
     assert identity["prediction_ood_governance_schema_version"] == PREDICTION_OOD_GOVERNANCE_VERSION
@@ -1739,6 +1942,12 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     assert (
         identity["target_before_stop_calibration_metadata"]["model-a"]["calibration_manifest_hash"]
         == "calibration-manifest-a"
+    )
+    assert (
+        identity["path_metric_feature_metadata"]["model-a"]["expected_return"][
+            "selected_feature_manifest_hash"
+        ]
+        == "return-manifest"
     )
     assert identity["effective_selection_policies"]["model-a"]["expected_return_threshold"] == 0.001
     assert identity["raw_scanner_config"]["minimum_dollar_volume"] == 5_000_000.0
