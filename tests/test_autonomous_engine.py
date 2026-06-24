@@ -38,12 +38,17 @@ from swing_rsi.engine.models import (
     PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
     PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
     PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
+    PATH_TARGET_ATR_FEATURE,
+    PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+    PATH_TARGET_PREDICTION_MAPPING_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     BaseRateClassifier,
     DiscoveryConfig,
     ModelBundle,
     RetiredPathHeadModel,
+    _path_atr_training_target,
     _path_magnitude_prediction,
+    _path_target_prediction,
     build_path_magnitude_estimator,
     discover_models,
     load_model_bundle,
@@ -444,6 +449,7 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
                 "Close": 100.5 + position,
                 "Volume": 1_000_000.0,
                 "dollar_volume": 100_000_000.0,
+                PATH_TARGET_ATR_FEATURE: 1.0,
                 "primary_signal": float(positive_target),
                 "late_market_relative_signal": float(tbs_target),
                 "late_return_signal": return_target,
@@ -505,9 +511,25 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
     assert "late_market_relative_signal" in str(
         learned.metrics["target_before_stop_feature_screen_audit_json"]
     )
-    assert learned.metrics["expected_return_screening_target"] == ("label_bull_forward_return_10")
-    assert learned.metrics["mfe_screening_target"] == ("label_bull_mfe_10__favorable_magnitude")
-    assert learned.metrics["mae_screening_target"] == "label_bull_mae_10__adverse_magnitude"
+    assert learned.metrics["expected_return_screening_target"] == (
+        "label_bull_forward_return_10__atr_units_atr_pct_14"
+    )
+    assert learned.metrics["mfe_screening_target"] == (
+        "label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14"
+    )
+    assert (
+        learned.metrics["mae_screening_target"]
+        == "label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14"
+    )
+    assert learned.metrics["expected_return_target_normalization_schema_version"] == (
+        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    )
+    assert learned.metrics["mfe_target_normalization_schema_version"] == (
+        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    )
+    assert learned.metrics["mae_target_normalization_schema_version"] == (
+        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    )
     assert learned.metrics["mfe_external_target_name"] == "label_bull_mfe_10"
     assert learned.metrics["mae_external_target_name"] == "label_bull_mae_10"
     assert learned.metrics["mfe_domain_schema_version"] == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
@@ -620,7 +642,7 @@ def _ood_metrics(
     head_bounds = {
         "return": (return_low, return_high, return_severity_limit),
         "mfe": (0.0, 0.20, 0.10),
-        "mae": (-0.20, 0.0, 0.10),
+        "mae": (0.0, 0.20, 0.10),
     }
     for head, (low, high, severity_limit) in head_bounds.items():
         metrics.update(
@@ -651,22 +673,108 @@ def _ood_metrics(
     return metrics
 
 
+def _target_normalization_payload(
+    *,
+    head: str,
+    external_target: str,
+    internal_target: str,
+) -> dict[str, object]:
+    return {
+        "target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+        "head_name": head,
+        "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+        "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+        "atr_feature_timing": "signal_date_close_known",
+        "external_target_name": external_target,
+        "internal_target_name": internal_target,
+        "internal_target_unit": "atr_units",
+        "canonical_external_unit": "decimal_return",
+        "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+        "target_normalization_hash": configuration_hash(
+            {
+                "schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+                "head_name": head,
+                "external_target_name": external_target,
+                "internal_target_name": internal_target,
+                "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                "direction": "bull",
+                "horizon": 10,
+                "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            }
+        ),
+    }
+
+
+def _path_target_normalization_payloads() -> dict[str, dict[str, object]]:
+    return {
+        EXPECTED_RETURN_HEAD: _target_normalization_payload(
+            head=EXPECTED_RETURN_HEAD,
+            external_target="label_bull_forward_return_10",
+            internal_target="label_bull_forward_return_10__atr_units_atr_pct_14",
+        ),
+        MFE_HEAD: _target_normalization_payload(
+            head=MFE_HEAD,
+            external_target="label_bull_mfe_10",
+            internal_target="label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14",
+        ),
+        MAE_HEAD: _target_normalization_payload(
+            head=MAE_HEAD,
+            external_target="label_bull_mae_10",
+            internal_target="label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14",
+        ),
+    }
+
+
+def _path_target_normalization_metrics() -> dict[str, object]:
+    payloads = _path_target_normalization_payloads()
+    metrics: dict[str, object] = {}
+    for head, metric_prefix in (
+        (EXPECTED_RETURN_HEAD, "expected_return"),
+        (MFE_HEAD, "mfe"),
+        (MAE_HEAD, "mae"),
+    ):
+        metadata = payloads[head]
+        metrics.update(
+            {
+                f"{metric_prefix}_target_normalization_schema_version": metadata[
+                    "target_normalization_schema_version"
+                ],
+                f"{metric_prefix}_target_normalization_method": metadata[
+                    "target_normalization_method"
+                ],
+                f"{metric_prefix}_target_normalization_atr_feature_name": metadata[
+                    "atr_feature_name"
+                ],
+                f"{metric_prefix}_target_normalization_hash": metadata["target_normalization_hash"],
+                f"{metric_prefix}_internal_target_name": metadata["internal_target_name"],
+                f"{metric_prefix}_internal_target_unit": metadata["internal_target_unit"],
+                f"{metric_prefix}_canonical_external_unit": metadata["canonical_external_unit"],
+                f"{metric_prefix}_target_prediction_mapping_version": metadata[
+                    "prediction_mapping_version"
+                ],
+            }
+        )
+    return metrics
+
+
 def _path_domain_metrics() -> dict[str, object]:
     payload: dict[str, object] = {}
+    target_normalization_payloads = _path_target_normalization_payloads()
     for head, external_target, internal_target, definition in (
         (
             "mfe",
             "label_bull_mfe_10",
-            "label_bull_mfe_10__favorable_magnitude",
-            "favorable_magnitude_equals_existing_mfe",
+            "label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14",
+            "favorable_magnitude_equals_existing_mfe_divided_by_signal_close_atr_pct_14",
         ),
         (
             "mae",
             "label_bull_mae_10",
-            "label_bull_mae_10__adverse_magnitude",
-            "adverse_magnitude_equals_negative_existing_mae",
+            "label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14",
+            "adverse_magnitude_equals_negative_existing_mae_divided_by_signal_close_atr_pct_14",
         ),
     ):
+        normalization = target_normalization_payloads[head]
         payload.update(
             {
                 f"{head}_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
@@ -680,6 +788,14 @@ def _path_domain_metrics() -> dict[str, object]:
                 f"{head}_magnitude_estimator_loss": "test_constant_magnitude",
                 f"{head}_magnitude_estimator_hash": f"{head}-estimator-hash",
                 f"{head}_prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                f"{head}_target_normalization_schema_version": (
+                    normalization["target_normalization_schema_version"]
+                ),
+                f"{head}_target_normalization_method": normalization["target_normalization_method"],
+                f"{head}_target_normalization_atr_feature_name": normalization["atr_feature_name"],
+                f"{head}_target_normalization_hash": normalization["target_normalization_hash"],
+                f"{head}_internal_target_unit": normalization["internal_target_unit"],
+                f"{head}_canonical_external_unit": normalization["canonical_external_unit"],
                 f"{head}_calibration_domain_integrity_valid": True,
                 f"{head}_holdout_domain_integrity_valid": True,
             }
@@ -716,6 +832,7 @@ def _policy_metrics(
         "generation": generation,
         "artifact_hash": artifact_hash,
         **_path_domain_metrics(),
+        **_path_target_normalization_metrics(),
     }
     if include_tbs_calibration:
         metrics.update(
@@ -783,6 +900,7 @@ def _bundle(
     expected_return_feature_columns = expected_return_feature_columns or ("f1", "dollar_volume")
     mfe_feature_columns = mfe_feature_columns or ("f1", "dollar_volume")
     mae_feature_columns = mae_feature_columns or ("f1", "dollar_volume")
+    target_normalization_payloads = _path_target_normalization_payloads()
     training = pd.DataFrame(
         {
             "f1": [0.0, 1.0, 2.0],
@@ -790,6 +908,7 @@ def _bundle(
             "return_signal": [0.01, 0.02, 0.03],
             "mfe_signal": [0.03, 0.04, 0.05],
             "mae_signal": [0.01, 0.02, 0.03],
+            PATH_TARGET_ATR_FEATURE: [1.0, 1.0, 1.0],
             "dollar_volume": [10_000_000.0] * 3,
         }
     )
@@ -801,6 +920,7 @@ def _bundle(
             "label_bull_mfe_10": [0.03, 0.04, 0.01],
             "label_bull_mae_10": [-0.01, -0.02, -0.03],
             "label_bull_target_before_stop_10": [1.0, 1.0, 0.0],
+            PATH_TARGET_ATR_FEATURE: [1.0, 1.0, 1.0],
         }
     )
     return ModelBundle(
@@ -812,6 +932,7 @@ def _bundle(
         feature_family_by_column={
             "f1": "stock-specific price structure",
             "dollar_volume": "volume participation",
+            PATH_TARGET_ATR_FEATURE: "volatility_range",
         },
         classifier=ConstantClassifier(probability),
         calibrator=IdentityCalibrator(),
@@ -820,9 +941,9 @@ def _bundle(
         return_model=return_model or ConstantRegressor(expected_return),
         mfe_model=mfe_model or ConstantRegressor(0.04),
         mae_model=mae_model or ConstantRegressor(0.015),
-        training_medians={"f1": 1.0, "dollar_volume": 10_000_000.0},
-        training_means={"f1": 1.0, "dollar_volume": 10_000_000.0},
-        training_stds={"f1": 1.0, "dollar_volume": 1.0},
+        training_medians={"f1": 1.0, "dollar_volume": 10_000_000.0, PATH_TARGET_ATR_FEATURE: 1.0},
+        training_means={"f1": 1.0, "dollar_volume": 10_000_000.0, PATH_TARGET_ATR_FEATURE: 1.0},
+        training_stds={"f1": 1.0, "dollar_volume": 1.0, PATH_TARGET_ATR_FEATURE: 1.0},
         training_matrix=training,
         training_labels=labels,
         metrics=(
@@ -859,6 +980,7 @@ def _bundle(
                     else {}
                 ),
                 **_path_domain_metrics(),
+                **_path_target_normalization_metrics(),
             }
         ),
         calibration_metrics={},
@@ -889,18 +1011,21 @@ def _bundle(
                     "selected_feature_count": len(expected_return_feature_columns),
                     "selected_feature_families": {"test": len(expected_return_feature_columns)},
                     "selected_feature_manifest_hash": return_manifest,
+                    **target_normalization_payloads[EXPECTED_RETURN_HEAD],
                 },
                 MFE_HEAD: {
                     "screening_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
                     "selected_feature_count": len(mfe_feature_columns),
                     "selected_feature_families": {"test": len(mfe_feature_columns)},
                     "selected_feature_manifest_hash": mfe_manifest,
+                    **target_normalization_payloads[MFE_HEAD],
                 },
                 MAE_HEAD: {
                     "screening_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
                     "selected_feature_count": len(mae_feature_columns),
                     "selected_feature_families": {"test": len(mae_feature_columns)},
                     "selected_feature_manifest_hash": mae_manifest,
+                    **target_normalization_payloads[MAE_HEAD],
                 },
             }
             if include_feature_screen_metadata
@@ -915,13 +1040,28 @@ def _bundle(
                     "path_head_retirement_reason": "",
                     "head_name": MFE_HEAD,
                     "external_target_name": "label_bull_mfe_10",
-                    "internal_magnitude_target_name": ("label_bull_mfe_10__favorable_magnitude"),
-                    "internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+                    "internal_magnitude_target_name": (
+                        "label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14"
+                    ),
+                    "internal_target_definition": (
+                        "favorable_magnitude_equals_existing_mfe_divided_by_signal_close_atr_pct_14"
+                    ),
                     "estimator_class": type(mfe_model or ConstantRegressor(0.04)).__name__,
                     "estimator_loss": "test_constant_magnitude",
                     "estimator_hash": "mfe-estimator-hash",
                     "selected_feature_manifest_hash": mfe_manifest,
                     "prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                    "target_normalization": target_normalization_payloads[MFE_HEAD],
+                    "target_normalization_schema_version": (
+                        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+                    ),
+                    "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+                    "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                    "target_normalization_hash": target_normalization_payloads[MFE_HEAD][
+                        "target_normalization_hash"
+                    ],
+                    "internal_target_unit": "atr_units",
+                    "canonical_external_unit": "decimal_return",
                 },
                 MAE_HEAD: {
                     "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
@@ -930,15 +1070,29 @@ def _bundle(
                     "path_head_retirement_reason": "",
                     "head_name": MAE_HEAD,
                     "external_target_name": "label_bull_mae_10",
-                    "internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
+                    "internal_magnitude_target_name": (
+                        "label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14"
+                    ),
                     "internal_target_definition": (
-                        "adverse_magnitude_equals_negative_existing_mae"
+                        "adverse_magnitude_equals_negative_existing_mae_divided_by_"
+                        "signal_close_atr_pct_14"
                     ),
                     "estimator_class": type(mae_model or ConstantRegressor(0.015)).__name__,
                     "estimator_loss": "test_constant_magnitude",
                     "estimator_hash": "mae-estimator-hash",
                     "selected_feature_manifest_hash": mae_manifest,
                     "prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                    "target_normalization": target_normalization_payloads[MAE_HEAD],
+                    "target_normalization_schema_version": (
+                        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+                    ),
+                    "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+                    "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                    "target_normalization_hash": target_normalization_payloads[MAE_HEAD][
+                        "target_normalization_hash"
+                    ],
+                    "internal_target_unit": "atr_units",
+                    "canonical_external_unit": "decimal_return",
                 },
             }
             if include_path_domain_metadata
@@ -957,6 +1111,7 @@ def _scanner_feature_panel(symbols: tuple[str, ...] = ("AAPL",)) -> pd.DataFrame
             "return_signal": [0.021] * len(symbols),
             "mfe_signal": [0.052] * len(symbols),
             "mae_signal": [0.018] * len(symbols),
+            PATH_TARGET_ATR_FEATURE: [1.0] * len(symbols),
             "dollar_volume": [20_000_000.0] * len(symbols),
             "sector": ["technology"] * len(symbols),
             "market_regime_label": ["mixed"] * len(symbols),
@@ -970,6 +1125,7 @@ def test_predict_bundle_outputs_separate_target_before_stop_probability() -> Non
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1062,6 +1218,7 @@ def test_path_metric_heads_receive_own_selected_columns() -> None:
             "return_signal": [0.031],
             "mfe_signal": [0.064],
             "mae_signal": [0.027],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1085,12 +1242,117 @@ def test_path_metric_heads_receive_own_selected_columns() -> None:
     assert prediction["mae_feature_manifest_hash"] == "mae-manifest"
 
 
+def test_path_targets_train_in_atr_units_without_changing_labels() -> None:
+    labels = pd.Series([0.02, -0.01, 0.04], name="label_bull_forward_return_10")
+    mfe_labels = pd.Series([0.03, 0.00, 0.06], name="label_bull_mfe_10")
+    mae_labels = pd.Series([-0.02, 0.00, -0.05], name="label_bull_mae_10")
+    atr = pd.Series([0.01, 0.02, 0.04], name=PATH_TARGET_ATR_FEATURE)
+
+    return_target = _path_atr_training_target(
+        labels,
+        atr,
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=str(labels.name),
+    )
+    mfe_target = _path_atr_training_target(
+        mfe_labels,
+        atr,
+        head_name=MFE_HEAD,
+        external_target_name=str(mfe_labels.name),
+    )
+    mae_target = _path_atr_training_target(
+        mae_labels,
+        atr,
+        head_name=MAE_HEAD,
+        external_target_name=str(mae_labels.name),
+    )
+
+    assert labels.tolist() == [0.02, -0.01, 0.04]
+    assert mfe_labels.tolist() == [0.03, 0.0, 0.06]
+    assert mae_labels.tolist() == [-0.02, 0.0, -0.05]
+    assert return_target.tolist() == pytest.approx([2.0, -0.5, 1.0])
+    assert mfe_target.tolist() == pytest.approx([3.0, 0.0, 1.5])
+    assert mae_target.tolist() == pytest.approx([2.0, -0.0, 1.25])
+    assert return_target.name == "label_bull_forward_return_10__atr_units_atr_pct_14"
+
+
+def test_predict_bundle_maps_atr_unit_path_predictions_to_canonical_returns() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [0.04],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        expected_return=1.5,
+        mfe_model=ConstantRegressor(2.0),
+        mae_model=ConstantRegressor(1.25),
+    )
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["expected_return_internal_atr_units"] == pytest.approx(1.5)
+    assert prediction["expected_return"] == pytest.approx(0.06)
+    assert prediction["expected_mfe_internal_magnitude_atr_units"] == pytest.approx(2.0)
+    assert prediction["expected_mfe"] == pytest.approx(0.08)
+    assert prediction["expected_mae_internal_magnitude_atr_units"] == pytest.approx(1.25)
+    assert prediction["expected_mae"] == pytest.approx(-0.05)
+    assert bool(prediction["expected_mfe_signed_prediction_invalid"]) is False
+    assert bool(prediction["expected_mae_signed_prediction_invalid"]) is False
+
+
+def test_prediction_ood_uses_atr_unit_model_space_not_canonical_output() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [4.0],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(expected_return=0.5, return_high=1.0)
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["expected_return"] == pytest.approx(2.0)
+    assert prediction["expected_return_internal_atr_units"] == pytest.approx(0.5)
+    assert bool(prediction["expected_return_out_of_distribution"]) is False
+
+
+def test_predict_bundle_rejects_missing_atr_for_normalized_path_heads() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+
+    prediction = predict_bundle(_bundle(), frame).iloc[0]
+
+    assert bool(prediction["expected_return_required_feature_missing"]) is True
+    assert bool(prediction["mfe_required_feature_missing"]) is True
+    assert bool(prediction["mae_required_feature_missing"]) is True
+    assert PATH_TARGET_ATR_FEATURE in str(prediction["expected_return_missing_features"])
+    assert PATH_TARGET_ATR_FEATURE in str(prediction["mfe_missing_features"])
+    assert PATH_TARGET_ATR_FEATURE in str(prediction["mae_missing_features"])
+    assert pd.isna(prediction["expected_return"])
+    assert pd.isna(prediction["expected_mfe"])
+    assert pd.isna(prediction["expected_mae"])
+
+
 def test_predict_bundle_marks_retired_logistic_path_heads_without_predicting() -> None:
     frame = pd.DataFrame(
         {
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1167,6 +1429,7 @@ def test_predict_bundle_rejects_invalid_magnitude_without_clipping() -> None:
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1186,9 +1449,12 @@ def test_predict_bundle_rejects_invalid_magnitude_without_clipping() -> None:
 
 def test_path_magnitude_prediction_mapping_uses_no_clipping() -> None:
     source = inspect.getsource(_path_magnitude_prediction)
+    target_source = inspect.getsource(_path_target_prediction)
 
     assert ".clip" not in source
     assert "np.clip" not in source
+    assert ".clip" not in target_source
+    assert "np.clip" not in target_source
 
 
 def test_predict_bundle_marks_missing_path_domain_metadata_for_legacy_artifacts() -> None:
@@ -1197,6 +1463,7 @@ def test_predict_bundle_marks_missing_path_domain_metadata_for_legacy_artifacts(
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1217,6 +1484,7 @@ def test_predict_bundle_flags_missing_path_metric_features_without_substitution(
             "symbol": ["AAPL"],
             "f1": [0.05],
             "target_signal": [0.82],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1248,6 +1516,7 @@ def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_pa
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1287,6 +1556,7 @@ def test_scanner_rejects_missing_target_before_stop_features_explicitly(tmp_path
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1322,6 +1592,7 @@ def test_scanner_rejects_missing_path_metric_features_explicitly(tmp_path: Path)
             "symbol": ["AAPL"],
             "f1": [2.0],
             "target_signal": [0.75],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1508,6 +1779,7 @@ def test_scanner_rejects_promoted_model_without_gate_eligibility(tmp_path: Path)
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1537,6 +1809,7 @@ def test_scanner_eligibility_uses_persisted_temporal_fold_gates(tmp_path: Path) 
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1605,6 +1878,7 @@ def test_scanner_applies_persisted_expected_return_threshold(tmp_path: Path) -> 
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1633,6 +1907,7 @@ def test_scanner_applies_persisted_target_before_stop_threshold(tmp_path: Path) 
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1662,6 +1937,7 @@ def test_scanner_threshold_equality_passes_and_runtime_can_only_tighten(
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [5_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1699,6 +1975,7 @@ def test_scanner_rejects_missing_persisted_selection_policy(tmp_path: Path) -> N
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1780,6 +2057,7 @@ def test_scanner_caps_are_order_independent_for_equal_utility_rows(tmp_path: Pat
             "Date": pd.to_datetime(["2024-01-02"] * 3),
             "symbol": ["C", "A", "B"],
             "f1": [2.0, 2.0, 2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0, 1.0, 1.0],
             "dollar_volume": [20_000_000.0] * 3,
             "sector": ["technology"] * 3,
             "market_regime_label": ["mixed"] * 3,
@@ -2027,6 +2305,20 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    normalization_bundle = _bundle(policy=SelectionPolicy(per_date_limit=2))
+    screen_metadata = {
+        key: dict(value) for key, value in normalization_bundle.feature_screen_metadata.items()
+    }
+    screen_metadata[EXPECTED_RETURN_HEAD]["target_normalization_hash"] = (
+        "changed-return-target-normalization-hash"
+    )
+    target_normalization = run_scanner(
+        **base_kwargs,
+        bundles=(replace(normalization_bundle, feature_screen_metadata=screen_metadata),),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -2042,9 +2334,10 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 calibration_manifest.scan_id,
                 path_manifest.scan_id,
                 path_domain.scan_id,
+                target_normalization.scan_id,
             }
         )
-        == 11
+        == 12
     )
 
 
@@ -2288,7 +2581,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 8
+    assert metadata["scanner_identity_schema_version"] == 9
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
@@ -2330,8 +2623,24 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
         == "return-manifest"
     )
     assert (
+        identity["path_metric_feature_metadata"]["model-a"]["expected_return"][
+            "target_normalization_schema_version"
+        ]
+        == PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    )
+    assert (
+        identity["path_metric_feature_metadata"]["model-a"]["expected_return"][
+            "target_normalization_atr_feature_name"
+        ]
+        == PATH_TARGET_ATR_FEATURE
+    )
+    assert (
         identity["path_metric_domain_metadata"]["model-a"]["mae"]["prediction_mapping_version"]
         == PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"]["target_normalization_hash"]
+        == _path_target_normalization_payloads()[MAE_HEAD]["target_normalization_hash"]
     )
     assert (
         identity["path_metric_domain_metadata"]["model-a"]["mfe"]["path_head_capability_state"]

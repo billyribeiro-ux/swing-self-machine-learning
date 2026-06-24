@@ -47,6 +47,9 @@ from swing_rsi.engine.storage import dumps, engine_connection, loads
 PATH_METRIC_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_v1"
 PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
 PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION = "path_metric_magnitude_sign_mapping_v1"
+PATH_TARGET_NORMALIZATION_SCHEMA_VERSION = "atr_normalized_path_targets_v1"
+PATH_TARGET_ATR_FEATURE = "atr_pct_14"
+PATH_TARGET_PREDICTION_MAPPING_VERSION = "atr_units_to_decimal_return_v1"
 PATH_HEAD_CAPABILITY_ACTIVE = "ACTIVE"
 PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR = "RETIRED_UNSUITABLE_ESTIMATOR"
 LINEAR_PATH_HEAD_RETIREMENT_REASON = "linear_family_path_head_retired_unsuitable_estimator"
@@ -126,7 +129,7 @@ def _ood_metrics() -> dict[str, object]:
     for head, low, high in (
         ("return", -0.10, 0.10),
         ("mfe", 0.0, 0.20),
-        ("mae", -0.20, 0.0),
+        ("mae", 0.0, 0.20),
     ):
         metrics.update(
             {
@@ -156,6 +159,90 @@ def _ood_metrics() -> dict[str, object]:
     return metrics
 
 
+def _target_normalization_payload(
+    *,
+    head: str,
+    external_target: str,
+    internal_target: str,
+) -> dict[str, object]:
+    return {
+        "target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+        "head_name": head,
+        "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+        "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+        "atr_feature_timing": "signal_date_close_known",
+        "external_target_name": external_target,
+        "internal_target_name": internal_target,
+        "internal_target_unit": "atr_units",
+        "canonical_external_unit": "decimal_return",
+        "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+        "target_normalization_hash": configuration_hash(
+            {
+                "schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+                "head_name": head,
+                "external_target_name": external_target,
+                "internal_target_name": internal_target,
+                "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                "direction": "bull",
+                "horizon": 10,
+                "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            }
+        ),
+    }
+
+
+def _path_target_normalization_payloads() -> dict[str, dict[str, object]]:
+    return {
+        "expected_return": _target_normalization_payload(
+            head="expected_return",
+            external_target="label_bull_forward_return_10",
+            internal_target="label_bull_forward_return_10__atr_units_atr_pct_14",
+        ),
+        "mfe": _target_normalization_payload(
+            head="mfe",
+            external_target="label_bull_mfe_10",
+            internal_target="label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14",
+        ),
+        "mae": _target_normalization_payload(
+            head="mae",
+            external_target="label_bull_mae_10",
+            internal_target="label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14",
+        ),
+    }
+
+
+def _path_target_normalization_metrics() -> dict[str, object]:
+    payloads = _path_target_normalization_payloads()
+    metrics: dict[str, object] = {}
+    for head, metric_prefix in (
+        ("expected_return", "expected_return"),
+        ("mfe", "mfe"),
+        ("mae", "mae"),
+    ):
+        metadata = payloads[head]
+        metrics.update(
+            {
+                f"{metric_prefix}_target_normalization_schema_version": metadata[
+                    "target_normalization_schema_version"
+                ],
+                f"{metric_prefix}_target_normalization_method": metadata[
+                    "target_normalization_method"
+                ],
+                f"{metric_prefix}_target_normalization_atr_feature_name": metadata[
+                    "atr_feature_name"
+                ],
+                f"{metric_prefix}_target_normalization_hash": metadata["target_normalization_hash"],
+                f"{metric_prefix}_internal_target_name": metadata["internal_target_name"],
+                f"{metric_prefix}_internal_target_unit": metadata["internal_target_unit"],
+                f"{metric_prefix}_canonical_external_unit": metadata["canonical_external_unit"],
+                f"{metric_prefix}_target_prediction_mapping_version": metadata[
+                    "prediction_mapping_version"
+                ],
+            }
+        )
+    return metrics
+
+
 def _policy_metrics(
     *,
     policy_hash: str = "policy-hash-a",
@@ -164,6 +251,7 @@ def _policy_metrics(
     policy = SelectionPolicy()
     return {
         **_ood_metrics(),
+        **_path_target_normalization_metrics(),
         "selection_policy_json": json.dumps(asdict(policy), sort_keys=True),
         "selection_policy_configuration_hash": policy_hash,
         "target_before_stop_calibration_governance_schema": (
@@ -184,12 +272,24 @@ def _policy_metrics(
         "mfe_path_head_retirement_schema_version": "",
         "mfe_path_head_retirement_reason": "",
         "mfe_external_target_name": "label_bull_mfe_10",
-        "mfe_internal_magnitude_target_name": "label_bull_mfe_10__favorable_magnitude",
-        "mfe_internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+        "mfe_internal_magnitude_target_name": (
+            "label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14"
+        ),
+        "mfe_internal_target_definition": (
+            "favorable_magnitude_equals_existing_mfe_divided_by_signal_close_atr_pct_14"
+        ),
         "mfe_magnitude_estimator_class": "ConstantRegressor",
         "mfe_magnitude_estimator_loss": "test_constant_magnitude",
         "mfe_magnitude_estimator_hash": "mfe-estimator-hash",
         "mfe_prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+        "mfe_target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+        "mfe_target_normalization_method": "divide_by_signal_close_atr_pct_14",
+        "mfe_target_normalization_atr_feature_name": PATH_TARGET_ATR_FEATURE,
+        "mfe_target_normalization_hash": _path_target_normalization_payloads()["mfe"][
+            "target_normalization_hash"
+        ],
+        "mfe_internal_target_unit": "atr_units",
+        "mfe_canonical_external_unit": "decimal_return",
         "mfe_calibration_domain_integrity_valid": True,
         "mfe_holdout_domain_integrity_valid": True,
         "mae_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
@@ -197,12 +297,24 @@ def _policy_metrics(
         "mae_path_head_retirement_schema_version": "",
         "mae_path_head_retirement_reason": "",
         "mae_external_target_name": "label_bull_mae_10",
-        "mae_internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
-        "mae_internal_target_definition": "adverse_magnitude_equals_negative_existing_mae",
+        "mae_internal_magnitude_target_name": (
+            "label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14"
+        ),
+        "mae_internal_target_definition": (
+            "adverse_magnitude_equals_negative_existing_mae_divided_by_signal_close_atr_pct_14"
+        ),
         "mae_magnitude_estimator_class": "ConstantRegressor",
         "mae_magnitude_estimator_loss": "test_constant_magnitude",
         "mae_magnitude_estimator_hash": "mae-estimator-hash",
         "mae_prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+        "mae_target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+        "mae_target_normalization_method": "divide_by_signal_close_atr_pct_14",
+        "mae_target_normalization_atr_feature_name": PATH_TARGET_ATR_FEATURE,
+        "mae_target_normalization_hash": _path_target_normalization_payloads()["mae"][
+            "target_normalization_hash"
+        ],
+        "mae_internal_target_unit": "atr_units",
+        "mae_canonical_external_unit": "decimal_return",
         "mae_calibration_domain_integrity_valid": True,
         "mae_holdout_domain_integrity_valid": True,
         "holdout_status": DEVELOPMENT_HOLDOUT_STATUS,
@@ -213,6 +325,7 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
     training = pd.DataFrame(
         {
             "f1": [0.0, 1.0, 2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0, 1.0, 1.0],
             "dollar_volume": [20_000_000.0, 20_000_000.0, 20_000_000.0],
         }
     )
@@ -224,15 +337,21 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
             "label_bull_mfe_10": [0.03, 0.04, 0.01],
             "label_bull_mae_10": [-0.01, -0.02, -0.03],
             "label_bull_target_before_stop_10": [1.0, 1.0, 0.0],
+            PATH_TARGET_ATR_FEATURE: [1.0, 1.0, 1.0],
         }
     )
+    target_normalization_payloads = _path_target_normalization_payloads()
     return ModelBundle(
         model_id=model_id,
         direction="bull",
         horizon=10,
         family="test_family",
         feature_columns=("f1", "dollar_volume"),
-        feature_family_by_column={"f1": "test", "dollar_volume": "liquidity"},
+        feature_family_by_column={
+            "f1": "test",
+            PATH_TARGET_ATR_FEATURE: "volatility_range",
+            "dollar_volume": "liquidity",
+        },
         classifier=ConstantClassifier(0.75),
         calibrator=IdentityCalibrator(),
         target_before_stop_model=ConstantClassifier(0.75),
@@ -240,9 +359,17 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
         return_model=ConstantRegressor(0.02),
         mfe_model=ConstantRegressor(0.04),
         mae_model=ConstantRegressor(0.015),
-        training_medians={"f1": 1.0, "dollar_volume": 20_000_000.0},
-        training_means={"f1": 1.0, "dollar_volume": 20_000_000.0},
-        training_stds={"f1": 1.0, "dollar_volume": 1.0},
+        training_medians={
+            "f1": 1.0,
+            PATH_TARGET_ATR_FEATURE: 1.0,
+            "dollar_volume": 20_000_000.0,
+        },
+        training_means={
+            "f1": 1.0,
+            PATH_TARGET_ATR_FEATURE: 1.0,
+            "dollar_volume": 20_000_000.0,
+        },
+        training_stds={"f1": 1.0, PATH_TARGET_ATR_FEATURE: 1.0, "dollar_volume": 1.0},
         training_matrix=training,
         training_labels=labels,
         metrics=metrics,
@@ -274,18 +401,21 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
                 "selected_feature_count": 2,
                 "selected_feature_families": {"test": 1, "liquidity": 1},
                 "selected_feature_manifest_hash": "return-manifest",
+                **target_normalization_payloads["expected_return"],
             },
             "mfe": {
                 "screening_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
                 "selected_feature_count": 2,
                 "selected_feature_families": {"test": 1, "liquidity": 1},
                 "selected_feature_manifest_hash": "mfe-manifest",
+                **target_normalization_payloads["mfe"],
             },
             "mae": {
                 "screening_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
                 "selected_feature_count": 2,
                 "selected_feature_families": {"test": 1, "liquidity": 1},
                 "selected_feature_manifest_hash": "mae-manifest",
+                **target_normalization_payloads["mae"],
             },
         },
         path_domain_metadata={
@@ -296,13 +426,26 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
                 "path_head_retirement_reason": "",
                 "head_name": "mfe",
                 "external_target_name": "label_bull_mfe_10",
-                "internal_magnitude_target_name": "label_bull_mfe_10__favorable_magnitude",
-                "internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+                "internal_magnitude_target_name": (
+                    "label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14"
+                ),
+                "internal_target_definition": (
+                    "favorable_magnitude_equals_existing_mfe_divided_by_signal_close_atr_pct_14"
+                ),
                 "estimator_class": "ConstantRegressor",
                 "estimator_loss": "test_constant_magnitude",
                 "estimator_hash": "mfe-estimator-hash",
                 "selected_feature_manifest_hash": "mfe-manifest",
                 "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+                "target_normalization": target_normalization_payloads["mfe"],
+                "target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+                "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+                "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                "target_normalization_hash": target_normalization_payloads["mfe"][
+                    "target_normalization_hash"
+                ],
+                "internal_target_unit": "atr_units",
+                "canonical_external_unit": "decimal_return",
             },
             "mae": {
                 "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
@@ -311,13 +454,27 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
                 "path_head_retirement_reason": "",
                 "head_name": "mae",
                 "external_target_name": "label_bull_mae_10",
-                "internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
-                "internal_target_definition": "adverse_magnitude_equals_negative_existing_mae",
+                "internal_magnitude_target_name": (
+                    "label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14"
+                ),
+                "internal_target_definition": (
+                    "adverse_magnitude_equals_negative_existing_mae_divided_by_"
+                    "signal_close_atr_pct_14"
+                ),
                 "estimator_class": "ConstantRegressor",
                 "estimator_loss": "test_constant_magnitude",
                 "estimator_hash": "mae-estimator-hash",
                 "selected_feature_manifest_hash": "mae-manifest",
                 "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+                "target_normalization": target_normalization_payloads["mae"],
+                "target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+                "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+                "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                "target_normalization_hash": target_normalization_payloads["mae"][
+                    "target_normalization_hash"
+                ],
+                "internal_target_unit": "atr_units",
+                "canonical_external_unit": "decimal_return",
             },
         },
     )
@@ -375,6 +532,7 @@ def _feature_panel(dates: list[str], *, available_at: str | None = None) -> pd.D
             "Date": pd.Timestamp(date),
             "symbol": "AAPL",
             "f1": 2.0,
+            PATH_TARGET_ATR_FEATURE: 1.0,
             "dollar_volume": 20_000_000.0,
             "sector": "technology",
             "market_regime_label": "mixed",

@@ -211,3 +211,9 @@ Reason: MFE is physically nonnegative and MAE is physically nonpositive. The pre
 Decision: Logistic-family model artifacts keep the primary positive-return classifier, target-before-stop classifier, and expected-return regressor active, but mark MFE and MAE path heads `RETIRED_UNSUITABLE_ESTIMATOR` under `linear_family_path_head_retirement_v1`. They fit no Tweedie MFE/MAE estimator and fail mandatory required-path-head-active promotion gates. ExtraTrees and HistGradientBoosting path heads remain active under the existing magnitude-domain contract.
 
 Reason: The baseline domain-preserving generation still showed the linear path heads as unsuitable for required MFE/MAE magnitude modeling. Retiring the unsuitable heads is safer than preserving a formally domain-valid but unsuitable estimator, and it keeps scanner actionability, promotion, and prospective final-holdout enrollment aligned with required path-head availability.
+
+## 2026-06-24 — Path heads train in ATR-normalized target units
+
+Decision: Preserve historical expected-return, MFE, and MAE labels unchanged, but train active path heads on internal targets divided by close-known signal-date `atr_pct_14` under `atr_normalized_path_targets_v1`. Expected return uses signed ATR units, MFE uses favorable magnitude ATR units, and MAE uses adverse magnitude ATR units. Predictions are mapped back to canonical decimal returns before scanner output, selection policy, attribution, portfolio replay, and paper-forward testing. Logistic-family MFE/MAE heads remain retired.
+
+Reason: The nonlinear diagnosis found raw-percentage path targets were heterogeneous across ordinary stocks, ETFs, leveraged ETFs, inverse ETFs, regimes, and years. ATR normalization addresses the target-unit heterogeneity directly while preserving label history, target/stop definitions, model families, selection thresholds, and OOD Governance V2 thresholds.

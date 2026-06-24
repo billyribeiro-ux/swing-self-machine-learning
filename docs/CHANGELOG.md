@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added ATR-Normalized Path Targets V1: active expected-return, MFE, and MAE heads now train and screen in close-known `atr_pct_14` units while preserving historical labels and mapping predictions back to canonical decimal returns for scanner, selection, attribution, portfolio replay, and paper-forward use.
+- Updated Prediction OOD Governance V2 integration so active path heads are evaluated in normalized model space while canonical external MFE/MAE sign output is validated separately; scanner identity now includes path-target normalization hashes.
+- Added regression coverage for unchanged labels, ATR-unit target derivation, canonical prediction mapping, normalized OOD checks, missing-ATR rejection, no clipping in ATR mapping, and scanner identity changes from target-normalization metadata.
 - Added Linear-Family Path-Head Retirement V1: logistic-family artifacts now keep the primary classifier, target-before-stop head, and expected-return regressor active while marking MFE and MAE heads `RETIRED_UNSUITABLE_ESTIMATOR` with explicit retirement metadata and no Tweedie MFE/MAE estimator fitting.
 - Added mandatory required-path-head-active gates, scanner rejection reasons, scanner identity metadata, model-audit fields, promotion blockers, final-holdout enrollment blockers, and dashboard fields for retired path-head capability state.
 - Added regression coverage proving retired logistic MFE/MAE heads are not fitted, remain scanner non-actionable, block promotion/final-holdout enrollment, and leave ExtraTrees/HistGradientBoosting path heads active.

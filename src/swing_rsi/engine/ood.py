@@ -305,6 +305,20 @@ def bundle_ood_identity(metrics: dict[str, Any]) -> dict[str, object]:
             "severity_q99_limit": metrics.get(f"{head}_ood_severity_q99_limit"),
             "head_bound_mapping_valid": metrics.get(f"{head}_prediction_head_bound_mapping_valid"),
             "bounds_training_only": metrics.get(f"{head}_prediction_bounds_training_only"),
+            "prediction_unit_contract": metrics.get(f"{head}_prediction_unit_contract"),
+            "prediction_ood_unit_contract": metrics.get(f"{head}_prediction_ood_unit_contract"),
+            "target_normalization_schema_version": metrics.get(
+                f"{HEAD_OUTPUT_COLUMNS[head]}_target_normalization_schema_version"
+            )
+            or metrics.get(f"{head}_target_normalization_schema_version"),
+            "target_normalization_hash": metrics.get(
+                f"{HEAD_OUTPUT_COLUMNS[head]}_target_normalization_hash"
+            )
+            or metrics.get(f"{head}_target_normalization_hash"),
+            "target_normalization_atr_feature_name": metrics.get(
+                f"{HEAD_OUTPUT_COLUMNS[head]}_target_normalization_atr_feature_name"
+            )
+            or metrics.get(f"{head}_target_normalization_atr_feature_name"),
         }
     return {
         "governance_schema_version": metrics.get("prediction_ood_governance_version"),

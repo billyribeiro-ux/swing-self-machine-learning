@@ -19,6 +19,8 @@ from swing_rsi.engine.models import (
     PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
     PATH_MAGNITUDE_HEADS,
     PATH_METRIC_HEADS,
+    PATH_TARGET_ATR_FEATURE,
+    PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     ModelBundle,
     bundle_feature_screen_metadata,
@@ -45,8 +47,8 @@ from swing_rsi.engine.selection import (
 )
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 8
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v8-path-head-capability"
+SCANNER_IDENTITY_SCHEMA_VERSION = 9
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v9-atr-path-targets"
 
 
 @dataclass(frozen=True)
@@ -197,6 +199,15 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
     ):
         if bool(item.get(f"{head_name}_feature_screen_metadata_missing", False)):
             rejection_reasons.append(reason)
+        feature_screen_schema = str(item.get(f"{head_name}_feature_screen_schema") or "")
+        target_normalization_schema = str(
+            item.get(f"{head_name}_target_normalization_schema_version") or ""
+        )
+        if (
+            feature_screen_schema == "path_metric_target_specific_feature_screen_v1"
+            and target_normalization_schema != PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+        ):
+            rejection_reasons.append(f"{head_name}_target_normalization_metadata_missing")
     for head_name, output_column, metadata_reason, magnitude_reason, signed_reason in (
         (
             "mfe",
@@ -639,6 +650,23 @@ def run_scanner(
                     "screening_schema_version", "legacy_shared_path_feature_screen"
                 ),
                 "target_label_name": metadata.get("target_label_name", ""),
+                "external_target_name": metadata.get("external_target_name", ""),
+                "internal_target_name": metadata.get("internal_target_name", ""),
+                "internal_magnitude_target_name": metadata.get(
+                    "internal_magnitude_target_name", ""
+                ),
+                "target_normalization_schema_version": metadata.get(
+                    "target_normalization_schema_version", ""
+                ),
+                "target_normalization_method": metadata.get("target_normalization_method", ""),
+                "target_normalization_atr_feature_name": metadata.get(
+                    "atr_feature_name", PATH_TARGET_ATR_FEATURE
+                )
+                if metadata.get("target_normalization_schema_version")
+                == PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+                else "",
+                "target_normalization_hash": metadata.get("target_normalization_hash", ""),
+                "prediction_mapping_version": metadata.get("prediction_mapping_version", ""),
                 "selected_feature_count": metadata.get("selected_feature_count", ""),
                 "selected_feature_families": metadata.get("selected_feature_families", {}),
                 "selected_feature_manifest_hash": bundle_head_feature_manifest(bundle, head),
@@ -659,6 +687,13 @@ def run_scanner(
                 "estimator_loss": metadata.get("estimator_loss", ""),
                 "estimator_hash": metadata.get("estimator_hash", ""),
                 "prediction_mapping_version": metadata.get("prediction_mapping_version", ""),
+                "target_normalization_schema_version": metadata.get(
+                    "target_normalization_schema_version", ""
+                ),
+                "target_normalization_atr_feature_name": metadata.get("atr_feature_name", ""),
+                "target_normalization_hash": metadata.get("target_normalization_hash", ""),
+                "internal_target_unit": metadata.get("internal_target_unit", ""),
+                "canonical_external_unit": metadata.get("canonical_external_unit", ""),
                 "path_head_capability_state": metadata.get("path_head_capability_state", ""),
                 "path_head_retirement_schema_version": metadata.get(
                     "path_head_retirement_schema_version", ""
@@ -839,6 +874,21 @@ def run_scanner(
                 "expected_return_transformed": float(
                     item.get("expected_return_transformed", expected_return)
                 ),
+                "expected_return_internal_atr_units": item.get(
+                    "expected_return_internal_atr_units"
+                ),
+                "expected_return_target_normalization_schema_version": item.get(
+                    "expected_return_target_normalization_schema_version", ""
+                ),
+                "expected_return_target_normalization_hash": item.get(
+                    "expected_return_target_normalization_hash", ""
+                ),
+                "expected_return_target_normalization_atr_feature_name": item.get(
+                    "expected_return_target_normalization_atr_feature_name", ""
+                ),
+                "expected_return_target_prediction_mapping_version": item.get(
+                    "expected_return_target_prediction_mapping_version", ""
+                ),
                 "expected_return_out_of_distribution": bool(
                     item.get("expected_return_out_of_distribution", False)
                 ),
@@ -876,6 +926,16 @@ def run_scanner(
                 ),
                 "expected_mfe_internal_magnitude": float(
                     item.get("expected_mfe_internal_magnitude", float("nan"))
+                ),
+                "expected_mfe_internal_magnitude_atr_units": item.get(
+                    "expected_mfe_internal_magnitude_atr_units"
+                ),
+                "mfe_target_normalization_schema_version": item.get(
+                    "mfe_target_normalization_schema_version", ""
+                ),
+                "mfe_target_normalization_hash": item.get("mfe_target_normalization_hash", ""),
+                "mfe_target_normalization_atr_feature_name": item.get(
+                    "mfe_target_normalization_atr_feature_name", ""
                 ),
                 "expected_mfe_magnitude_prediction_invalid": bool(
                     item.get("expected_mfe_magnitude_prediction_invalid", False)
@@ -941,6 +1001,16 @@ def run_scanner(
                 ),
                 "expected_mae_internal_magnitude": float(
                     item.get("expected_mae_internal_magnitude", float("nan"))
+                ),
+                "expected_mae_internal_magnitude_atr_units": item.get(
+                    "expected_mae_internal_magnitude_atr_units"
+                ),
+                "mae_target_normalization_schema_version": item.get(
+                    "mae_target_normalization_schema_version", ""
+                ),
+                "mae_target_normalization_hash": item.get("mae_target_normalization_hash", ""),
+                "mae_target_normalization_atr_feature_name": item.get(
+                    "mae_target_normalization_atr_feature_name", ""
                 ),
                 "expected_mae_magnitude_prediction_invalid": bool(
                     item.get("expected_mae_magnitude_prediction_invalid", False)

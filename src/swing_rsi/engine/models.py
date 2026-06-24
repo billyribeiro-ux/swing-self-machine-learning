@@ -85,6 +85,9 @@ TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS = 3
 TEMPORAL_FOLD_STABILITY_THRESHOLD = 0.50
 PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
 PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION = "path_metric_magnitude_sign_mapping_v1"
+PATH_TARGET_NORMALIZATION_SCHEMA_VERSION = "atr_normalized_path_targets_v1"
+PATH_TARGET_ATR_FEATURE = "atr_pct_14"
+PATH_TARGET_PREDICTION_MAPPING_VERSION = "atr_units_to_decimal_return_v1"
 LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION = "linear_family_path_head_retirement_v1"
 PATH_HEAD_CAPABILITY_ACTIVE = "ACTIVE"
 PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR = "RETIRED_UNSUITABLE_ESTIMATOR"
@@ -212,11 +215,37 @@ class PathMagnitudePrediction:
         return {
             f"{prefix}_internal_magnitude_prediction_min": _series_min(magnitude),
             f"{prefix}_internal_magnitude_prediction_max": _series_max(magnitude),
+            f"{prefix}_internal_magnitude_atr_unit_prediction_min": _series_min(magnitude),
+            f"{prefix}_internal_magnitude_atr_unit_prediction_max": _series_max(magnitude),
             f"{prefix}_canonical_prediction_min": _series_min(signed),
             f"{prefix}_canonical_prediction_max": _series_max(signed),
             f"{prefix}_prediction_nonfinite_count": self.nonfinite_count,
             f"{prefix}_magnitude_domain_violation_count": (self.magnitude_domain_violation_count),
             f"{prefix}_signed_domain_violation_count": self.signed_domain_violation_count,
+            f"{prefix}_domain_integrity_valid": self.valid,
+        }
+
+
+@dataclass(frozen=True)
+class PathTargetPrediction:
+    internal_atr_units: pd.Series
+    canonical_external: pd.Series
+    atr_values: pd.Series
+    nonfinite_count: int
+
+    @property
+    def valid(self) -> bool:
+        return self.nonfinite_count == 0
+
+    def diagnostics(self, prefix: str) -> dict[str, float | int | bool]:
+        internal = pd.to_numeric(self.internal_atr_units, errors="coerce")
+        canonical = pd.to_numeric(self.canonical_external, errors="coerce")
+        return {
+            f"{prefix}_internal_atr_unit_prediction_min": _series_min(internal),
+            f"{prefix}_internal_atr_unit_prediction_max": _series_max(internal),
+            f"{prefix}_canonical_prediction_min": _series_min(canonical),
+            f"{prefix}_canonical_prediction_max": _series_max(canonical),
+            f"{prefix}_prediction_nonfinite_count": self.nonfinite_count,
             f"{prefix}_domain_integrity_valid": self.valid,
         }
 
@@ -267,6 +296,41 @@ def bundle_path_domain_metadata(bundle: ModelBundle, head: str) -> dict[str, obj
     metadata = getattr(bundle, "path_domain_metadata", {}) or {}
     value = metadata.get(head)
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _target_normalization_metadata_from_screen(
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    if str(metadata.get("target_normalization_schema_version") or "") != (
+        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    ):
+        return {}
+    return {
+        "target_normalization_schema_version": str(
+            metadata.get("target_normalization_schema_version") or ""
+        ),
+        "target_normalization_method": str(metadata.get("target_normalization_method") or ""),
+        "atr_feature_name": str(metadata.get("atr_feature_name") or ""),
+        "external_target_name": str(metadata.get("external_target_name") or ""),
+        "internal_target_name": str(metadata.get("internal_target_name") or ""),
+        "internal_target_unit": str(metadata.get("internal_target_unit") or ""),
+        "canonical_external_unit": str(metadata.get("canonical_external_unit") or ""),
+        "prediction_mapping_version": str(metadata.get("prediction_mapping_version") or ""),
+        "target_normalization_hash": str(metadata.get("target_normalization_hash") or ""),
+    }
+
+
+def _target_normalization_metadata_for_bundle(bundle: ModelBundle, head: str) -> dict[str, object]:
+    screen_metadata = _target_normalization_metadata_from_screen(
+        bundle_feature_screen_metadata(bundle, head)
+    )
+    if screen_metadata:
+        return screen_metadata
+    domain_metadata = bundle_path_domain_metadata(bundle, head)
+    target_normalization = domain_metadata.get("target_normalization")
+    if isinstance(target_normalization, dict):
+        return _target_normalization_metadata_from_screen(target_normalization)
+    return _target_normalization_metadata_from_screen(domain_metadata)
 
 
 def path_head_capability_state(bundle: ModelBundle, head: str) -> str:
@@ -1167,6 +1231,7 @@ def _regression_permutation_importance_by_family(
     baseline_mae: float,
     seed: int,
     prediction_sign: float = 1.0,
+    prediction_scale: pd.Series | None = None,
 ) -> list[dict[str, float | int | str]]:
     rng = np.random.default_rng(seed)
     family_records: dict[str, dict[str, float | int | str]] = {}
@@ -1177,9 +1242,14 @@ def _regression_permutation_importance_by_family(
         values = permuted[column].to_numpy(copy=True)
         rng.shuffle(values)
         permuted[column] = values
+        raw_prediction = pd.Series(
+            np.asarray(regressor.predict(permuted), dtype=float), index=holdout.index
+        )
+        if prediction_scale is not None:
+            scale = pd.to_numeric(prediction_scale, errors="coerce").reindex(holdout.index)
+            raw_prediction = raw_prediction * scale
         prediction = pd.Series(
-            np.asarray(regressor.predict(permuted), dtype=float) * prediction_sign,
-            index=holdout.index,
+            raw_prediction.to_numpy(dtype=float) * prediction_sign, index=holdout.index
         )
         delta = float(mean_absolute_error(holdout[target], prediction) - baseline_mae)
         if not math.isfinite(delta):
@@ -1314,6 +1384,109 @@ def _path_magnitude_target_name(*, external_target: str, head_name: str) -> str:
     raise ValueError(f"Unsupported path magnitude head: {head_name}")
 
 
+def _path_atr_target_name(*, external_target: str, head_name: str) -> str:
+    if head_name == EXPECTED_RETURN_HEAD:
+        return f"{external_target}__atr_units_{PATH_TARGET_ATR_FEATURE}"
+    if head_name == MFE_HEAD:
+        return f"{external_target}__favorable_magnitude_atr_units_{PATH_TARGET_ATR_FEATURE}"
+    if head_name == MAE_HEAD:
+        return f"{external_target}__adverse_magnitude_atr_units_{PATH_TARGET_ATR_FEATURE}"
+    raise ValueError(f"Unsupported path target head: {head_name}")
+
+
+def _path_atr_values(frame: pd.DataFrame) -> pd.Series:
+    if PATH_TARGET_ATR_FEATURE not in frame.columns:
+        raise ValueError("path_target_atr_feature_missing")
+    values = pd.to_numeric(frame[PATH_TARGET_ATR_FEATURE], errors="coerce")
+    finite = np.isfinite(values.to_numpy(dtype=float, na_value=np.nan))
+    if not bool(finite.all()) or bool((values <= 0.0).any()):
+        raise ValueError("path_target_atr_feature_invalid")
+    return values.astype(float)
+
+
+def _path_atr_training_target(
+    external_target: pd.Series,
+    atr_values: pd.Series,
+    *,
+    head_name: str,
+    external_target_name: str,
+) -> pd.Series:
+    target = pd.to_numeric(external_target, errors="coerce")
+    atr = pd.to_numeric(atr_values, errors="coerce").reindex(target.index)
+    if head_name in {EXPECTED_RETURN_HEAD, MFE_HEAD}:
+        normalized = target / atr
+    elif head_name == MAE_HEAD:
+        normalized = -target / atr
+    else:
+        raise ValueError(f"Unsupported path target head: {head_name}")
+    normalized.name = _path_atr_target_name(
+        external_target=external_target_name,
+        head_name=head_name,
+    )
+    return normalized
+
+
+def _path_target_normalization_hash(
+    *,
+    head_name: str,
+    external_target_name: str,
+    internal_target_name: str,
+    direction: str,
+    horizon: int,
+) -> str:
+    return configuration_hash(
+        {
+            "schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+            "head_name": head_name,
+            "external_target_name": external_target_name,
+            "internal_target_name": internal_target_name,
+            "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+            "direction": direction,
+            "horizon": horizon,
+            "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+        }
+    )
+
+
+def _path_target_normalization_metadata(
+    *,
+    head_name: str,
+    external_target_name: str,
+    internal_target_name: str,
+    direction: str,
+    horizon: int,
+) -> dict[str, object]:
+    return {
+        "target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+        "head_name": head_name,
+        "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+        "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+        "atr_feature_timing": "signal_date_close_known",
+        "external_target_name": external_target_name,
+        "internal_target_name": internal_target_name,
+        "internal_target_unit": "atr_units",
+        "canonical_external_unit": "decimal_return",
+        "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+        "target_normalization_hash": _path_target_normalization_hash(
+            head_name=head_name,
+            external_target_name=external_target_name,
+            internal_target_name=internal_target_name,
+            direction=direction,
+            horizon=horizon,
+        ),
+    }
+
+
+def _path_internal_target_definition(head_name: str) -> str:
+    if head_name == EXPECTED_RETURN_HEAD:
+        return "signed_directional_return_divided_by_signal_close_atr_pct_14"
+    if head_name == MFE_HEAD:
+        return "favorable_magnitude_equals_existing_mfe_divided_by_signal_close_atr_pct_14"
+    if head_name == MAE_HEAD:
+        return "adverse_magnitude_equals_negative_existing_mae_divided_by_signal_close_atr_pct_14"
+    raise ValueError(f"Unsupported path target head: {head_name}")
+
+
 def _path_magnitude_target(
     external_target: pd.Series,
     *,
@@ -1366,12 +1539,18 @@ def _path_magnitude_prediction(
     *,
     head_name: str,
     index: pd.Index,
+    atr_values: pd.Series | None = None,
 ) -> PathMagnitudePrediction:
     magnitude = pd.Series(
         np.asarray(estimator.predict(features), dtype=float),
         index=index,
     )
-    canonical = magnitude if head_name == MFE_HEAD else -magnitude
+    if atr_values is not None:
+        atr = pd.to_numeric(atr_values, errors="coerce").reindex(index).astype(float)
+        external_magnitude = magnitude * atr
+    else:
+        external_magnitude = magnitude
+    canonical = external_magnitude if head_name == MFE_HEAD else -external_magnitude
     canonical = pd.Series(np.asarray(canonical, dtype=float), index=index)
     magnitude_values = magnitude.to_numpy(dtype=float, na_value=np.nan)
     signed_values = canonical.to_numpy(dtype=float, na_value=np.nan)
@@ -1390,6 +1569,31 @@ def _path_magnitude_prediction(
         nonfinite_count=nonfinite_count,
         magnitude_domain_violation_count=magnitude_violation,
         signed_domain_violation_count=signed_violation,
+    )
+
+
+def _path_target_prediction(
+    estimator: Any,
+    features: pd.DataFrame,
+    *,
+    atr_values: pd.Series,
+    index: pd.Index,
+) -> PathTargetPrediction:
+    internal = pd.Series(
+        np.asarray(estimator.predict(features), dtype=float),
+        index=index,
+    )
+    atr = pd.to_numeric(atr_values, errors="coerce").reindex(index).astype(float)
+    canonical = pd.Series(np.asarray(internal * atr, dtype=float), index=index)
+    internal_values = internal.to_numpy(dtype=float, na_value=np.nan)
+    canonical_values = canonical.to_numpy(dtype=float, na_value=np.nan)
+    nonfinite_count = int((~np.isfinite(internal_values)).sum())
+    nonfinite_count += int((~np.isfinite(canonical_values)).sum())
+    return PathTargetPrediction(
+        internal_atr_units=internal,
+        canonical_external=canonical,
+        atr_values=atr,
+        nonfinite_count=nonfinite_count,
     )
 
 
@@ -1419,13 +1623,11 @@ def _path_domain_metadata(
     selected_feature_manifest_hash: str,
     calibration_prediction: PathMagnitudePrediction,
     holdout_prediction: PathMagnitudePrediction,
+    target_normalization_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     target_values = pd.to_numeric(magnitude_target, errors="coerce")
-    definition = (
-        "favorable_magnitude_equals_existing_mfe"
-        if head_name == MFE_HEAD
-        else "adverse_magnitude_equals_negative_existing_mae"
-    )
+    definition = _path_internal_target_definition(head_name)
+    normalization = dict(target_normalization_metadata or {})
     return {
         "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
         "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
@@ -1445,8 +1647,18 @@ def _path_domain_metadata(
         "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
         "transformation_chain": (
             f"{external_target_name} -> {magnitude_target.name} -> "
-            f"{spec.estimator_class} -> internal_magnitude_prediction -> canonical_signed_output"
+            f"{spec.estimator_class} -> internal_magnitude_atr_unit_prediction -> "
+            "canonical_signed_decimal_output"
         ),
+        "target_normalization": normalization,
+        "target_normalization_schema_version": str(
+            normalization.get("target_normalization_schema_version") or ""
+        ),
+        "target_normalization_method": str(normalization.get("target_normalization_method") or ""),
+        "atr_feature_name": str(normalization.get("atr_feature_name") or ""),
+        "target_normalization_hash": str(normalization.get("target_normalization_hash") or ""),
+        "internal_target_unit": str(normalization.get("internal_target_unit") or ""),
+        "canonical_external_unit": str(normalization.get("canonical_external_unit") or ""),
         "training_target_min": _series_min(target_values),
         "training_target_max": _series_max(target_values),
         "training_target_positive_count": int((target_values > 0.0).sum()),
@@ -1467,13 +1679,11 @@ def _retired_path_domain_metadata(
     selected_feature_manifest_hash: str,
     calibration_prediction: PathMagnitudePrediction,
     holdout_prediction: PathMagnitudePrediction,
+    target_normalization_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     target_values = pd.to_numeric(magnitude_target, errors="coerce")
-    internal_definition = (
-        "favorable_magnitude_equals_existing_mfe"
-        if head_name == MFE_HEAD
-        else "adverse_magnitude_equals_negative_existing_mae"
-    )
+    internal_definition = _path_internal_target_definition(head_name)
+    normalization = dict(target_normalization_metadata or {})
     estimator_payload: dict[str, object] = {
         "schema_version": LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION,
         "family": family,
@@ -1502,6 +1712,15 @@ def _retired_path_domain_metadata(
             f"{external_target_name} -> {magnitude_target.name} -> "
             "RETIRED_UNSUITABLE_ESTIMATOR -> no_prediction"
         ),
+        "target_normalization": normalization,
+        "target_normalization_schema_version": str(
+            normalization.get("target_normalization_schema_version") or ""
+        ),
+        "target_normalization_method": str(normalization.get("target_normalization_method") or ""),
+        "atr_feature_name": str(normalization.get("atr_feature_name") or ""),
+        "target_normalization_hash": str(normalization.get("target_normalization_hash") or ""),
+        "internal_target_unit": str(normalization.get("internal_target_unit") or ""),
+        "canonical_external_unit": str(normalization.get("canonical_external_unit") or ""),
         "training_target_min": _series_min(target_values),
         "training_target_max": _series_max(target_values),
         "training_target_positive_count": int((target_values > 0.0).sum()),
@@ -1561,6 +1780,18 @@ def _path_domain_metric_payload(
         f"{prefix}_prediction_mapping_version": str(
             metadata.get("prediction_mapping_version") or ""
         ),
+        f"{prefix}_target_normalization_schema_version": str(
+            metadata.get("target_normalization_schema_version") or ""
+        ),
+        f"{prefix}_target_normalization_method": str(
+            metadata.get("target_normalization_method") or ""
+        ),
+        f"{prefix}_target_normalization_atr_feature_name": str(
+            metadata.get("atr_feature_name") or ""
+        ),
+        f"{prefix}_target_normalization_hash": str(metadata.get("target_normalization_hash") or ""),
+        f"{prefix}_internal_target_unit": str(metadata.get("internal_target_unit") or ""),
+        f"{prefix}_canonical_external_unit": str(metadata.get("canonical_external_unit") or ""),
         f"{prefix}_magnitude_training_target_min": float(training_min)
         if isinstance(training_min, (int, float))
         else None,
@@ -1583,6 +1814,35 @@ def _path_domain_metric_payload(
             for key, value in holdout_payload.items()
             if isinstance(value, (float, int, bool)) or value is None
         },
+    }
+
+
+def _path_target_normalization_metric_payload(
+    *,
+    head_name: str,
+    metadata: dict[str, object],
+) -> dict[str, float | int | str | bool | None]:
+    metric_key = PATH_HEAD_TARGET_METRIC_KEYS[head_name]
+    return {
+        f"{metric_key}_target_normalization_schema_version": str(
+            metadata.get("target_normalization_schema_version") or ""
+        ),
+        f"{metric_key}_target_normalization_method": str(
+            metadata.get("target_normalization_method") or ""
+        ),
+        f"{metric_key}_target_normalization_atr_feature_name": str(
+            metadata.get("atr_feature_name") or ""
+        ),
+        f"{metric_key}_target_normalization_hash": str(
+            metadata.get("target_normalization_hash") or ""
+        ),
+        f"{metric_key}_internal_target_name": str(metadata.get("internal_target_name") or ""),
+        f"{metric_key}_internal_target_unit": str(metadata.get("internal_target_unit") or ""),
+        f"{metric_key}_canonical_external_unit": str(metadata.get("canonical_external_unit") or ""),
+        f"{metric_key}_target_prediction_mapping_version": str(
+            metadata.get("prediction_mapping_version") or ""
+        ),
+        f"{metric_key}_target_normalization_metadata_json": _json_dumps(metadata),
     }
 
 
@@ -2503,9 +2763,10 @@ def _train_family(
     mae = f"label_{direction}_mae_{horizon}"
     target_before_stop = f"label_{direction}_target_before_stop_{horizon}"
     required = [target, returns, mfe, mae, target_before_stop]
-    train = split.train.dropna(subset=[*feature_columns, *required]).copy()
-    calibration = split.calibration.dropna(subset=[*feature_columns, *required]).copy()
-    holdout = split.holdout.dropna(subset=[*feature_columns, *required]).copy()
+    path_required = [*required, PATH_TARGET_ATR_FEATURE]
+    train = split.train.dropna(subset=[*feature_columns, *path_required]).copy()
+    calibration = split.calibration.dropna(subset=[*feature_columns, *path_required]).copy()
+    holdout = split.holdout.dropna(subset=[*feature_columns, *path_required]).copy()
     if train.empty or calibration.empty or holdout.empty:
         raise ValueError("Training, calibration, and holdout sets must be nonempty")
     feature_columns, mutual_information_summary = _mutual_information_screen(
@@ -2604,21 +2865,89 @@ def _train_family(
 
     plugin_by_name = {plugin.name: plugin for plugin in model_plugins()}
     plugin = plugin_by_name[family]
-    path_screen_train = split.train.dropna(subset=required).copy()
-    mfe_magnitude_train = _path_magnitude_target(
+    path_screen_train = split.train.dropna(subset=path_required).copy()
+    path_train_atr = _path_atr_values(path_screen_train)
+    calibration_atr = _path_atr_values(calibration)
+    holdout_atr = _path_atr_values(holdout)
+    return_atr_train = _path_atr_training_target(
+        path_screen_train[returns],
+        path_train_atr,
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=returns,
+    )
+    mfe_magnitude_train = _path_atr_training_target(
         path_screen_train[mfe],
+        path_train_atr,
         head_name=MFE_HEAD,
         external_target_name=mfe,
     )
-    mae_magnitude_train = _path_magnitude_target(
+    mae_magnitude_train = _path_atr_training_target(
         path_screen_train[mae],
+        path_train_atr,
         head_name=MAE_HEAD,
         external_target_name=mae,
     )
+    return_atr_calibration = _path_atr_training_target(
+        calibration[returns],
+        calibration_atr,
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=returns,
+    )
+    mfe_atr_calibration = _path_atr_training_target(
+        calibration[mfe],
+        calibration_atr,
+        head_name=MFE_HEAD,
+        external_target_name=mfe,
+    )
+    mae_atr_calibration = _path_atr_training_target(
+        calibration[mae],
+        calibration_atr,
+        head_name=MAE_HEAD,
+        external_target_name=mae,
+    )
+    return_atr_holdout = _path_atr_training_target(
+        holdout[returns],
+        holdout_atr,
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=returns,
+    )
+    mfe_atr_holdout = _path_atr_training_target(
+        holdout[mfe],
+        holdout_atr,
+        head_name=MFE_HEAD,
+        external_target_name=mfe,
+    )
+    mae_atr_holdout = _path_atr_training_target(
+        holdout[mae],
+        holdout_atr,
+        head_name=MAE_HEAD,
+        external_target_name=mae,
+    )
+    return_normalization_metadata = _path_target_normalization_metadata(
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=returns,
+        internal_target_name=str(return_atr_train.name),
+        direction=direction,
+        horizon=horizon,
+    )
+    mfe_normalization_metadata = _path_target_normalization_metadata(
+        head_name=MFE_HEAD,
+        external_target_name=mfe,
+        internal_target_name=str(mfe_magnitude_train.name),
+        direction=direction,
+        horizon=horizon,
+    )
+    mae_normalization_metadata = _path_target_normalization_metadata(
+        head_name=MAE_HEAD,
+        external_target_name=mae,
+        internal_target_name=str(mae_magnitude_train.name),
+        direction=direction,
+        horizon=horizon,
+    )
     return_screen = _screen_path_metric_head(
         training_frame=path_screen_train,
-        target=path_screen_train[returns],
-        target_name=returns,
+        target=return_atr_train,
+        target_name=str(return_atr_train.name),
         head_name=EXPECTED_RETURN_HEAD,
         direction=direction,
         horizon=horizon,
@@ -2674,7 +3003,7 @@ def _train_family(
             head_name=MAE_HEAD,
             seed=config.random_seed + 2,
         )
-    return_model.fit(path_screen_train[list(return_feature_columns)], path_screen_train[returns])
+    return_model.fit(path_screen_train[list(return_feature_columns)], return_atr_train)
     mfe_train_features = path_screen_train[list(mfe_feature_columns)]
     mae_train_features = path_screen_train[list(mae_feature_columns)]
     _validate_path_magnitude_training_target(
@@ -2691,8 +3020,10 @@ def _train_family(
         mfe_model.fit(mfe_train_features, mfe_magnitude_train)
     if not mae_retired:
         mae_model.fit(mae_train_features, mae_magnitude_train)
-    calibration_expected_return = pd.Series(
-        return_model.predict(calibration[list(return_feature_columns)]),
+    calibration_return_prediction = _path_target_prediction(
+        return_model,
+        calibration[list(return_feature_columns)],
+        atr_values=calibration_atr,
         index=calibration.index,
     )
     calibration_mfe_prediction = (
@@ -2703,6 +3034,7 @@ def _train_family(
             calibration[list(mfe_feature_columns)],
             head_name=MFE_HEAD,
             index=calibration.index,
+            atr_values=calibration_atr,
         )
     )
     calibration_mae_prediction = (
@@ -2713,14 +3045,16 @@ def _train_family(
             calibration[list(mae_feature_columns)],
             head_name=MAE_HEAD,
             index=calibration.index,
+            atr_values=calibration_atr,
         )
     )
-    calibration_expected_mfe = calibration_mfe_prediction.canonical_signed
-    calibration_expected_mae = calibration_mae_prediction.canonical_signed
-    expected_return = pd.Series(
-        return_model.predict(holdout[list(return_feature_columns)]),
+    holdout_return_prediction = _path_target_prediction(
+        return_model,
+        holdout[list(return_feature_columns)],
+        atr_values=holdout_atr,
         index=holdout.index,
     )
+    expected_return = holdout_return_prediction.canonical_external
     holdout_mfe_prediction = (
         _retired_path_prediction(holdout.index, head_name=MFE_HEAD)
         if mfe_retired
@@ -2729,6 +3063,7 @@ def _train_family(
             holdout[list(mfe_feature_columns)],
             head_name=MFE_HEAD,
             index=holdout.index,
+            atr_values=holdout_atr,
         )
     )
     holdout_mae_prediction = (
@@ -2739,6 +3074,7 @@ def _train_family(
             holdout[list(mae_feature_columns)],
             head_name=MAE_HEAD,
             index=holdout.index,
+            atr_values=holdout_atr,
         )
     )
     expected_mfe = holdout_mfe_prediction.canonical_signed
@@ -2848,6 +3184,7 @@ def _train_family(
             target=returns,
             baseline_mae=holdout_mae,
             seed=config.random_seed + 30,
+            prediction_scale=holdout_atr,
         ),
         MFE_HEAD: []
         if mfe_retired
@@ -2860,6 +3197,7 @@ def _train_family(
             baseline_mae=holdout_mfe_mae,
             seed=config.random_seed + 31,
             prediction_sign=1.0,
+            prediction_scale=holdout_atr,
         ),
         MAE_HEAD: []
         if mae_retired
@@ -2872,6 +3210,7 @@ def _train_family(
             baseline_mae=holdout_mae_mae,
             seed=config.random_seed + 32,
             prediction_sign=-1.0,
+            prediction_scale=holdout_atr,
         ),
     }
     mean_selected_return = (
@@ -2986,11 +3325,11 @@ def _train_family(
             name="return",
             direction=direction,
             horizon=horizon,
-            train_target=train[returns],
-            calibration_target=calibration[returns],
-            holdout_target=holdout[returns],
-            calibration_prediction=calibration_expected_return,
-            holdout_prediction=expected_return,
+            train_target=return_atr_train,
+            calibration_target=return_atr_calibration,
+            holdout_target=return_atr_holdout,
+            calibration_prediction=calibration_return_prediction.internal_atr_units,
+            holdout_prediction=holdout_return_prediction.internal_atr_units,
         )
     )
     prediction_metrics.update(
@@ -2998,11 +3337,11 @@ def _train_family(
             name="mfe",
             direction=direction,
             horizon=horizon,
-            train_target=train[mfe],
-            calibration_target=calibration[mfe],
-            holdout_target=holdout[mfe],
-            calibration_prediction=calibration_expected_mfe,
-            holdout_prediction=expected_mfe,
+            train_target=mfe_magnitude_train,
+            calibration_target=mfe_atr_calibration,
+            holdout_target=mfe_atr_holdout,
+            calibration_prediction=calibration_mfe_prediction.internal_magnitude,
+            holdout_prediction=holdout_mfe_prediction.internal_magnitude,
         )
     )
     prediction_metrics.update(
@@ -3010,13 +3349,36 @@ def _train_family(
             name="mae",
             direction=direction,
             horizon=horizon,
-            train_target=train[mae],
-            calibration_target=calibration[mae],
-            holdout_target=holdout[mae],
-            calibration_prediction=calibration_expected_mae,
-            holdout_prediction=expected_mae,
+            train_target=mae_magnitude_train,
+            calibration_target=mae_atr_calibration,
+            holdout_target=mae_atr_holdout,
+            calibration_prediction=calibration_mae_prediction.internal_magnitude,
+            holdout_prediction=holdout_mae_prediction.internal_magnitude,
         )
     )
+    prediction_metrics.update(
+        {
+            "return_prediction_unit_contract": "decimal_return",
+            "return_prediction_ood_unit_contract": "atr_units",
+            "return_prediction_transform_method": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            "return_prediction_path_metric_sign_valid": holdout_return_prediction.valid
+            and calibration_return_prediction.valid,
+            "mfe_prediction_unit_contract": "decimal_return",
+            "mfe_prediction_ood_unit_contract": "atr_units",
+            "mfe_prediction_transform_method": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            "mfe_prediction_path_metric_sign_valid": bool(
+                calibration_mfe_prediction.valid and holdout_mfe_prediction.valid
+            ),
+            "mae_prediction_unit_contract": "decimal_return",
+            "mae_prediction_ood_unit_contract": "atr_units",
+            "mae_prediction_transform_method": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            "mae_prediction_path_metric_sign_valid": bool(
+                calibration_mae_prediction.valid and holdout_mae_prediction.valid
+            ),
+        }
+    )
+    prediction_metrics.update(calibration_return_prediction.diagnostics("return_calibration"))
+    prediction_metrics.update(holdout_return_prediction.diagnostics("return_holdout"))
     prediction_metrics.update(
         probability_contract_metrics(
             calibration_probability=calibration_probability,
@@ -3084,17 +3446,24 @@ def _train_family(
             "direction": direction,
             "horizon": horizon,
         },
-        EXPECTED_RETURN_HEAD: return_screen.metadata(),
+        EXPECTED_RETURN_HEAD: {
+            **return_screen.metadata(),
+            **return_normalization_metadata,
+            "external_target_name": returns,
+            "internal_target_definition": _path_internal_target_definition(EXPECTED_RETURN_HEAD),
+        },
         MFE_HEAD: {
             **mfe_screen.metadata(),
+            **mfe_normalization_metadata,
             "external_target_name": mfe,
-            "internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+            "internal_target_definition": _path_internal_target_definition(MFE_HEAD),
             "internal_magnitude_target_name": str(mfe_magnitude_train.name),
         },
         MAE_HEAD: {
             **mae_screen.metadata(),
+            **mae_normalization_metadata,
             "external_target_name": mae,
-            "internal_target_definition": "adverse_magnitude_equals_negative_existing_mae",
+            "internal_target_definition": _path_internal_target_definition(MAE_HEAD),
             "internal_magnitude_target_name": str(mae_magnitude_train.name),
         },
     }
@@ -3113,6 +3482,7 @@ def _train_family(
             selected_feature_manifest_hash=head_feature_manifests[MFE_HEAD],
             calibration_prediction=calibration_mfe_prediction,
             holdout_prediction=holdout_mfe_prediction,
+            target_normalization_metadata=mfe_normalization_metadata,
         )
         if mfe_retired
         else _path_domain_metadata(
@@ -3124,6 +3494,7 @@ def _train_family(
             selected_feature_manifest_hash=head_feature_manifests[MFE_HEAD],
             calibration_prediction=calibration_mfe_prediction,
             holdout_prediction=holdout_mfe_prediction,
+            target_normalization_metadata=mfe_normalization_metadata,
         ),
         MAE_HEAD: _retired_path_domain_metadata(
             family=family,
@@ -3133,6 +3504,7 @@ def _train_family(
             selected_feature_manifest_hash=head_feature_manifests[MAE_HEAD],
             calibration_prediction=calibration_mae_prediction,
             holdout_prediction=holdout_mae_prediction,
+            target_normalization_metadata=mae_normalization_metadata,
         )
         if mae_retired
         else _path_domain_metadata(
@@ -3144,6 +3516,7 @@ def _train_family(
             selected_feature_manifest_hash=head_feature_manifests[MAE_HEAD],
             calibration_prediction=calibration_mae_prediction,
             holdout_prediction=holdout_mae_prediction,
+            target_normalization_metadata=mae_normalization_metadata,
         ),
     }
     portfolio_policy_hash = configuration_hash(asdict(portfolio_config))
@@ -3163,6 +3536,7 @@ def _train_family(
     path_screen_metric_payload: dict[str, float | int | str | bool | None] = {}
     for head_name, screen in path_screens.items():
         metric_key = PATH_HEAD_TARGET_METRIC_KEYS[head_name]
+        head_metadata = feature_screen_metadata.get(head_name, screen.metadata())
         permutation_by_family = path_permutation_by_head[head_name]
         permutation_top = "; ".join(
             f"{record['family']}={float(record['positive_sum_delta_mae']):.6f}"
@@ -3185,7 +3559,7 @@ def _train_family(
                     screen.selected_feature_families
                 ),
                 f"{metric_key}_selected_feature_scores_json": _json_dumps(screen.selected_scores),
-                f"{metric_key}_feature_screen_metadata_json": _json_dumps(screen.metadata()),
+                f"{metric_key}_feature_screen_metadata_json": _json_dumps(head_metadata),
                 f"{metric_key}_feature_screen_audit_json": _json_dumps(screen.audit_records()),
                 f"{metric_key}_top_25_train_mi_features_json": _json_dumps(
                     _screen_top_features(screen, limit=25)
@@ -3195,6 +3569,12 @@ def _train_family(
                 ),
                 f"{metric_key}_permutation_importance_top": permutation_top,
             }
+        )
+        path_screen_metric_payload.update(
+            _path_target_normalization_metric_payload(
+                head_name=head_name,
+                metadata=head_metadata,
+            )
         )
     metrics: dict[str, float | int | str | bool | None] = {
         "training_samples": len(train),
@@ -3555,7 +3935,7 @@ def _train_family(
         training_stds=stds,
         training_matrix=x_train.reset_index(drop=True),
         training_labels=train[
-            ["Date", "symbol", returns, mfe, mae, target_before_stop]
+            ["Date", "symbol", returns, mfe, mae, target_before_stop, PATH_TARGET_ATR_FEATURE]
         ].reset_index(drop=True),
         metrics=metrics,
         calibration_metrics=calibration_metrics,
@@ -3805,6 +4185,31 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         output[f"{output_prefix}_feature_screen_metadata_missing"] = (
             not bool(metadata) or schema != PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION
         )
+        target_normalization_metadata = _target_normalization_metadata_for_bundle(bundle, head_name)
+        output[f"{output_prefix}_target_normalization_schema_version"] = str(
+            target_normalization_metadata.get("target_normalization_schema_version") or ""
+        )
+        output[f"{output_prefix}_target_normalization_method"] = str(
+            target_normalization_metadata.get("target_normalization_method") or ""
+        )
+        output[f"{output_prefix}_target_normalization_atr_feature_name"] = str(
+            target_normalization_metadata.get("atr_feature_name") or ""
+        )
+        output[f"{output_prefix}_target_normalization_hash"] = str(
+            target_normalization_metadata.get("target_normalization_hash") or ""
+        )
+        output[f"{output_prefix}_target_prediction_mapping_version"] = str(
+            target_normalization_metadata.get("prediction_mapping_version") or ""
+        )
+        output[f"{output_prefix}_internal_target_name"] = str(
+            target_normalization_metadata.get("internal_target_name") or ""
+        )
+        output[f"{output_prefix}_internal_target_unit"] = str(
+            target_normalization_metadata.get("internal_target_unit") or ""
+        )
+        output[f"{output_prefix}_canonical_external_unit"] = str(
+            target_normalization_metadata.get("canonical_external_unit") or ""
+        )
     output["target_before_stop_feature_manifest_hash"] = bundle_head_feature_manifest(
         bundle, TARGET_BEFORE_STOP_HEAD
     )
@@ -3850,6 +4255,12 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             bundle.target_before_stop_calibrator.predict(target_raw), dtype=float
         )
 
+    path_atr_valid = False
+    if PATH_TARGET_ATR_FEATURE in frame.columns:
+        path_atr_numeric = pd.to_numeric(frame[PATH_TARGET_ATR_FEATURE], errors="coerce")
+        path_atr_values = path_atr_numeric.to_numpy(dtype=float, na_value=np.nan)
+        path_atr_valid = bool(np.isfinite(path_atr_values).all() and (path_atr_values > 0.0).all())
+
     def add_regression_prediction(
         output_column: str,
         metric_prefix: str,
@@ -3857,6 +4268,8 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         missing_features: list[str],
         domain_metadata: dict[str, object] | None = None,
         domain_prediction: PathMagnitudePrediction | None = None,
+        target_prediction: PathTargetPrediction | None = None,
+        ood_values: np.ndarray | pd.Series | None = None,
     ) -> None:
         output[f"{output_column}_required_feature_missing"] = bool(missing_features)
         output[f"{output_column}_missing_features"] = ";".join(missing_features[:10])
@@ -3915,11 +4328,23 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         output[f"{output_column}_transform_method"] = str(
             bundle.metrics.get(f"{metric_prefix}_prediction_transform_method") or "none"
         )
+        if target_prediction is not None:
+            output[f"{output_column}_internal_atr_units"] = (
+                target_prediction.internal_atr_units.to_numpy(dtype=float)
+            )
+            output[f"{output_column}_atr_pct_14"] = target_prediction.atr_values.to_numpy(
+                dtype=float
+            )
         low_value = bundle.metrics.get(f"{metric_prefix}_prediction_bound_low_train_q01")
         high_value = bundle.metrics.get(f"{metric_prefix}_prediction_bound_high_train_q99")
+        ood_numeric = (
+            np.asarray(ood_values, dtype=float)
+            if ood_values is not None
+            else np.asarray(numeric, dtype=float)
+        )
         checks = [
             live_ood_check(metrics=bundle.metrics, head=metric_prefix, value=float(value))
-            for value in numeric
+            for value in ood_numeric
         ]
         try:
             if low_value is None or high_value is None:
@@ -3929,7 +4354,7 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         except (TypeError, ValueError):
             legacy_ood = np.full(len(numeric), False)
         else:
-            legacy_ood = (numeric < low) | (numeric > high)
+            legacy_ood = (ood_numeric < low) | (ood_numeric > high)
         output[f"{output_column}_out_of_distribution"] = legacy_ood
         output[f"{output_column}_ood_warning"] = legacy_ood
         output[f"{output_column}_ood_severity"] = [check.severity for check in checks]
@@ -3965,6 +4390,7 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             else:
                 signed_violation = np.isfinite(numeric) & (numeric > 0.0)
             output[f"{output_column}_internal_magnitude"] = magnitude
+            output[f"{output_column}_internal_magnitude_atr_units"] = magnitude
             output[f"{output_column}_magnitude_prediction_invalid"] = (
                 magnitude_nonfinite | magnitude_violation
             )
@@ -3978,15 +4404,45 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             output[f"{output_column}_magnitude_domain_violation"] = magnitude_violation
             output[f"{output_column}_signed_domain_violation"] = signed_violation
 
+    return_target_normalization = _target_normalization_metadata_for_bundle(
+        bundle, EXPECTED_RETURN_HEAD
+    )
+    return_normalized = bool(return_target_normalization)
+    expected_return_missing_features = [
+        column for column in expected_return_features if column not in frame.columns
+    ]
+    if return_normalized and not path_atr_valid:
+        expected_return_missing_features.append(PATH_TARGET_ATR_FEATURE)
+    expected_return_missing_features = list(dict.fromkeys(expected_return_missing_features))
+    return_prediction: PathTargetPrediction | None = None
+    if expected_return_missing_features:
+        expected_return_values = None
+        expected_return_ood_values = None
+    elif return_normalized:
+        return_prediction = _path_target_prediction(
+            bundle.return_model,
+            frame[list(expected_return_features)],
+            atr_values=_path_atr_values(frame),
+            index=frame.index,
+        )
+        expected_return_values = return_prediction.canonical_external.to_numpy(dtype=float)
+        expected_return_ood_values = return_prediction.internal_atr_units
+    else:
+        expected_return_values = bundle.return_model.predict(frame[list(expected_return_features)])
+        expected_return_ood_values = expected_return_values
     add_regression_prediction(
         "expected_return",
         "return",
-        None
-        if any(column not in frame.columns for column in expected_return_features)
-        else bundle.return_model.predict(frame[list(expected_return_features)]),
-        [column for column in expected_return_features if column not in frame.columns],
+        expected_return_values,
+        expected_return_missing_features,
+        target_prediction=return_prediction,
+        ood_values=expected_return_ood_values,
     )
+    mfe_target_normalization = _target_normalization_metadata_for_bundle(bundle, MFE_HEAD)
     mfe_missing_features = [column for column in mfe_features if column not in frame.columns]
+    if mfe_target_normalization and not path_atr_valid:
+        mfe_missing_features.append(PATH_TARGET_ATR_FEATURE)
+    mfe_missing_features = list(dict.fromkeys(mfe_missing_features))
     mfe_domain_metadata = bundle_path_domain_metadata(bundle, MFE_HEAD)
     mfe_retired = (
         str(mfe_domain_metadata.get("path_head_capability_state") or "")
@@ -3997,21 +4453,29 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
     )
     mfe_domain_prediction: PathMagnitudePrediction | None = None
+    mfe_ood_values: np.ndarray | pd.Series | None
     if mfe_missing_features:
         mfe_values = None
+        mfe_ood_values = None
     elif mfe_retired:
         mfe_domain_prediction = _retired_path_prediction(frame.index, head_name=MFE_HEAD)
         mfe_values = mfe_domain_prediction.canonical_signed.to_numpy(dtype=float)
+        mfe_ood_values = mfe_domain_prediction.internal_magnitude
     elif mfe_has_domain:
         mfe_domain_prediction = _path_magnitude_prediction(
             bundle.mfe_model,
             frame[list(mfe_features)],
             head_name=MFE_HEAD,
             index=frame.index,
+            atr_values=_path_atr_values(frame) if mfe_target_normalization else None,
         )
         mfe_values = mfe_domain_prediction.canonical_signed.to_numpy(dtype=float)
+        mfe_ood_values = (
+            mfe_domain_prediction.internal_magnitude if mfe_target_normalization else mfe_values
+        )
     else:
         mfe_values = bundle.mfe_model.predict(frame[list(mfe_features)])
+        mfe_ood_values = mfe_values
     add_regression_prediction(
         "expected_mfe",
         "mfe",
@@ -4019,8 +4483,13 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         mfe_missing_features,
         domain_metadata=mfe_domain_metadata,
         domain_prediction=mfe_domain_prediction,
+        ood_values=mfe_ood_values,
     )
+    mae_target_normalization = _target_normalization_metadata_for_bundle(bundle, MAE_HEAD)
     mae_missing_features = [column for column in mae_features if column not in frame.columns]
+    if mae_target_normalization and not path_atr_valid:
+        mae_missing_features.append(PATH_TARGET_ATR_FEATURE)
+    mae_missing_features = list(dict.fromkeys(mae_missing_features))
     mae_domain_metadata = bundle_path_domain_metadata(bundle, MAE_HEAD)
     mae_retired = (
         str(mae_domain_metadata.get("path_head_capability_state") or "")
@@ -4031,21 +4500,29 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
     )
     mae_domain_prediction: PathMagnitudePrediction | None = None
+    mae_ood_values: np.ndarray | pd.Series | None
     if mae_missing_features:
         mae_values = None
+        mae_ood_values = None
     elif mae_retired:
         mae_domain_prediction = _retired_path_prediction(frame.index, head_name=MAE_HEAD)
         mae_values = mae_domain_prediction.canonical_signed.to_numpy(dtype=float)
+        mae_ood_values = mae_domain_prediction.internal_magnitude
     elif mae_has_domain:
         mae_domain_prediction = _path_magnitude_prediction(
             bundle.mae_model,
             frame[list(mae_features)],
             head_name=MAE_HEAD,
             index=frame.index,
+            atr_values=_path_atr_values(frame) if mae_target_normalization else None,
         )
         mae_values = mae_domain_prediction.canonical_signed.to_numpy(dtype=float)
+        mae_ood_values = (
+            mae_domain_prediction.internal_magnitude if mae_target_normalization else mae_values
+        )
     else:
         mae_values = bundle.mae_model.predict(frame[list(mae_features)])
+        mae_ood_values = mae_values
     add_regression_prediction(
         "expected_mae",
         "mae",
@@ -4053,5 +4530,6 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         mae_missing_features,
         domain_metadata=mae_domain_metadata,
         domain_prediction=mae_domain_prediction,
+        ood_values=mae_ood_values,
     )
     return output

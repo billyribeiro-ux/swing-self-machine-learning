@@ -63,20 +63,21 @@ Every classifier is compared against the matching naive control on the exact sam
 
 ## Target-specific feature screening
 
-Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. Expected-return regressors use the signed directional return target. MFE regressors use favorable magnitude, equal to the existing MFE label. MAE regressors use adverse magnitude, equal to negative existing MAE. No head may reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
+Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. Path-metric regressors use internal ATR-normalized targets under `atr_normalized_path_targets_v1`: expected return uses signed directional return divided by close-known signal-date `atr_pct_14`; MFE uses favorable magnitude divided by `atr_pct_14`; MAE uses adverse magnitude divided by `atr_pct_14`. No head may reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
 
 The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Classification heads use `mutual_info_classif`; regression heads use `mutual_info_regression`. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
 
 ## Path magnitude domain modeling
 
-MFE and MAE historical labels are not rewritten. Their external contract remains MFE `>= 0` and MAE `<= 0` in decimal-return units. Model training derives internal nonnegative magnitude targets only for the MFE and MAE heads:
+Historical path labels are not rewritten. Their external contract remains expected return as signed decimal directional return, MFE `>= 0`, and MAE `<= 0` in decimal-return units. Model training derives internal ATR-unit targets from close-known signal-date `atr_pct_14`:
 
-- `mfe_magnitude_target = existing MFE label`;
-- `mae_magnitude_target = -1 * existing MAE label`.
+- `expected_return_atr_target = existing expected return / atr_pct_14`;
+- `mfe_magnitude_atr_target = existing MFE label / atr_pct_14`;
+- `mae_magnitude_atr_target = (-1 * existing MAE label) / atr_pct_14`.
 
 Under `path_metric_magnitude_domain_v1`, linear-family path-magnitude heads use `TweedieRegressor(power=1.5, link="log")`, HistGradientBoosting path-magnitude heads use `HistGradientBoostingRegressor(loss="poisson")`, ExtraTrees path-magnitude heads train directly on nonnegative magnitudes, and naive controls use nonnegative training-magnitude summaries. Expected-return modeling remains signed.
 
-Predictions are mapped back to canonical external units before OOD, scanner, attribution, and gate evaluation. Invalid magnitude output or invalid signed output is a hard integrity failure; no post-prediction clipping may be used to repair it.
+Predictions are mapped back to canonical decimal-return units before scanner output, selection policy, attribution, portfolio replay, and paper-forward testing. Invalid magnitude output or invalid signed output is a hard integrity failure; no post-prediction clipping may be used to repair it.
 
 ## Target-before-stop calibration governance
 
@@ -97,10 +98,12 @@ Every exceedance remains visible and auditable. Raw predictions are never silent
 For each regression head, direction, horizon, and model artifact:
 
 - heads are evaluated independently: expected return, expected MFE, and expected MAE;
-- returns are decimal returns, so `0.05` means `5%`;
-- expected return is compared only with expected-return target bounds;
-- expected MFE is compared only with MFE target bounds;
-- expected MAE is compared only with MAE target bounds;
+- external scanner outputs are decimal returns, so `0.05` means `5%`;
+- active path heads are compared in normalized model space against ATR-unit training-target bounds;
+- expected return is compared only with expected-return ATR-target bounds;
+- expected MFE is compared only with MFE favorable-magnitude ATR-target bounds;
+- expected MAE is compared only with MAE adverse-magnitude ATR-target bounds;
+- canonical decimal-return outputs are separately validated for finite values and MFE/MAE sign contracts;
 - bullish and bearish heads use the matching direction and horizon target distributions;
 - bounds are fitted from training targets only.
 
