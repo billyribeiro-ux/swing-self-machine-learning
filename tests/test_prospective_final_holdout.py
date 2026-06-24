@@ -47,6 +47,9 @@ from swing_rsi.engine.storage import dumps, engine_connection, loads
 PATH_METRIC_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_v1"
 PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
 PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION = "path_metric_magnitude_sign_mapping_v1"
+PATH_HEAD_CAPABILITY_ACTIVE = "ACTIVE"
+PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR = "RETIRED_UNSUITABLE_ESTIMATOR"
+LINEAR_PATH_HEAD_RETIREMENT_REASON = "linear_family_path_head_retired_unsuitable_estimator"
 
 
 class ConstantClassifier:
@@ -177,6 +180,9 @@ def _policy_metrics(
         "mae_feature_screen_schema_version": PATH_METRIC_SCREEN_SCHEMA_VERSION,
         "mae_screening_manifest_hash": "mae-manifest",
         "mfe_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "mfe_path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+        "mfe_path_head_retirement_schema_version": "",
+        "mfe_path_head_retirement_reason": "",
         "mfe_external_target_name": "label_bull_mfe_10",
         "mfe_internal_magnitude_target_name": "label_bull_mfe_10__favorable_magnitude",
         "mfe_internal_target_definition": "favorable_magnitude_equals_existing_mfe",
@@ -187,6 +193,9 @@ def _policy_metrics(
         "mfe_calibration_domain_integrity_valid": True,
         "mfe_holdout_domain_integrity_valid": True,
         "mae_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "mae_path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+        "mae_path_head_retirement_schema_version": "",
+        "mae_path_head_retirement_reason": "",
         "mae_external_target_name": "label_bull_mae_10",
         "mae_internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
         "mae_internal_target_definition": "adverse_magnitude_equals_negative_existing_mae",
@@ -282,6 +291,9 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
         path_domain_metadata={
             "mfe": {
                 "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+                "path_head_retirement_schema_version": "",
+                "path_head_retirement_reason": "",
                 "head_name": "mfe",
                 "external_target_name": "label_bull_mfe_10",
                 "internal_magnitude_target_name": "label_bull_mfe_10__favorable_magnitude",
@@ -294,6 +306,9 @@ def _bundle(model_id: str, metrics: dict[str, object]) -> ModelBundle:
             },
             "mae": {
                 "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+                "path_head_retirement_schema_version": "",
+                "path_head_retirement_reason": "",
                 "head_name": "mae",
                 "external_target_name": "label_bull_mae_10",
                 "internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
@@ -929,6 +944,40 @@ def test_no_eligible_models_creates_no_fake_enrollment(tmp_path: Path) -> None:
     assert report.run is None
     assert not list_final_holdout_runs(tmp_path / "state" / "engine.sqlite3")
     assert "naive_control_excluded" in report.blockers_by_model["model-naive-only"]
+
+
+def test_retired_logistic_path_heads_block_final_holdout_enrollment(tmp_path: Path) -> None:
+    metrics = _policy_metrics()
+    for prefix in ("mfe", "mae"):
+        metrics[f"{prefix}_path_head_capability_state"] = (
+            PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+        )
+        metrics[f"{prefix}_path_head_retirement_schema_version"] = (
+            "linear_family_path_head_retirement_v1"
+        )
+        metrics[f"{prefix}_path_head_retirement_reason"] = LINEAR_PATH_HEAD_RETIREMENT_REASON
+        metrics[f"{prefix}_magnitude_estimator_class"] = "RetiredPathHeadModel"
+        metrics[f"{prefix}_magnitude_estimator_loss"] = "not_applicable_retired_path_head"
+    _register(
+        tmp_path,
+        _registered_model(
+            tmp_path,
+            model_id="model-logistic-retired-path",
+            family="logistic_regression",
+            metrics=metrics,
+        ),
+    )
+
+    report = initialize_final_holdout_run(
+        tmp_path,
+        generation="latest",
+        feature_panel=_feature_panel(["2026-06-18"]),
+    )
+
+    assert report.run is None
+    blockers = report.blockers_by_model["model-logistic-retired-path"]
+    assert "mfe_path_head_retired_unsuitable_estimator" in blockers
+    assert "mae_path_head_retired_unsuitable_estimator" in blockers
 
 
 def test_existing_historical_session_without_provenance_is_blocked(tmp_path: Path) -> None:

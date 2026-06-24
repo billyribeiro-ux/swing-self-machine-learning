@@ -520,6 +520,7 @@ def render_page() -> None:
                         f"{prefix}_top_25",
                         f"{prefix}_permutation",
                         f"{prefix}_domain",
+                        f"{prefix}_path_head",
                         f"{prefix}_external_target",
                         f"{prefix}_internal_magnitude",
                         f"{prefix}_internal_target",

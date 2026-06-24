@@ -43,6 +43,8 @@ PATH_METRIC_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_
 PATH_METRIC_SCREEN_PREFIXES = ("expected_return", "mfe", "mae")
 PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
 PATH_MAGNITUDE_DOMAIN_PREFIXES = ("mfe", "mae")
+PATH_HEAD_CAPABILITY_ACTIVE = "ACTIVE"
+PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR = "RETIRED_UNSUITABLE_ESTIMATOR"
 
 
 @dataclass(frozen=True)
@@ -333,8 +335,13 @@ def _path_magnitude_domain_blocker(model: RegisteredModel) -> str | None:
     missing: list[str] = []
     for prefix in PATH_MAGNITUDE_DOMAIN_PREFIXES:
         schema = str(model.metrics.get(f"{prefix}_domain_schema_version") or "")
+        capability_state = str(model.metrics.get(f"{prefix}_path_head_capability_state") or "")
         estimator_hash = str(model.metrics.get(f"{prefix}_magnitude_estimator_hash") or "")
         mapping_version = str(model.metrics.get(f"{prefix}_prediction_mapping_version") or "")
+        if capability_state == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR:
+            return f"{prefix}:required_path_head_retired_unsuitable_estimator"
+        if capability_state != PATH_HEAD_CAPABILITY_ACTIVE:
+            missing.append(f"{prefix}:capability_state")
         if schema != PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION:
             missing.append(f"{prefix}:schema")
         if not estimator_hash:

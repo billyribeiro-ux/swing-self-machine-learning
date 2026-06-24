@@ -85,6 +85,11 @@ TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS = 3
 TEMPORAL_FOLD_STABILITY_THRESHOLD = 0.50
 PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
 PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION = "path_metric_magnitude_sign_mapping_v1"
+LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION = "linear_family_path_head_retirement_v1"
+PATH_HEAD_CAPABILITY_ACTIVE = "ACTIVE"
+PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR = "RETIRED_UNSUITABLE_ESTIMATOR"
+LINEAR_PATH_HEAD_RETIREMENT_REASON = "linear_family_path_head_retired_unsuitable_estimator"
+LINEAR_PATH_HEAD_RETIREMENT_FAMILIES = frozenset({"logistic_regression"})
 
 
 @dataclass(frozen=True)
@@ -264,6 +269,23 @@ def bundle_path_domain_metadata(bundle: ModelBundle, head: str) -> dict[str, obj
     return dict(value) if isinstance(value, dict) else {}
 
 
+def path_head_capability_state(bundle: ModelBundle, head: str) -> str:
+    metadata = bundle_path_domain_metadata(bundle, head)
+    state = str(metadata.get("path_head_capability_state") or "")
+    if state:
+        return state
+    if str(metadata.get("domain_schema_version") or "") == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION:
+        return PATH_HEAD_CAPABILITY_ACTIVE
+    return "UNKNOWN"
+
+
+def path_head_is_retired(bundle: ModelBundle, head: str) -> bool:
+    return (
+        path_head_capability_state(bundle, head)
+        == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+
+
 def bundle_tbs_calibration_metadata(bundle: ModelBundle) -> dict[str, object]:
     metrics = getattr(bundle, "metrics", {}) or {}
     schema = metrics.get("target_before_stop_calibration_governance_schema")
@@ -388,6 +410,31 @@ class MeanMagnitudeRegressor(RegressorMixin, BaseEstimator):  # type: ignore[mis
         return np.full(len(frame), self.mean_, dtype=float)
 
 
+class RetiredPathHeadModel(RegressorMixin, BaseEstimator):  # type: ignore[misc]
+    """Explicit placeholder for a required path head retired before estimator fitting."""
+
+    def __init__(
+        self,
+        *,
+        family: str,
+        head_name: str,
+        reason: str = LINEAR_PATH_HEAD_RETIREMENT_REASON,
+    ) -> None:
+        self.family = family
+        self.head_name = head_name
+        self.reason = reason
+        self.capability_state = PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+        self.schema_version = LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION
+
+    def fit(self, frame: pd.DataFrame, target: pd.Series) -> RetiredPathHeadModel:
+        _ = (frame, target)
+        raise RuntimeError(self.reason)
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        _ = frame
+        raise RuntimeError(self.reason)
+
+
 def _model_step(model: Any) -> Any:
     if isinstance(model, Pipeline):
         return model.steps[-1][1]
@@ -507,6 +554,8 @@ def build_path_magnitude_estimator(
     head_name: str,
     seed: int,
 ) -> tuple[Pipeline, PathMagnitudeEstimatorSpec]:
+    if family in LINEAR_PATH_HEAD_RETIREMENT_FAMILIES and head_name in PATH_MAGNITUDE_HEADS:
+        raise ValueError(LINEAR_PATH_HEAD_RETIREMENT_REASON)
     if family == "naive_base_rate":
         estimator = Pipeline(
             [
@@ -911,6 +960,28 @@ def _prediction_sanity_metrics(
         calibration_prediction=calibration_prediction,
         holdout_prediction=holdout_prediction,
     )
+
+
+def _mean_absolute_error_or_nan(target: pd.Series, prediction: pd.Series) -> float:
+    target_values = pd.to_numeric(target, errors="coerce").to_numpy(dtype=float)
+    prediction_values = pd.to_numeric(prediction, errors="coerce").to_numpy(dtype=float)
+    if len(target_values) != len(prediction_values):
+        return math.nan
+    mask = np.isfinite(target_values) & np.isfinite(prediction_values)
+    if not mask.all():
+        return math.nan
+    return float(mean_absolute_error(target_values, prediction_values))
+
+
+def _rmse_or_nan(target: pd.Series, prediction: pd.Series) -> float:
+    target_values = pd.to_numeric(target, errors="coerce").to_numpy(dtype=float)
+    prediction_values = pd.to_numeric(prediction, errors="coerce").to_numpy(dtype=float)
+    if len(target_values) != len(prediction_values):
+        return math.nan
+    mask = np.isfinite(target_values) & np.isfinite(prediction_values)
+    if not mask.all():
+        return math.nan
+    return float(mean_squared_error(target_values, prediction_values) ** 0.5)
 
 
 def _selection_diagnostics(
@@ -1322,6 +1393,22 @@ def _path_magnitude_prediction(
     )
 
 
+def _should_retire_path_head(family: str, head_name: str) -> bool:
+    return family in LINEAR_PATH_HEAD_RETIREMENT_FAMILIES and head_name in PATH_MAGNITUDE_HEADS
+
+
+def _retired_path_prediction(index: pd.Index, *, head_name: str) -> PathMagnitudePrediction:
+    magnitude = pd.Series(np.full(len(index), math.nan), index=index, dtype=float)
+    canonical = pd.Series(np.full(len(index), math.nan), index=index, dtype=float)
+    return PathMagnitudePrediction(
+        internal_magnitude=magnitude,
+        canonical_signed=canonical,
+        nonfinite_count=int(len(index) * 2),
+        magnitude_domain_violation_count=0,
+        signed_domain_violation_count=0,
+    )
+
+
 def _path_domain_metadata(
     *,
     head_name: str,
@@ -1341,6 +1428,10 @@ def _path_domain_metadata(
     )
     return {
         "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+        "path_head_retirement_schema_version": "",
+        "path_head_retirement_reason": "",
+        "path_head_required_for_promotion": True,
         "head_name": head_name,
         "external_target_name": external_target_name,
         "internal_magnitude_target_name": str(magnitude_target.name),
@@ -1367,6 +1458,66 @@ def _path_domain_metadata(
     }
 
 
+def _retired_path_domain_metadata(
+    *,
+    family: str,
+    head_name: str,
+    external_target_name: str,
+    magnitude_target: pd.Series,
+    selected_feature_manifest_hash: str,
+    calibration_prediction: PathMagnitudePrediction,
+    holdout_prediction: PathMagnitudePrediction,
+) -> dict[str, object]:
+    target_values = pd.to_numeric(magnitude_target, errors="coerce")
+    internal_definition = (
+        "favorable_magnitude_equals_existing_mfe"
+        if head_name == MFE_HEAD
+        else "adverse_magnitude_equals_negative_existing_mae"
+    )
+    estimator_payload: dict[str, object] = {
+        "schema_version": LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION,
+        "family": family,
+        "head_name": head_name,
+        "capability_state": PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
+        "reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+    }
+    return {
+        "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "path_head_capability_state": PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
+        "path_head_retirement_schema_version": LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION,
+        "path_head_retirement_reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+        "path_head_required_for_promotion": True,
+        "head_name": head_name,
+        "external_target_name": external_target_name,
+        "internal_magnitude_target_name": str(magnitude_target.name),
+        "internal_target_definition": internal_definition,
+        "estimator_class": "RetiredPathHeadModel",
+        "estimator_loss": "not_applicable_retired_path_head",
+        "estimator_hyperparameters": estimator_payload,
+        "selected_feature_manifest_hash": selected_feature_manifest_hash,
+        "preprocessing_hash": "",
+        "estimator_hash": configuration_hash(estimator_payload),
+        "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+        "transformation_chain": (
+            f"{external_target_name} -> {magnitude_target.name} -> "
+            "RETIRED_UNSUITABLE_ESTIMATOR -> no_prediction"
+        ),
+        "training_target_min": _series_min(target_values),
+        "training_target_max": _series_max(target_values),
+        "training_target_positive_count": int((target_values > 0.0).sum()),
+        "convergence_diagnostics": {
+            "estimator_class": "RetiredPathHeadModel",
+            "converged": False,
+            "retired": True,
+            "reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+        },
+        "calibration_domain_diagnostics": calibration_prediction.diagnostics(
+            f"{head_name}_calibration"
+        ),
+        "holdout_domain_diagnostics": holdout_prediction.diagnostics(f"{head_name}_holdout"),
+    }
+
+
 def _path_domain_metric_payload(
     *,
     head_name: str,
@@ -1384,6 +1535,15 @@ def _path_domain_metric_payload(
     training_positive = metadata.get("training_target_positive_count")
     return {
         f"{prefix}_domain_schema_version": str(metadata.get("domain_schema_version") or ""),
+        f"{prefix}_path_head_capability_state": str(
+            metadata.get("path_head_capability_state") or ""
+        ),
+        f"{prefix}_path_head_retirement_schema_version": str(
+            metadata.get("path_head_retirement_schema_version") or ""
+        ),
+        f"{prefix}_path_head_retirement_reason": str(
+            metadata.get("path_head_retirement_reason") or ""
+        ),
         f"{prefix}_external_target_name": str(metadata.get("external_target_name") or ""),
         f"{prefix}_internal_magnitude_target_name": str(
             metadata.get("internal_magnitude_target_name") or ""
@@ -2182,6 +2342,27 @@ def _build_gate_results(
             evidence="prediction_ood_governance_v2",
         )
         if head in PATH_MAGNITUDE_HEADS:
+            capability_state = str(metrics.get(f"{head}_path_head_capability_state") or "")
+            capability_active = capability_state == PATH_HEAD_CAPABILITY_ACTIVE
+            add(
+                f"{head}_required_path_head_active",
+                f"{head_title} Required Path Head Active",
+                "prediction sanity",
+                f"regression:{head}",
+                f"{head}_path_head_capability_state",
+                PATH_HEAD_CAPABILITY_ACTIVE,
+                "equals",
+                capability_state,
+                _status_from_bool(capability_active),
+                True,
+                f"{head_title} required path head is active."
+                if capability_active
+                else (
+                    f"{head_title} required path head is not active: "
+                    f"{metrics.get(f'{head}_path_head_retirement_reason') or capability_state}."
+                ),
+                evidence=LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION,
+            )
             schema_valid = (
                 metrics.get(f"{head}_domain_schema_version") == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
             )
@@ -2471,16 +2652,28 @@ def _train_family(
     mfe_feature_columns = mfe_screen.selected_features
     mae_feature_columns = mae_screen.selected_features
     return_model = plugin.regressor_factory(config.random_seed)
-    mfe_model, mfe_estimator_spec = build_path_magnitude_estimator(
-        family=family,
-        head_name=MFE_HEAD,
-        seed=config.random_seed + 1,
-    )
-    mae_model, mae_estimator_spec = build_path_magnitude_estimator(
-        family=family,
-        head_name=MAE_HEAD,
-        seed=config.random_seed + 2,
-    )
+    mfe_retired = _should_retire_path_head(family, MFE_HEAD)
+    mae_retired = _should_retire_path_head(family, MAE_HEAD)
+    mfe_model: Any
+    mae_model: Any
+    mfe_estimator_spec: PathMagnitudeEstimatorSpec | None = None
+    mae_estimator_spec: PathMagnitudeEstimatorSpec | None = None
+    if mfe_retired:
+        mfe_model = RetiredPathHeadModel(family=family, head_name=MFE_HEAD)
+    else:
+        mfe_model, mfe_estimator_spec = build_path_magnitude_estimator(
+            family=family,
+            head_name=MFE_HEAD,
+            seed=config.random_seed + 1,
+        )
+    if mae_retired:
+        mae_model = RetiredPathHeadModel(family=family, head_name=MAE_HEAD)
+    else:
+        mae_model, mae_estimator_spec = build_path_magnitude_estimator(
+            family=family,
+            head_name=MAE_HEAD,
+            seed=config.random_seed + 2,
+        )
     return_model.fit(path_screen_train[list(return_feature_columns)], path_screen_train[returns])
     mfe_train_features = path_screen_train[list(mfe_feature_columns)]
     mae_train_features = path_screen_train[list(mae_feature_columns)]
@@ -2494,23 +2687,33 @@ def _train_family(
         magnitude_target=mae_magnitude_train,
         head_name=MAE_HEAD,
     )
-    mfe_model.fit(mfe_train_features, mfe_magnitude_train)
-    mae_model.fit(mae_train_features, mae_magnitude_train)
+    if not mfe_retired:
+        mfe_model.fit(mfe_train_features, mfe_magnitude_train)
+    if not mae_retired:
+        mae_model.fit(mae_train_features, mae_magnitude_train)
     calibration_expected_return = pd.Series(
         return_model.predict(calibration[list(return_feature_columns)]),
         index=calibration.index,
     )
-    calibration_mfe_prediction = _path_magnitude_prediction(
-        mfe_model,
-        calibration[list(mfe_feature_columns)],
-        head_name=MFE_HEAD,
-        index=calibration.index,
+    calibration_mfe_prediction = (
+        _retired_path_prediction(calibration.index, head_name=MFE_HEAD)
+        if mfe_retired
+        else _path_magnitude_prediction(
+            mfe_model,
+            calibration[list(mfe_feature_columns)],
+            head_name=MFE_HEAD,
+            index=calibration.index,
+        )
     )
-    calibration_mae_prediction = _path_magnitude_prediction(
-        mae_model,
-        calibration[list(mae_feature_columns)],
-        head_name=MAE_HEAD,
-        index=calibration.index,
+    calibration_mae_prediction = (
+        _retired_path_prediction(calibration.index, head_name=MAE_HEAD)
+        if mae_retired
+        else _path_magnitude_prediction(
+            mae_model,
+            calibration[list(mae_feature_columns)],
+            head_name=MAE_HEAD,
+            index=calibration.index,
+        )
     )
     calibration_expected_mfe = calibration_mfe_prediction.canonical_signed
     calibration_expected_mae = calibration_mae_prediction.canonical_signed
@@ -2518,17 +2721,25 @@ def _train_family(
         return_model.predict(holdout[list(return_feature_columns)]),
         index=holdout.index,
     )
-    holdout_mfe_prediction = _path_magnitude_prediction(
-        mfe_model,
-        holdout[list(mfe_feature_columns)],
-        head_name=MFE_HEAD,
-        index=holdout.index,
+    holdout_mfe_prediction = (
+        _retired_path_prediction(holdout.index, head_name=MFE_HEAD)
+        if mfe_retired
+        else _path_magnitude_prediction(
+            mfe_model,
+            holdout[list(mfe_feature_columns)],
+            head_name=MFE_HEAD,
+            index=holdout.index,
+        )
     )
-    holdout_mae_prediction = _path_magnitude_prediction(
-        mae_model,
-        holdout[list(mae_feature_columns)],
-        head_name=MAE_HEAD,
-        index=holdout.index,
+    holdout_mae_prediction = (
+        _retired_path_prediction(holdout.index, head_name=MAE_HEAD)
+        if mae_retired
+        else _path_magnitude_prediction(
+            mae_model,
+            holdout[list(mae_feature_columns)],
+            head_name=MAE_HEAD,
+            index=holdout.index,
+        )
     )
     expected_mfe = holdout_mfe_prediction.canonical_signed
     expected_mae = holdout_mae_prediction.canonical_signed
@@ -2622,12 +2833,12 @@ def _train_family(
         holdout,
         feature_columns,
     )
-    holdout_mae = float(mean_absolute_error(holdout[returns], expected_return))
-    holdout_rmse = float(mean_squared_error(holdout[returns], expected_return) ** 0.5)
-    holdout_mfe_mae = float(mean_absolute_error(holdout[mfe], expected_mfe))
-    holdout_mfe_rmse = float(mean_squared_error(holdout[mfe], expected_mfe) ** 0.5)
-    holdout_mae_mae = float(mean_absolute_error(holdout[mae], expected_mae))
-    holdout_mae_rmse = float(mean_squared_error(holdout[mae], expected_mae) ** 0.5)
+    holdout_mae = _mean_absolute_error_or_nan(holdout[returns], expected_return)
+    holdout_rmse = _rmse_or_nan(holdout[returns], expected_return)
+    holdout_mfe_mae = _mean_absolute_error_or_nan(holdout[mfe], expected_mfe)
+    holdout_mfe_rmse = _rmse_or_nan(holdout[mfe], expected_mfe)
+    holdout_mae_mae = _mean_absolute_error_or_nan(holdout[mae], expected_mae)
+    holdout_mae_rmse = _rmse_or_nan(holdout[mae], expected_mae)
     path_permutation_by_head = {
         EXPECTED_RETURN_HEAD: _regression_permutation_importance_by_family(
             regressor=return_model,
@@ -2638,7 +2849,9 @@ def _train_family(
             baseline_mae=holdout_mae,
             seed=config.random_seed + 30,
         ),
-        MFE_HEAD: _regression_permutation_importance_by_family(
+        MFE_HEAD: []
+        if mfe_retired
+        else _regression_permutation_importance_by_family(
             regressor=mfe_model,
             holdout=holdout,
             feature_columns=mfe_feature_columns,
@@ -2648,7 +2861,9 @@ def _train_family(
             seed=config.random_seed + 31,
             prediction_sign=1.0,
         ),
-        MAE_HEAD: _regression_permutation_importance_by_family(
+        MAE_HEAD: []
+        if mae_retired
+        else _regression_permutation_importance_by_family(
             regressor=mae_model,
             holdout=holdout,
             feature_columns=mae_feature_columns,
@@ -2890,22 +3105,42 @@ def _train_family(
         MAE_HEAD: tuple(mae_screen.audit_records()),
     }
     path_domain_metadata = {
-        MFE_HEAD: _path_domain_metadata(
+        MFE_HEAD: _retired_path_domain_metadata(
+            family=family,
+            head_name=MFE_HEAD,
+            external_target_name=mfe,
+            magnitude_target=mfe_magnitude_train,
+            selected_feature_manifest_hash=head_feature_manifests[MFE_HEAD],
+            calibration_prediction=calibration_mfe_prediction,
+            holdout_prediction=holdout_mfe_prediction,
+        )
+        if mfe_retired
+        else _path_domain_metadata(
             head_name=MFE_HEAD,
             external_target_name=mfe,
             magnitude_target=mfe_magnitude_train,
             estimator=mfe_model,
-            spec=mfe_estimator_spec,
+            spec=cast(PathMagnitudeEstimatorSpec, mfe_estimator_spec),
             selected_feature_manifest_hash=head_feature_manifests[MFE_HEAD],
             calibration_prediction=calibration_mfe_prediction,
             holdout_prediction=holdout_mfe_prediction,
         ),
-        MAE_HEAD: _path_domain_metadata(
+        MAE_HEAD: _retired_path_domain_metadata(
+            family=family,
+            head_name=MAE_HEAD,
+            external_target_name=mae,
+            magnitude_target=mae_magnitude_train,
+            selected_feature_manifest_hash=head_feature_manifests[MAE_HEAD],
+            calibration_prediction=calibration_mae_prediction,
+            holdout_prediction=holdout_mae_prediction,
+        )
+        if mae_retired
+        else _path_domain_metadata(
             head_name=MAE_HEAD,
             external_target_name=mae,
             magnitude_target=mae_magnitude_train,
             estimator=mae_model,
-            spec=mae_estimator_spec,
+            spec=cast(PathMagnitudeEstimatorSpec, mae_estimator_spec),
             selected_feature_manifest_hash=head_feature_manifests[MAE_HEAD],
             calibration_prediction=calibration_mae_prediction,
             holdout_prediction=holdout_mae_prediction,
@@ -3632,7 +3867,20 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             domain_schema = str(
                 domain.get("domain_schema_version") or "legacy_unconstrained_path_metric_model"
             )
+            capability_state = str(domain.get("path_head_capability_state") or "")
+            if not capability_state and domain_schema == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION:
+                capability_state = PATH_HEAD_CAPABILITY_ACTIVE
             output[f"{metric_prefix}_domain_schema_version"] = domain_schema
+            output[f"{metric_prefix}_path_head_capability_state"] = capability_state
+            output[f"{metric_prefix}_path_head_retirement_schema_version"] = str(
+                domain.get("path_head_retirement_schema_version") or ""
+            )
+            output[f"{metric_prefix}_path_head_retirement_reason"] = str(
+                domain.get("path_head_retirement_reason") or ""
+            )
+            output[f"{metric_prefix}_path_head_retired"] = (
+                capability_state == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+            )
             output[f"{metric_prefix}_domain_metadata_missing"] = (
                 domain_schema != PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
             )
@@ -3740,6 +3988,10 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     )
     mfe_missing_features = [column for column in mfe_features if column not in frame.columns]
     mfe_domain_metadata = bundle_path_domain_metadata(bundle, MFE_HEAD)
+    mfe_retired = (
+        str(mfe_domain_metadata.get("path_head_capability_state") or "")
+        == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
     mfe_has_domain = (
         str(mfe_domain_metadata.get("domain_schema_version") or "")
         == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
@@ -3747,6 +3999,9 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     mfe_domain_prediction: PathMagnitudePrediction | None = None
     if mfe_missing_features:
         mfe_values = None
+    elif mfe_retired:
+        mfe_domain_prediction = _retired_path_prediction(frame.index, head_name=MFE_HEAD)
+        mfe_values = mfe_domain_prediction.canonical_signed.to_numpy(dtype=float)
     elif mfe_has_domain:
         mfe_domain_prediction = _path_magnitude_prediction(
             bundle.mfe_model,
@@ -3767,6 +4022,10 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     )
     mae_missing_features = [column for column in mae_features if column not in frame.columns]
     mae_domain_metadata = bundle_path_domain_metadata(bundle, MAE_HEAD)
+    mae_retired = (
+        str(mae_domain_metadata.get("path_head_capability_state") or "")
+        == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
     mae_has_domain = (
         str(mae_domain_metadata.get("domain_schema_version") or "")
         == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
@@ -3774,6 +4033,9 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     mae_domain_prediction: PathMagnitudePrediction | None = None
     if mae_missing_features:
         mae_values = None
+    elif mae_retired:
+        mae_domain_prediction = _retired_path_prediction(frame.index, head_name=MAE_HEAD)
+        mae_values = mae_domain_prediction.canonical_signed.to_numpy(dtype=float)
     elif mae_has_domain:
         mae_domain_prediction = _path_magnitude_prediction(
             bundle.mae_model,

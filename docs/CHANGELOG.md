@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added Linear-Family Path-Head Retirement V1: logistic-family artifacts now keep the primary classifier, target-before-stop head, and expected-return regressor active while marking MFE and MAE heads `RETIRED_UNSUITABLE_ESTIMATOR` with explicit retirement metadata and no Tweedie MFE/MAE estimator fitting.
+- Added mandatory required-path-head-active gates, scanner rejection reasons, scanner identity metadata, model-audit fields, promotion blockers, final-holdout enrollment blockers, and dashboard fields for retired path-head capability state.
+- Added regression coverage proving retired logistic MFE/MAE heads are not fitted, remain scanner non-actionable, block promotion/final-holdout enrollment, and leave ExtraTrees/HistGradientBoosting path heads active.
 - Added Domain-Preserving MFE and MAE Magnitude Modeling V1: MFE and MAE now train on nonnegative internal magnitudes, linear-family magnitude heads use Tweedie regression with a log link, HistGradientBoosting magnitude heads use Poisson loss, ExtraTrees trains on nonnegative magnitudes, and naive controls map nonnegative summaries back to canonical signed outputs.
 - Added MFE/MAE domain metadata, estimator hashes, prediction mapping metadata, domain-integrity gates, scanner domain rejection reasons, scanner identity hashes for path-domain metadata, model-audit export fields, and promotion/final-holdout enrollment blockers for missing domain metadata.
 - Added regression coverage for unchanged MFE/MAE labels, nonnegative magnitude targets, nonnegative magnitude predictions across current families, no clipping in prediction mapping, canonical MFE/MAE sign outputs, scanner rejection of missing/invalid domain metadata, and legacy unconstrained artifact readability.

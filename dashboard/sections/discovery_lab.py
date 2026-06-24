@@ -179,6 +179,12 @@ def render_page() -> None:
                         f"{prefix}_screening_configuration_hash"
                     ),
                     "domain_schema": model.metrics.get(f"{prefix}_domain_schema_version", ""),
+                    "path_head_state": model.metrics.get(
+                        f"{prefix}_path_head_capability_state", ""
+                    ),
+                    "retirement_reason": model.metrics.get(
+                        f"{prefix}_path_head_retirement_reason", ""
+                    ),
                     "internal_magnitude_target": model.metrics.get(
                         f"{prefix}_internal_magnitude_target_name", ""
                     ),

@@ -152,6 +152,11 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "mfe_screening_target": metrics.get("mfe_screening_target"),
             "mfe_screening_manifest_hash": metrics.get("mfe_screening_manifest_hash"),
             "mfe_domain_schema_version": metrics.get("mfe_domain_schema_version"),
+            "mfe_path_head_capability_state": metrics.get("mfe_path_head_capability_state"),
+            "mfe_path_head_retirement_schema_version": metrics.get(
+                "mfe_path_head_retirement_schema_version"
+            ),
+            "mfe_path_head_retirement_reason": metrics.get("mfe_path_head_retirement_reason"),
             "mfe_external_target_name": metrics.get("mfe_external_target_name"),
             "mfe_internal_magnitude_target_name": metrics.get("mfe_internal_magnitude_target_name"),
             "mfe_internal_target_definition": metrics.get("mfe_internal_target_definition"),
@@ -180,6 +185,11 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "mae_screening_target": metrics.get("mae_screening_target"),
             "mae_screening_manifest_hash": metrics.get("mae_screening_manifest_hash"),
             "mae_domain_schema_version": metrics.get("mae_domain_schema_version"),
+            "mae_path_head_capability_state": metrics.get("mae_path_head_capability_state"),
+            "mae_path_head_retirement_schema_version": metrics.get(
+                "mae_path_head_retirement_schema_version"
+            ),
+            "mae_path_head_retirement_reason": metrics.get("mae_path_head_retirement_reason"),
             "mae_external_target_name": metrics.get("mae_external_target_name"),
             "mae_internal_magnitude_target_name": metrics.get("mae_internal_magnitude_target_name"),
             "mae_internal_target_definition": metrics.get("mae_internal_target_definition"),

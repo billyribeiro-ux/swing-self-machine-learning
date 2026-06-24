@@ -30,8 +30,11 @@ from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol
 from swing_rsi.engine.manifest import hash_file
 from swing_rsi.engine.models import (
     EXPECTED_RETURN_HEAD,
+    LINEAR_PATH_HEAD_RETIREMENT_REASON,
     MAE_HEAD,
     MFE_HEAD,
+    PATH_HEAD_CAPABILITY_ACTIVE,
+    PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
     PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
     PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
     PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
@@ -39,6 +42,7 @@ from swing_rsi.engine.models import (
     BaseRateClassifier,
     DiscoveryConfig,
     ModelBundle,
+    RetiredPathHeadModel,
     _path_magnitude_prediction,
     build_path_magnitude_estimator,
     discover_models,
@@ -508,8 +512,30 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
     assert learned.metrics["mae_external_target_name"] == "label_bull_mae_10"
     assert learned.metrics["mfe_domain_schema_version"] == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
     assert learned.metrics["mae_domain_schema_version"] == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+    assert learned.metrics["mfe_path_head_capability_state"] == (
+        PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    assert learned.metrics["mae_path_head_capability_state"] == (
+        PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    assert learned.metrics["mfe_path_head_retirement_reason"] == (
+        LINEAR_PATH_HEAD_RETIREMENT_REASON
+    )
+    assert learned.metrics["mae_path_head_retirement_reason"] == (
+        LINEAR_PATH_HEAD_RETIREMENT_REASON
+    )
+    assert learned.metrics["mfe_magnitude_estimator_class"] == "RetiredPathHeadModel"
+    assert learned.metrics["mae_magnitude_estimator_class"] == "RetiredPathHeadModel"
+    assert "TweedieRegressor" not in str(learned.metrics["mfe_magnitude_domain_metadata_json"])
+    assert "TweedieRegressor" not in str(learned.metrics["mae_magnitude_domain_metadata_json"])
+    assert isinstance(bundle.mfe_model, RetiredPathHeadModel)
+    assert isinstance(bundle.mae_model, RetiredPathHeadModel)
     assert learned.metrics["mfe_holdout_signed_domain_violation_count"] == 0
     assert learned.metrics["mae_holdout_signed_domain_violation_count"] == 0
+    gate_by_id = {gate.gate_id: gate for gate in learned.gate_results}
+    assert gate_by_id["mfe_required_path_head_active"].status == "FAIL"
+    assert gate_by_id["mae_required_path_head_active"].status == "FAIL"
+    assert promotion_eligibility(learned.gate_results).eligible is False
     assert learned.metrics["expected_return_feature_screen_schema_version"] == (
         PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION
     )
@@ -523,6 +549,12 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
         learned.metrics["expected_return_screening_manifest_hash"]
         == bundle.head_feature_manifests["expected_return"]
     )
+    nonlinear = next(model for model in result.registered_models if model.family == "extra_trees")
+    nonlinear_bundle = load_model_bundle(nonlinear.artifact_path)
+    assert nonlinear.metrics["mfe_path_head_capability_state"] == PATH_HEAD_CAPABILITY_ACTIVE
+    assert nonlinear.metrics["mae_path_head_capability_state"] == PATH_HEAD_CAPABILITY_ACTIVE
+    assert not isinstance(nonlinear_bundle.mfe_model, RetiredPathHeadModel)
+    assert not isinstance(nonlinear_bundle.mae_model, RetiredPathHeadModel)
 
 
 def test_drift_report_flags_shift_without_mutating_models() -> None:
@@ -638,6 +670,9 @@ def _path_domain_metrics() -> dict[str, object]:
         payload.update(
             {
                 f"{head}_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                f"{head}_path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+                f"{head}_path_head_retirement_schema_version": "",
+                f"{head}_path_head_retirement_reason": "",
                 f"{head}_external_target_name": external_target,
                 f"{head}_internal_magnitude_target_name": internal_target,
                 f"{head}_internal_target_definition": definition,
@@ -875,6 +910,9 @@ def _bundle(
             {
                 MFE_HEAD: {
                     "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                    "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+                    "path_head_retirement_schema_version": "",
+                    "path_head_retirement_reason": "",
                     "head_name": MFE_HEAD,
                     "external_target_name": "label_bull_mfe_10",
                     "internal_magnitude_target_name": ("label_bull_mfe_10__favorable_magnitude"),
@@ -887,6 +925,9 @@ def _bundle(
                 },
                 MAE_HEAD: {
                     "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                    "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+                    "path_head_retirement_schema_version": "",
+                    "path_head_retirement_reason": "",
                     "head_name": MAE_HEAD,
                     "external_target_name": "label_bull_mae_10",
                     "internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
@@ -1044,9 +1085,51 @@ def test_path_metric_heads_receive_own_selected_columns() -> None:
     assert prediction["mae_feature_manifest_hash"] == "mae-manifest"
 
 
+def test_predict_bundle_marks_retired_logistic_path_heads_without_predicting() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        mfe_model=RetiredPathHeadModel(family="logistic_regression", head_name=MFE_HEAD),
+        mae_model=RetiredPathHeadModel(family="logistic_regression", head_name=MAE_HEAD),
+    )
+    metadata = {head: dict(value) for head, value in bundle.path_domain_metadata.items()}
+    for head in (MFE_HEAD, MAE_HEAD):
+        metadata[head].update(
+            {
+                "path_head_capability_state": (PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR),
+                "path_head_retirement_schema_version": "linear_family_path_head_retirement_v1",
+                "path_head_retirement_reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+                "estimator_class": "RetiredPathHeadModel",
+                "estimator_loss": "not_applicable_retired_path_head",
+            }
+        )
+    retired_bundle = replace(
+        bundle,
+        family="logistic_regression",
+        path_domain_metadata=metadata,
+    )
+
+    prediction = predict_bundle(retired_bundle, frame).iloc[0]
+
+    assert bool(prediction["mfe_path_head_retired"]) is True
+    assert bool(prediction["mae_path_head_retired"]) is True
+    assert prediction["mfe_path_head_retirement_reason"] == LINEAR_PATH_HEAD_RETIREMENT_REASON
+    assert prediction["mae_path_head_retirement_reason"] == LINEAR_PATH_HEAD_RETIREMENT_REASON
+    assert pd.isna(prediction["expected_mfe"])
+    assert pd.isna(prediction["expected_mae"])
+    assert bool(prediction["expected_mfe_magnitude_prediction_invalid"]) is True
+    assert bool(prediction["expected_mae_magnitude_prediction_invalid"]) is True
+
+
 @pytest.mark.parametrize(
     "family",
-    ["naive_base_rate", "logistic_regression", "hist_gradient_boosting", "extra_trees"],
+    ["naive_base_rate", "hist_gradient_boosting", "extra_trees"],
 )
 @pytest.mark.parametrize("head", [MFE_HEAD, MAE_HEAD])
 def test_path_magnitude_estimators_emit_nonnegative_magnitudes(
@@ -1068,10 +1151,14 @@ def test_path_magnitude_estimators_emit_nonnegative_magnitudes(
     assert spec.schema_version == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
     assert np.isfinite(prediction).all()
     assert (prediction >= 0.0).all()
-    if family == "logistic_regression":
-        assert spec.estimator_class == "TweedieRegressor"
     if family == "hist_gradient_boosting":
         assert spec.loss == "poisson"
+
+
+@pytest.mark.parametrize("head", [MFE_HEAD, MAE_HEAD])
+def test_logistic_path_magnitude_estimator_factory_refuses_retired_heads(head: str) -> None:
+    with pytest.raises(ValueError, match=LINEAR_PATH_HEAD_RETIREMENT_REASON):
+        build_path_magnitude_estimator(family="logistic_regression", head_name=head, seed=17)
 
 
 def test_predict_bundle_rejects_invalid_magnitude_without_clipping() -> None:
@@ -1289,6 +1376,52 @@ def test_scanner_rejects_missing_path_domain_metadata_explicitly(tmp_path: Path)
     assert "mae_domain_metadata_missing" in row["exclusion_reason"]
     assert bool(row["mfe_domain_metadata_missing"]) is True
     assert bool(row["mae_domain_metadata_missing"]) is True
+
+
+def test_scanner_rejects_retired_logistic_path_heads_explicitly(tmp_path: Path) -> None:
+    bundle = _bundle(
+        model_id="model-a",
+        mfe_model=RetiredPathHeadModel(family="logistic_regression", head_name=MFE_HEAD),
+        mae_model=RetiredPathHeadModel(family="logistic_regression", head_name=MAE_HEAD),
+    )
+    metadata = {head: dict(value) for head, value in bundle.path_domain_metadata.items()}
+    for head in (MFE_HEAD, MAE_HEAD):
+        metadata[head].update(
+            {
+                "path_head_capability_state": (PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR),
+                "path_head_retirement_schema_version": "linear_family_path_head_retirement_v1",
+                "path_head_retirement_reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+                "estimator_class": "RetiredPathHeadModel",
+                "estimator_loss": "not_applicable_retired_path_head",
+            }
+        )
+    retired_bundle = replace(
+        bundle,
+        family="logistic_regression",
+        path_domain_metadata=metadata,
+    )
+
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(retired_bundle,),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert f"mfe_{LINEAR_PATH_HEAD_RETIREMENT_REASON}" in row["exclusion_reason"]
+    assert f"mae_{LINEAR_PATH_HEAD_RETIREMENT_REASON}" in row["exclusion_reason"]
+    assert row["mfe_path_head_capability_state"] == (
+        PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    assert row["mae_path_head_capability_state"] == (
+        PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
 
 
 def test_scanner_rejects_invalid_path_magnitude_predictions_explicitly(tmp_path: Path) -> None:
@@ -2155,7 +2288,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 7
+    assert metadata["scanner_identity_schema_version"] == 8
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
@@ -2199,6 +2332,14 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     assert (
         identity["path_metric_domain_metadata"]["model-a"]["mae"]["prediction_mapping_version"]
         == PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mfe"]["path_head_capability_state"]
+        == PATH_HEAD_CAPABILITY_ACTIVE
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"]["path_head_capability_state"]
+        == PATH_HEAD_CAPABILITY_ACTIVE
     )
     assert identity["effective_selection_policies"]["model-a"]["expected_return_threshold"] == 0.001
     assert identity["raw_scanner_config"]["minimum_dollar_volume"] == 5_000_000.0

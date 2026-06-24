@@ -205,3 +205,9 @@ Reason: Holdout selection, live scanner actionability, scanner caps, and portfol
 Decision: Preserve historical MFE and MAE labels unchanged, but train MFE on favorable magnitude and MAE on adverse magnitude under `path_metric_magnitude_domain_v1`. Linear-family path-magnitude heads use Tweedie regression with a log link, HistGradientBoosting uses Poisson loss, ExtraTrees trains directly on nonnegative magnitudes, and naive controls use nonnegative magnitude summaries.
 
 Reason: MFE is physically nonnegative and MAE is physically nonpositive. The previous unconstrained path regressors could emit negative MFE or positive MAE predictions. Domain correctness must be achieved by target representation and estimator choice, not post-hoc clipping.
+
+## 2026-06-24 — Linear-family path MFE/MAE heads are retired
+
+Decision: Logistic-family model artifacts keep the primary positive-return classifier, target-before-stop classifier, and expected-return regressor active, but mark MFE and MAE path heads `RETIRED_UNSUITABLE_ESTIMATOR` under `linear_family_path_head_retirement_v1`. They fit no Tweedie MFE/MAE estimator and fail mandatory required-path-head-active promotion gates. ExtraTrees and HistGradientBoosting path heads remain active under the existing magnitude-domain contract.
+
+Reason: The baseline domain-preserving generation still showed the linear path heads as unsuitable for required MFE/MAE magnitude modeling. Retiring the unsuitable heads is safer than preserving a formally domain-valid but unsuitable estimator, and it keeps scanner actionability, promotion, and prospective final-holdout enrollment aligned with required path-head availability.

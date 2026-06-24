@@ -13,8 +13,10 @@ import pandas as pd
 from swing_rsi.engine.attribution import explain_candidate
 from swing_rsi.engine.models import (
     EXPECTED_RETURN_HEAD,
+    LINEAR_PATH_HEAD_RETIREMENT_REASON,
     MAE_HEAD,
     MFE_HEAD,
+    PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
     PATH_MAGNITUDE_HEADS,
     PATH_METRIC_HEADS,
     TARGET_BEFORE_STOP_HEAD,
@@ -43,8 +45,8 @@ from swing_rsi.engine.selection import (
 )
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 7
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v7-path-domain-metadata"
+SCANNER_IDENTITY_SCHEMA_VERSION = 8
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v8-path-head-capability"
 
 
 @dataclass(frozen=True)
@@ -211,6 +213,15 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
             "mae_prediction_sign_contract_failed",
         ),
     ):
+        if (
+            str(item.get(f"{head_name}_path_head_capability_state") or "")
+            == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+        ):
+            retirement_reason = str(
+                item.get(f"{head_name}_path_head_retirement_reason")
+                or LINEAR_PATH_HEAD_RETIREMENT_REASON
+            )
+            rejection_reasons.append(f"{head_name}_{retirement_reason}")
         if bool(item.get(f"{head_name}_domain_metadata_missing", False)):
             rejection_reasons.append(metadata_reason)
         if bool(item.get(f"{output_column}_magnitude_prediction_invalid", False)):
@@ -648,6 +659,11 @@ def run_scanner(
                 "estimator_loss": metadata.get("estimator_loss", ""),
                 "estimator_hash": metadata.get("estimator_hash", ""),
                 "prediction_mapping_version": metadata.get("prediction_mapping_version", ""),
+                "path_head_capability_state": metadata.get("path_head_capability_state", ""),
+                "path_head_retirement_schema_version": metadata.get(
+                    "path_head_retirement_schema_version", ""
+                ),
+                "path_head_retirement_reason": metadata.get("path_head_retirement_reason", ""),
                 "selected_feature_manifest_hash": metadata.get(
                     "selected_feature_manifest_hash", ""
                 ),
@@ -897,6 +913,12 @@ def run_scanner(
                     item.get("mfe_feature_screen_metadata_missing", False)
                 ),
                 "mfe_domain_schema_version": item.get("mfe_domain_schema_version", ""),
+                "mfe_path_head_capability_state": item.get("mfe_path_head_capability_state", ""),
+                "mfe_path_head_retired": bool(item.get("mfe_path_head_retired", False)),
+                "mfe_path_head_retirement_schema_version": item.get(
+                    "mfe_path_head_retirement_schema_version", ""
+                ),
+                "mfe_path_head_retirement_reason": item.get("mfe_path_head_retirement_reason", ""),
                 "mfe_domain_metadata_missing": bool(item.get("mfe_domain_metadata_missing", False)),
                 "mfe_external_target_name": item.get("mfe_external_target_name", ""),
                 "mfe_internal_magnitude_target_name": item.get(
@@ -956,6 +978,12 @@ def run_scanner(
                     item.get("mae_feature_screen_metadata_missing", False)
                 ),
                 "mae_domain_schema_version": item.get("mae_domain_schema_version", ""),
+                "mae_path_head_capability_state": item.get("mae_path_head_capability_state", ""),
+                "mae_path_head_retired": bool(item.get("mae_path_head_retired", False)),
+                "mae_path_head_retirement_schema_version": item.get(
+                    "mae_path_head_retirement_schema_version", ""
+                ),
+                "mae_path_head_retirement_reason": item.get("mae_path_head_retirement_reason", ""),
                 "mae_domain_metadata_missing": bool(item.get("mae_domain_metadata_missing", False)),
                 "mae_external_target_name": item.get("mae_external_target_name", ""),
                 "mae_internal_magnitude_target_name": item.get(
