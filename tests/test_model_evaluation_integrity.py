@@ -590,6 +590,34 @@ def _base_gate_metrics(**overrides: object) -> dict[str, object]:
                 f"{head}_holdout_prediction_nonfinite_count": 0,
             }
         )
+    for head, external_target, internal_target, definition in (
+        (
+            "mfe",
+            "label_bull_mfe_10",
+            "label_bull_mfe_10__favorable_magnitude",
+            "favorable_magnitude_equals_existing_mfe",
+        ),
+        (
+            "mae",
+            "label_bull_mae_10",
+            "label_bull_mae_10__adverse_magnitude",
+            "adverse_magnitude_equals_negative_existing_mae",
+        ),
+    ):
+        metrics.update(
+            {
+                f"{head}_domain_schema_version": "path_metric_magnitude_domain_v1",
+                f"{head}_external_target_name": external_target,
+                f"{head}_internal_magnitude_target_name": internal_target,
+                f"{head}_internal_target_definition": definition,
+                f"{head}_magnitude_estimator_class": "SyntheticRegressor",
+                f"{head}_magnitude_estimator_loss": "synthetic_nonnegative",
+                f"{head}_magnitude_estimator_hash": f"{head}-estimator-hash",
+                f"{head}_prediction_mapping_version": "path_metric_magnitude_sign_mapping_v1",
+                f"{head}_calibration_domain_integrity_valid": True,
+                f"{head}_holdout_domain_integrity_valid": True,
+            }
+        )
     metrics.update(overrides)
     return metrics
 

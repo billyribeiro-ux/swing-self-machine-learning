@@ -16,3 +16,4 @@
 14. What criteria promote a model from candidate/challenger to champion after paper-forward evidence accumulates?
 15. Which scanner quality gates should become mandatory before any champion is deployed without `--include-challengers`?
 16. What minimum paper-forward observation count is required before comparing champion and challenger models?
+17. What minimum prospective final-holdout matured-outcome count, temporal coverage, and concentration limits should be configured as mandatory final-holdout gates?

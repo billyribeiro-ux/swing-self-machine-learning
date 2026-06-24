@@ -141,6 +141,69 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "target_before_stop_screening_manifest_hash": metrics.get(
                 "target_before_stop_screening_manifest_hash"
             ),
+            "expected_return_selected_feature_count": metrics.get(
+                "expected_return_selected_feature_count"
+            ),
+            "expected_return_screening_target": metrics.get("expected_return_screening_target"),
+            "expected_return_screening_manifest_hash": metrics.get(
+                "expected_return_screening_manifest_hash"
+            ),
+            "mfe_selected_feature_count": metrics.get("mfe_selected_feature_count"),
+            "mfe_screening_target": metrics.get("mfe_screening_target"),
+            "mfe_screening_manifest_hash": metrics.get("mfe_screening_manifest_hash"),
+            "mfe_domain_schema_version": metrics.get("mfe_domain_schema_version"),
+            "mfe_external_target_name": metrics.get("mfe_external_target_name"),
+            "mfe_internal_magnitude_target_name": metrics.get("mfe_internal_magnitude_target_name"),
+            "mfe_internal_target_definition": metrics.get("mfe_internal_target_definition"),
+            "mfe_magnitude_estimator_class": metrics.get("mfe_magnitude_estimator_class"),
+            "mfe_magnitude_estimator_loss": metrics.get("mfe_magnitude_estimator_loss"),
+            "mfe_magnitude_estimator_hash": metrics.get("mfe_magnitude_estimator_hash"),
+            "mfe_prediction_mapping_version": metrics.get("mfe_prediction_mapping_version"),
+            "mfe_magnitude_training_target_min": metrics.get("mfe_magnitude_training_target_min"),
+            "mfe_magnitude_training_target_max": metrics.get("mfe_magnitude_training_target_max"),
+            "mfe_holdout_internal_magnitude_prediction_min": metrics.get(
+                "mfe_holdout_internal_magnitude_prediction_min"
+            ),
+            "mfe_holdout_internal_magnitude_prediction_max": metrics.get(
+                "mfe_holdout_internal_magnitude_prediction_max"
+            ),
+            "mfe_holdout_canonical_prediction_min": metrics.get(
+                "mfe_holdout_canonical_prediction_min"
+            ),
+            "mfe_holdout_canonical_prediction_max": metrics.get(
+                "mfe_holdout_canonical_prediction_max"
+            ),
+            "mfe_holdout_signed_domain_violation_count": metrics.get(
+                "mfe_holdout_signed_domain_violation_count"
+            ),
+            "mae_selected_feature_count": metrics.get("mae_selected_feature_count"),
+            "mae_screening_target": metrics.get("mae_screening_target"),
+            "mae_screening_manifest_hash": metrics.get("mae_screening_manifest_hash"),
+            "mae_domain_schema_version": metrics.get("mae_domain_schema_version"),
+            "mae_external_target_name": metrics.get("mae_external_target_name"),
+            "mae_internal_magnitude_target_name": metrics.get("mae_internal_magnitude_target_name"),
+            "mae_internal_target_definition": metrics.get("mae_internal_target_definition"),
+            "mae_magnitude_estimator_class": metrics.get("mae_magnitude_estimator_class"),
+            "mae_magnitude_estimator_loss": metrics.get("mae_magnitude_estimator_loss"),
+            "mae_magnitude_estimator_hash": metrics.get("mae_magnitude_estimator_hash"),
+            "mae_prediction_mapping_version": metrics.get("mae_prediction_mapping_version"),
+            "mae_magnitude_training_target_min": metrics.get("mae_magnitude_training_target_min"),
+            "mae_magnitude_training_target_max": metrics.get("mae_magnitude_training_target_max"),
+            "mae_holdout_internal_magnitude_prediction_min": metrics.get(
+                "mae_holdout_internal_magnitude_prediction_min"
+            ),
+            "mae_holdout_internal_magnitude_prediction_max": metrics.get(
+                "mae_holdout_internal_magnitude_prediction_max"
+            ),
+            "mae_holdout_canonical_prediction_min": metrics.get(
+                "mae_holdout_canonical_prediction_min"
+            ),
+            "mae_holdout_canonical_prediction_max": metrics.get(
+                "mae_holdout_canonical_prediction_max"
+            ),
+            "mae_holdout_signed_domain_violation_count": metrics.get(
+                "mae_holdout_signed_domain_violation_count"
+            ),
             "model_brier": calibration.get("holdout_brier"),
             "naive_brier": calibration.get("naive_brier"),
             "absolute_brier_improvement": calibration.get("absolute_brier_improvement"),
@@ -281,69 +344,105 @@ def _records_frame(
 
 def _feature_screen_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
+    head_metric_prefix = {
+        "target_before_stop": "target_before_stop",
+        "expected_return": "expected_return",
+        "mfe": "mfe",
+        "mae": "mae",
+    }
     for model in models:
         metrics = model.metrics
-        head_columns: dict[str, object] = {}
-        parsed = _safe_json_dict(metrics.get("head_feature_columns_json"))
-        head_columns = parsed
-        primary = head_columns.get("primary_positive_return", [])
-        target = head_columns.get("target_before_stop", [])
-        primary_set = set(primary if isinstance(primary, list) else [])
-        target_set = set(target if isinstance(target, list) else [])
-        overlap = len(primary_set & target_set)
-        union = len(primary_set | target_set)
-        metadata_records = _safe_json_records(
-            metrics.get("target_before_stop_top_25_train_mi_features_json")
-        )
-        audit_records = _safe_json_records(
-            metrics.get("target_before_stop_feature_screen_audit_json")
-        )
-        if not audit_records:
-            rows.append(
-                {
-                    "model_id": model.model_id,
-                    "generation": model.created_at_utc,
-                    "head": "target_before_stop",
-                    "reason": "target_before_stop_feature_screen_not_persisted_for_legacy_artifact",
-                    "primary_feature_count": len(primary_set),
-                    "target_before_stop_feature_count": len(target_set),
-                    "primary_target_overlap_count": overlap,
-                    "primary_target_jaccard": overlap / union if union else 0.0,
-                    "selected_feature_manifest_hash": metrics.get(
-                        "target_before_stop_screening_manifest_hash"
-                    ),
-                    "screen_configuration_hash": metrics.get(
-                        "target_before_stop_screening_configuration_hash"
-                    ),
-                }
-            )
-            continue
-        top_rank_by_feature = {
-            str(record.get("feature")): int(record.get("rank") or 0) for record in metadata_records
+        head_columns = _safe_json_dict(metrics.get("head_feature_columns_json"))
+        feature_sets = {
+            head: set(columns if isinstance(columns, list) else [])
+            for head, columns in head_columns.items()
         }
-        for record in audit_records:
-            rows.append(
-                {
-                    "model_id": model.model_id,
-                    "generation": model.created_at_utc,
-                    "direction": model.direction,
-                    "family": model.family,
-                    "horizon": model.horizon,
-                    "head": "target_before_stop",
-                    "primary_feature_count": len(primary_set),
-                    "target_before_stop_feature_count": len(target_set),
-                    "primary_target_overlap_count": overlap,
-                    "primary_target_jaccard": overlap / union if union else 0.0,
-                    "selected_feature_manifest_hash": metrics.get(
-                        "target_before_stop_screening_manifest_hash"
-                    ),
-                    "screen_configuration_hash": metrics.get(
-                        "target_before_stop_screening_configuration_hash"
-                    ),
-                    "top_25_train_mi_rank": top_rank_by_feature.get(str(record.get("feature")), ""),
-                    **record,
-                }
+        primary_set = feature_sets.get("primary_positive_return", set())
+        tbs_set = feature_sets.get("target_before_stop", set())
+        path_sets = {
+            head: feature_sets.get(head, set()) for head in ("expected_return", "mfe", "mae")
+        }
+        for head, metric_prefix in head_metric_prefix.items():
+            selected_set = feature_sets.get(head, set())
+            primary_overlap = len(selected_set & primary_set)
+            primary_union = len(selected_set | primary_set)
+            tbs_overlap = len(selected_set & tbs_set)
+            tbs_union = len(selected_set | tbs_set)
+            other_path_overlaps = {
+                other_head: len(selected_set & other_set)
+                for other_head, other_set in path_sets.items()
+                if other_head != head
+            }
+            metadata_records = _safe_json_records(
+                metrics.get(f"{metric_prefix}_top_25_train_mi_features_json")
             )
+            audit_records = _safe_json_records(
+                metrics.get(f"{metric_prefix}_feature_screen_audit_json")
+            )
+            manifest = metrics.get(f"{metric_prefix}_screening_manifest_hash")
+            config_hash = metrics.get(f"{metric_prefix}_screening_configuration_hash")
+            if not audit_records:
+                rows.append(
+                    {
+                        "model_id": model.model_id,
+                        "generation": model.created_at_utc,
+                        "direction": model.direction,
+                        "family": model.family,
+                        "horizon": model.horizon,
+                        "head": head,
+                        "reason": (
+                            f"{head}_feature_screen_not_persisted_for_legacy_artifact"
+                            if head == "target_before_stop"
+                            else "legacy_shared_path_feature_screen"
+                        ),
+                        "primary_feature_count": len(primary_set),
+                        "head_feature_count": len(selected_set),
+                        "primary_overlap_count": primary_overlap,
+                        "primary_jaccard": primary_overlap / primary_union
+                        if primary_union
+                        else 0.0,
+                        "target_before_stop_overlap_count": tbs_overlap,
+                        "target_before_stop_jaccard": tbs_overlap / tbs_union if tbs_union else 0.0,
+                        "other_path_overlap_counts_json": json.dumps(
+                            other_path_overlaps, sort_keys=True
+                        ),
+                        "selected_feature_manifest_hash": manifest,
+                        "screen_configuration_hash": config_hash,
+                    }
+                )
+                continue
+            top_rank_by_feature = {
+                str(record.get("feature")): int(record.get("rank") or 0)
+                for record in metadata_records
+            }
+            for record in audit_records:
+                rows.append(
+                    {
+                        "model_id": model.model_id,
+                        "generation": model.created_at_utc,
+                        "direction": model.direction,
+                        "family": model.family,
+                        "horizon": model.horizon,
+                        "head": head,
+                        "primary_feature_count": len(primary_set),
+                        "head_feature_count": len(selected_set),
+                        "primary_overlap_count": primary_overlap,
+                        "primary_jaccard": primary_overlap / primary_union
+                        if primary_union
+                        else 0.0,
+                        "target_before_stop_overlap_count": tbs_overlap,
+                        "target_before_stop_jaccard": tbs_overlap / tbs_union if tbs_union else 0.0,
+                        "other_path_overlap_counts_json": json.dumps(
+                            other_path_overlaps, sort_keys=True
+                        ),
+                        "selected_feature_manifest_hash": manifest,
+                        "screen_configuration_hash": config_hash,
+                        "top_25_train_mi_rank": top_rank_by_feature.get(
+                            str(record.get("feature")), ""
+                        ),
+                        **record,
+                    }
+                )
     return pd.DataFrame(rows)
 
 

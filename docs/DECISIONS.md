@@ -1,5 +1,23 @@
 # Decision Log
 
+## 2026-06-22 — Path-metric heads use target-specific train-only feature screens
+
+Decision: Expected-return, MFE, and MAE regressors now use independent train-only feature screens keyed to their exact continuous path targets. The screens start from the complete eligible numeric feature universe, exclude labels and prohibited metadata, fit missingness/variance/imputation on training rows only, score surviving features with `mutual_info_regression`, prune correlations in score order, and persist separate manifests under `path_metric_target_specific_feature_screen_v1`.
+
+Reason: The path-metric diagnosis found no label or unit defect, but did find that expected return, MFE, and MAE reused the primary positive-return classifier's feature screen. These regression heads predict different targets, so reusing classifier-selected columns can exclude eligible features before target-specific scoring. This correction changes feature selection only; it does not change labels, ATR normalization, regression estimators, losses, target/stop definitions, quality gates, or OOD Governance V2.
+
+## 2026-06-21 — Prospective final-holdout sample sufficiency is precommitted
+
+Decision: Prospective final-holdout runs now freeze sample governance policy `prospective_final_holdout_sample_v1` at run creation. A model becomes ready for final-holdout evaluation only after 100 matured outcomes, 60 distinct signal dates, 126 completed market sessions, 4 calendar months, 20 positive and 20 negative target-before-stop outcomes, valid provenance for every included prediction, zero backfilled predictions, zero unresolved data-integrity events, and unchanged frozen artifacts/governance hashes. Early diagnostics are non-promotable and require 30 matured outcomes and 20 signal dates.
+
+Reason: The sample requirement must be known before prospective outcomes exist. Freezing the policy into each run prevents post-outcome threshold edits, keeps existing runs immutable when global policy changes, and preserves the distinction between evidence status, performance gates, and manual promotion.
+
+## 2026-06-21 — Final holdout is prospective shadow validation only
+
+Decision: The only valid `FINAL_HOLDOUT` evidence is prospective. A model must be frozen and enrolled with artifact hash, feature manifest, selection policy, target-before-stop calibrator, OOD metadata, universe, scanner identity, execution policy, and baseline market date before final-holdout collection starts. No signal with `as_of_date <= baseline_market_date` may enter the run, and later sessions require local ingestion provenance showing they arrived after run creation. Final-holdout events reuse the append-only paper-forward lifecycle under `SHADOW_FINAL_HOLDOUT` and are not live trade recommendations. Evaluation may mark evidence as `FINAL_HOLDOUT`, but mandatory final-holdout gates still decide pass/fail and `NOT_CONFIGURED` sample thresholds block promotion.
+
+Reason: The historical 2016-2026 holdout is now a development holdout because it has been repeatedly inspected during engineering diagnosis. Creating another historical holdout from that same period would not restore final out-of-sample integrity. Prospective collection preserves chronology: predictions are stored before outcomes exist, frozen model identity is auditable, and promotion remains explicit.
+
 ## 2026-06-21 — Promotion requires explicit final-holdout status
 
 Decision: Champion promotion now requires canonical holdout status `FINAL_HOLDOUT`. Discovery artifacts produced from the repeatedly inspected chronological holdout persist `DEVELOPMENT_HOLDOUT`, receive a mandatory `final_holdout_required_for_promotion` gate failure, and cannot become challengers or champions. Missing holdout-status metadata is treated as not final. The manual registry promotion path checks the persisted holdout status before ordinary gate eligibility.
@@ -181,3 +199,9 @@ Reason: Candidate rows must not become paper signals merely because a model has 
 Decision: Candidate policy checks and deterministic candidate ordering live in one shared selection module.
 
 Reason: Holdout selection, live scanner actionability, scanner caps, and portfolio replay must not drift. The canonical order is composite utility descending, symbol ascending, direction ascending, model ID ascending, and stable candidate identity hash ascending.
+
+## 2026-06-22 — MFE and MAE use domain-preserving magnitude models
+
+Decision: Preserve historical MFE and MAE labels unchanged, but train MFE on favorable magnitude and MAE on adverse magnitude under `path_metric_magnitude_domain_v1`. Linear-family path-magnitude heads use Tweedie regression with a log link, HistGradientBoosting uses Poisson loss, ExtraTrees trains directly on nonnegative magnitudes, and naive controls use nonnegative magnitude summaries.
+
+Reason: MFE is physically nonnegative and MAE is physically nonpositive. The previous unconstrained path regressors could emit negative MFE or positive MAE predictions. Domain correctness must be achieved by target representation and estimator choice, not post-hoc clipping.

@@ -10,13 +10,17 @@ import pandas as pd
 from swing_rsi.application.datasets import download_daily_to_raw
 from swing_rsi.application.engine_service import (
     build_autonomous_features,
+    evaluate_final_holdout,
+    final_holdout_status,
     forward_events,
+    initialize_final_holdout,
     list_registered_models,
     promote_registered_model,
     run_daily_cycle,
     run_forward_update,
     run_live_scanner,
     run_model_discovery,
+    update_final_holdout,
     update_universe_data,
 )
 from swing_rsi.application.research_service import run_research
@@ -320,6 +324,75 @@ def command_forward_update(_: argparse.Namespace) -> int:
     return 0
 
 
+def command_final_holdout_init(args: argparse.Namespace) -> int:
+    report = initialize_final_holdout(
+        Path.cwd(),
+        generation=args.generation,
+        research_only=args.research_only,
+    )
+    print(report.message)
+    if report.run is not None:
+        print(f"Run ID: {report.run.run_id}")
+        print(f"Baseline market date: {report.run.baseline_market_date}")
+        print(f"First eligible future signal date: {report.run.first_eligible_future_signal_date}")
+        print(f"Enrolled models: {len(report.enrolled_models):,}")
+        print("Backfilled predictions: 0")
+        print("Matured outcomes: 0")
+    else:
+        print("Enrollment blockers:")
+        for model_id, blockers in sorted(report.blockers_by_model.items()):
+            blocker_text = "; ".join(blockers) if blockers else "none"
+            print(f"- {model_id}: {blocker_text}")
+    return 0
+
+
+def command_final_holdout_update(_: argparse.Namespace) -> int:
+    result = update_final_holdout(Path.cwd())
+    print(f"Processed sessions: {len(result.processed_sessions):,}")
+    if result.processed_sessions:
+        print(", ".join(result.processed_sessions))
+    print(f"Blocked sessions: {len(result.blocked_sessions):,}")
+    for session, reason in sorted(result.blocked_sessions.items()):
+        print(f"- {session}: {reason}")
+    print(f"Events inserted: {result.events_inserted:,}")
+    for path in result.reports:
+        print(f"Report: {path}")
+    return 0
+
+
+def command_final_holdout_status(_: argparse.Namespace) -> int:
+    status = final_holdout_status(Path.cwd())
+    if status.empty:
+        print("No prospective final-holdout runs exist.")
+        return 0
+    print("Prospective shadow validation. Not a live trade recommendation.")
+    print(status.to_string(index=False))
+    return 0
+
+
+def command_final_holdout_evaluate(args: argparse.Namespace) -> int:
+    result = evaluate_final_holdout(
+        Path.cwd(),
+        run_id=args.run_id,
+        diagnostic_only=args.diagnostic_only,
+    )
+    print(f"Run ID: {result.run_id}")
+    print(f"Status: {result.status}")
+    for model_id, metrics in sorted(result.metrics_by_model.items()):
+        print(f"Model: {model_id}")
+        print(f"  Evidence manifest: {result.evidence_manifest_hashes[model_id]}")
+        print(f"  Matured outcomes: {metrics.get('final_holdout_matured_outcomes')}")
+        gates = result.gates_by_model[model_id]
+        blocked = [gate for gate in gates if gate.status != "PASS"]
+        if blocked:
+            print("  Blocking final-holdout gates:")
+            for gate in blocked:
+                print(f"  - {gate.gate_id}: {gate.status} - {gate.reason}")
+        else:
+            print("  Final-holdout gates: PASS")
+    return 0
+
+
 def command_daily_cycle(args: argparse.Namespace) -> int:
     result = run_daily_cycle(
         Path.cwd(),
@@ -429,6 +502,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append paper-forward events from the latest scanner snapshot",
     )
     forward_update.set_defaults(handler=command_forward_update)
+
+    final_init = subparsers.add_parser(
+        "final-holdout-init",
+        help="Enroll eligible frozen models into prospective final-holdout collection",
+    )
+    final_init.add_argument("--generation", default="latest")
+    final_init.add_argument(
+        "--research-only",
+        action="store_true",
+        help="Allow diagnostic enrollment that can never satisfy promotion eligibility",
+    )
+    final_init.set_defaults(handler=command_final_holdout_init)
+
+    final_update = subparsers.add_parser(
+        "final-holdout-update",
+        help="Process genuinely new sessions for prospective shadow final holdout",
+    )
+    final_update.set_defaults(handler=command_final_holdout_update)
+
+    final_status = subparsers.add_parser(
+        "final-holdout-status",
+        help="Show prospective final-holdout run state",
+    )
+    final_status.set_defaults(handler=command_final_holdout_status)
+
+    final_evaluate = subparsers.add_parser(
+        "final-holdout-evaluate",
+        help="Evaluate a prospective final-holdout run without promotion",
+    )
+    final_evaluate.add_argument("--run-id", required=True)
+    final_evaluate.add_argument(
+        "--diagnostic-only",
+        action="store_true",
+        help="Allow non-promotable early diagnostics before sample sufficiency is complete",
+    )
+    final_evaluate.set_defaults(handler=command_final_holdout_evaluate)
 
     daily = subparsers.add_parser("daily-cycle", help="Run the local daily scanner cycle")
     daily.add_argument("--universe", default=None)

@@ -14,6 +14,7 @@ from swing_rsi.engine.features import reject_label_columns
 from swing_rsi.engine.gates import configuration_hash
 
 FEATURE_SCREEN_SCHEMA_VERSION = "target_specific_feature_screen_v1"
+PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_v1"
 FeatureScreenTask = Literal["classification", "regression"]
 
 BLOCKED_FEATURE_COLUMNS = {
@@ -35,6 +36,9 @@ class FeatureScreenSpec:
     task_type: FeatureScreenTask
     max_selected_features: int
     random_seed: int
+    head_name: str | None = None
+    direction: str | None = None
+    horizon: int | None = None
     missingness_threshold: float = 0.40
     variance_threshold: float = 1e-12
     correlation_threshold: float = 0.97
@@ -106,7 +110,10 @@ class FeatureScreenResult:
     def metadata(self) -> dict[str, object]:
         return {
             "screening_schema_version": self.spec.schema_version,
+            "head_name": self.spec.head_name,
             "target_label_name": self.spec.target_name,
+            "direction": self.spec.direction,
+            "horizon": self.spec.horizon,
             "task_type": self.spec.task_type,
             "training_start": self.training_start,
             "training_end": self.training_end,
@@ -305,6 +312,10 @@ def screen_features_for_target(
     feature_family_by_column: dict[str, str],
     max_selected_features: int,
     random_seed: int,
+    head_name: str | None = None,
+    direction: str | None = None,
+    horizon: int | None = None,
+    schema_version: str = FEATURE_SCREEN_SCHEMA_VERSION,
     missingness_threshold: float = 0.40,
     variance_threshold: float = 1e-12,
     correlation_threshold: float = 0.97,
@@ -314,9 +325,13 @@ def screen_features_for_target(
         task_type=task_type,
         max_selected_features=max_selected_features,
         random_seed=random_seed,
+        head_name=head_name,
+        direction=direction,
+        horizon=horizon,
         missingness_threshold=missingness_threshold,
         variance_threshold=variance_threshold,
         correlation_threshold=correlation_threshold,
+        schema_version=schema_version,
     )
     target = pd.to_numeric(training_target, errors="coerce")
     valid_target = target.notna()

@@ -61,7 +61,9 @@ The current vertical slice gates on:
 
 Registered metrics also retain feature-stability summaries, bounded holdout permutation-importance summaries, target-before-stop calibration, positive year/regime/sector fractions, symbol/sector concentration, double-cost lower bound, prediction turnover, temporal-fold positive fraction, exceptional-period concentration, model plugin metadata, and naive/RSI-control availability for review. Those diagnostics do not override failed gates.
 
-New model artifacts persist head-specific feature manifests. The target-before-stop head stores its own screening schema version, target label, selected features, selected-feature-family counts, full audit records, screen configuration hash, and selected-feature manifest hash. Legacy artifacts without this metadata remain readable and are labeled as using shared legacy feature screening; they are not equivalent to new target-specific artifacts.
+New model artifacts persist head-specific feature manifests. The target-before-stop head stores its own screening schema version, target label, selected features, selected-feature-family counts, full audit records, screen configuration hash, and selected-feature manifest hash. Expected-return, MFE, and MAE heads store the same contract under path-metric screening schema `path_metric_target_specific_feature_screen_v1`, with their own selected columns, preprocessing, estimator feature order, manifest hash, and audit metadata. Legacy artifacts without this metadata remain readable and are labeled as using shared legacy feature screening; path heads without metadata are labeled `legacy_shared_path_feature_screen` and are not equivalent to new target-specific artifacts.
+
+MFE and MAE path heads also persist domain metadata under `path_metric_magnitude_domain_v1`. The artifact records the external target name, internal magnitude target name, target-definition text, estimator class/loss/hyperparameters, preprocessing hash, estimator hash, prediction mapping version, internal magnitude diagnostics, signed external-output diagnostics, convergence diagnostics, and domain-integrity gate results. Artifacts missing MFE or MAE domain metadata are scanner-ineligible and promotion-ineligible. Legacy unconstrained path artifacts remain readable for audit and are labeled `legacy_unconstrained_path_metric_model`.
 
 New target-before-stop heads also persist calibration governance schema `tbs_calibration_governance_v1`. Each artifact stores the selected calibrator method, evaluated candidate methods, chronological internal fold definitions, fold-level metrics, candidate mean and standard-error metrics, the one-standard-error boundary, method complexity order, selection reason, final calibration fit dates, calibration audit artifact paths, raw and calibrated score distributions, plateau/step-support diagnostics, calibration manifest hash, and calibrator artifact hash. Identity calibration is stored as explicit metadata and an explicit immutable calibrator object, not as missing calibration metadata.
 
@@ -72,6 +74,18 @@ The configured default candidate-selection policy is persisted with each model a
 The selection evaluator is canonical for holdout model evaluation and scanner actionability. Missing or non-finite required policy metrics fail safely, and the scanner cannot relax persisted policy thresholds.
 
 The selected row sequence drawdown is retained only as `selected_row_sequence_drawdown`. It is not a portfolio drawdown gate.
+
+## Prospective Final Holdout
+
+Prospective final holdout is tracked in SQLite through `final_holdout_runs` and `final_holdout_models`. A run records schema version, creation timestamp, creation Git commit, baseline market date, first eligible future signal date, universe snapshot, feature manifest hash, generation ID, enrolled model IDs, frozen artifact hashes, model states, development-gate eligibility, selection-policy hashes, target-before-stop calibration hashes, OOD-governance hashes, scanner identity version, execution-policy hash, sample-policy version, sample-policy hash, normalized frozen sample policy JSON, direction, horizon, status, and latest processed market date.
+
+Run statuses are `CREATED`, `COLLECTING`, `EARLY_DIAGNOSTIC_AVAILABLE`, `READY_FOR_EVALUATION`, `EVALUATED_PASS`, `EVALUATED_FAIL`, `INVALIDATED`, and `CLOSED`. Runs are never overwritten. Research-only enrollment is allowed only for diagnostics and cannot satisfy promotion eligibility.
+
+The no-backfill rule is strict. A run may process only sessions after its baseline date that have local ingestion provenance showing they became available after run creation. Missing or stale provenance appends a `FINAL_HOLDOUT_DATA_INVALIDATED` event with reason `FINAL_HOLDOUT_BACKFILL_BLOCKED` and prevents the session from becoming final evidence.
+
+Final-holdout sample governance uses `prospective_final_holdout_sample_v1`: 100 matured outcomes, 60 distinct signal dates, 126 completed market sessions, 4 calendar months, 20 positive target-before-stop outcomes, 20 negative target-before-stop outcomes, valid prospective provenance, zero backfill, zero unresolved data-integrity events, and unchanged frozen artifacts/governance hashes. Early diagnostic display is allowed at 30 matured outcomes and 20 distinct signal dates, but it cannot set `FINAL_HOLDOUT` or permit promotion.
+
+Final-holdout evaluation persists canonical gates for `final_holdout_policy_configured`, `final_holdout_matured_outcomes_min_100`, `final_holdout_distinct_signal_dates_min_60`, `final_holdout_observation_sessions_min_126`, `final_holdout_calendar_months_min_4`, `final_holdout_positive_class_min_20`, `final_holdout_negative_class_min_20`, `final_holdout_provenance_valid`, `final_holdout_backfill_absent`, `final_holdout_data_integrity_valid`, `final_holdout_frozen_artifacts_unchanged`, and `final_holdout_sample_sufficient`, plus the final-holdout status gate and research-only blocking when applicable.
 
 ## Prediction OOD Governance
 
@@ -143,6 +157,8 @@ The following hard integrity gates are mandatory and zero tolerance:
 
 The path-metric sign contract is explicit: expected MFE predictions must be `>= 0`, and expected MAE predictions must be `<= 0`. The engine does not silently clip invalid predictions.
 
+Under path-magnitude domain modeling, OOD governance remains in canonical signed external units. MAE estimators train on positive adverse magnitude, but the OOD check receives the mapped negative MAE prediction and compares it with signed MAE training-target bounds.
+
 Live scanner eligibility uses the frozen OOD metadata stored with the model artifact. Rows are rejected when required OOD metadata is missing, a hard integrity contract fails, severity exceeds `1.00`, or severity exceeds the frozen per-head severity limit. Rows with permitted OOD warnings remain auditable and must display the warning rather than treating it as an explanation or causal claim.
 
 ## Model Plugin Interface
@@ -170,9 +186,12 @@ Champion promotion requires:
 1. The model is a candidate/challenger in the registry.
 2. Persisted canonical mandatory gates exist.
 3. The model holdout status is explicitly `FINAL_HOLDOUT`.
-4. Every mandatory quality gate passes.
-5. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
-6. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
+4. A final-holdout run ID and final-holdout evidence manifest hash are present.
+5. The final-holdout enrollment record exists and is not research-only.
+6. The frozen artifact hash, selection-policy hash, target-before-stop calibration hash, and OOD-governance hash still match the enrollment record.
+7. Every mandatory development and final-holdout quality gate passes.
+8. No mandatory gate is `NOT_CONFIGURED` or `NOT_APPLICABLE`.
+9. Promotion is explicit through `python -m swing_rsi.cli promote-model --model-id ...`.
 
 Models labeled `DEVELOPMENT_HOLDOUT` or missing holdout-status metadata are promotion-ineligible even if their other gates pass. The manual promotion path checks the persisted holdout status before changing registry state.
 

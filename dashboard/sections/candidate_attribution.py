@@ -99,6 +99,54 @@ def render_page() -> None:
         width="stretch",
         hide_index=True,
     )
+    streamlit.subheader("Path-Metric Feature Screens")
+    path_fields = [
+        "expected_return_feature_screen_schema",
+        "expected_return_feature_manifest_hash",
+        "expected_return_selected_feature_count",
+        "expected_return_selected_feature_families",
+        "expected_return_required_feature_missing",
+        "expected_return_missing_features",
+        "mfe_feature_screen_schema",
+        "mfe_feature_manifest_hash",
+        "mfe_selected_feature_count",
+        "mfe_selected_feature_families",
+        "mfe_required_feature_missing",
+        "mfe_missing_features",
+        "expected_mfe_internal_magnitude",
+        "expected_mfe_magnitude_domain_valid",
+        "expected_mfe_signed_domain_valid",
+        "expected_mfe_magnitude_prediction_invalid",
+        "mfe_domain_schema_version",
+        "mfe_domain_metadata_missing",
+        "mfe_internal_magnitude_target_name",
+        "mfe_magnitude_estimator_class",
+        "mfe_magnitude_estimator_loss",
+        "mfe_prediction_mapping_version",
+        "mae_feature_screen_schema",
+        "mae_feature_manifest_hash",
+        "mae_selected_feature_count",
+        "mae_selected_feature_families",
+        "mae_required_feature_missing",
+        "mae_missing_features",
+        "expected_mae_internal_magnitude",
+        "expected_mae_magnitude_domain_valid",
+        "expected_mae_signed_domain_valid",
+        "expected_mae_magnitude_prediction_invalid",
+        "mae_domain_schema_version",
+        "mae_domain_metadata_missing",
+        "mae_internal_magnitude_target_name",
+        "mae_magnitude_estimator_class",
+        "mae_magnitude_estimator_loss",
+        "mae_prediction_mapping_version",
+    ]
+    streamlit.dataframe(
+        display_frame(
+            pd.DataFrame([{"Metric": field, "Value": row.get(field, "")} for field in path_fields])
+        ),
+        width="stretch",
+        hide_index=True,
+    )
     streamlit.subheader("Historical Analogs")
     try:
         analogs = pd.DataFrame(json.loads(str(row.get("historical_analogs", "[]"))))

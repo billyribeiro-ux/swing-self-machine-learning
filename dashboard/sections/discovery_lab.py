@@ -59,6 +59,7 @@ def render_page() -> None:
         return
     rows: list[dict[str, object]] = []
     screen_rows: list[dict[str, object]] = []
+    path_screen_rows: list[dict[str, object]] = []
     calibration_rows: list[dict[str, object]] = []
     for model in models:
         eligibility = promotion_eligibility(model.gate_results)
@@ -146,6 +147,50 @@ def render_page() -> None:
                 ),
             }
         )
+        for head, prefix in (
+            ("expected_return", "expected_return"),
+            ("mfe", "mfe"),
+            ("mae", "mae"),
+        ):
+            raw_path_counts = model.metrics.get(f"{prefix}_selected_feature_family_counts_json")
+            path_family_counts: dict[str, object] = {}
+            if isinstance(raw_path_counts, str) and raw_path_counts.strip():
+                try:
+                    parsed = json.loads(raw_path_counts)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    path_family_counts = parsed
+            path_screen_rows.append(
+                {
+                    "model_id": model.model_id,
+                    "direction": model.direction,
+                    "horizon": model.horizon,
+                    "family": model.family,
+                    "head": head,
+                    "target": model.metrics.get(f"{prefix}_screening_target"),
+                    "screen_schema": model.metrics.get(f"{prefix}_feature_screen_schema_version"),
+                    "selected_features": model.metrics.get(f"{prefix}_selected_feature_count"),
+                    "selected_families": ", ".join(
+                        f"{family}:{count}" for family, count in sorted(path_family_counts.items())
+                    ),
+                    "manifest_hash": model.metrics.get(f"{prefix}_screening_manifest_hash"),
+                    "configuration_hash": model.metrics.get(
+                        f"{prefix}_screening_configuration_hash"
+                    ),
+                    "domain_schema": model.metrics.get(f"{prefix}_domain_schema_version", ""),
+                    "internal_magnitude_target": model.metrics.get(
+                        f"{prefix}_internal_magnitude_target_name", ""
+                    ),
+                    "magnitude_estimator": model.metrics.get(
+                        f"{prefix}_magnitude_estimator_class", ""
+                    ),
+                    "magnitude_loss": model.metrics.get(f"{prefix}_magnitude_estimator_loss", ""),
+                    "domain_integrity": model.metrics.get(
+                        f"{prefix}_holdout_domain_integrity_valid", ""
+                    ),
+                }
+            )
         candidate_results: list[dict[str, object]] = []
         raw_candidates = model.metrics.get("target_before_stop_calibration_candidate_results_json")
         if isinstance(raw_candidates, str) and raw_candidates.strip():
@@ -182,6 +227,7 @@ def render_page() -> None:
         [
             "Model Metrics",
             "Target-Before-Stop Feature Screen",
+            "Path-Metric Feature Screens",
             "Target-Before-Stop Calibration",
         ]
     )
@@ -198,6 +244,12 @@ def render_page() -> None:
             hide_index=True,
         )
     with tabs[2]:
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(path_screen_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+    with tabs[3]:
         streamlit.warning(
             "Current holdout metrics are DEVELOPMENT HOLDOUT DIAGNOSTICS, not final validation."
         )

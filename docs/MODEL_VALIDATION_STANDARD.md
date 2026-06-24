@@ -18,7 +18,24 @@ Historical walk-forward validation is legacy research evaluation. It is not the 
 
 ## Final holdout
 
-Before any model is promoted, reserve a final untouched time period that was not used for feature design, parameter ranges, threshold tuning, or model selection.
+Before any model is promoted, it must complete prospective final-holdout validation. The existing 2016-2026 chronological holdout has been repeatedly inspected and is labeled `DEVELOPMENT_HOLDOUT`; it cannot be reclassified as final evidence and cannot satisfy promotion.
+
+A valid final holdout now means:
+
+1. A model version is frozen and enrolled into a prospective final-holdout run.
+2. The artifact hash, feature manifest, selection policy, target-before-stop calibrator, OOD metadata, universe, scanner identity, execution policy, and code commit are recorded.
+3. A baseline market date is recorded at enrollment.
+4. No signal with `as_of_date <= baseline_market_date` may enter the run.
+5. Later sessions require local ingestion provenance proving they became available after run creation.
+6. Signals are written before outcomes exist and are advanced through the append-only paper-forward event lifecycle.
+7. Final-holdout events never enter training, calibration, feature screening, threshold choice, policy selection, or retraining.
+8. Evaluation uses only events belonging to the prospective run and persists canonical final-holdout gates.
+
+Prospective final-holdout sample sufficiency is governed by `prospective_final_holdout_sample_v1` and frozen into each run at creation. Per enrolled model, direction, and horizon, evaluation requires at least 100 matured outcomes, 60 distinct signal dates, 126 completed market sessions from the first eligible future signal date, 4 calendar months of matured outcomes, at least 20 positive and 20 negative target-before-stop outcomes, valid provenance for every included prediction, zero backfilled predictions, zero unresolved data-integrity events, and unchanged artifact, feature-manifest, selection-policy, calibrator, OOD-governance, execution-policy, and code hashes.
+
+`EARLY_DIAGNOSTIC_AVAILABLE` is non-promotable and requires at least 30 matured outcomes and 20 distinct signal dates. Diagnostic-only evaluation before full sample sufficiency cannot set `holdout_status = FINAL_HOLDOUT`, cannot satisfy promotion gates, and cannot select thresholds or mutate model artifacts.
+
+`FINAL_HOLDOUT` means evidence came from a valid prospective period and evaluation completed. It does not mean the model passed its performance gates.
 
 ## Evaluation layers
 
@@ -46,9 +63,20 @@ Every classifier is compared against the matching naive control on the exact sam
 
 ## Target-specific feature screening
 
-Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. It must not reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
+Each prediction head that owns a distinct target must use a train-only feature screen fitted to that target. The target-before-stop classifier uses `label_{direction}_target_before_stop_{horizon}` for missingness filtering, variance filtering, mutual-information scoring, and correlation pruning. Expected-return regressors use the signed directional return target. MFE regressors use favorable magnitude, equal to the existing MFE label. MAE regressors use adverse magnitude, equal to negative existing MAE. No head may reuse the positive-return classifier's selected feature list unless the independent screen naturally selects the same columns.
 
-The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
+The screen starts from the full eligible numeric feature universe, excludes `label_` columns and metadata columns, scores every surviving feature on training rows only, sorts by mutual-information score descending and feature name ascending, then applies correlation pruning in that score order before enforcing the configured feature cap. Classification heads use `mutual_info_classif`; regression heads use `mutual_info_regression`. Calibration and holdout rows must not affect screening, imputation values, score ordering, or selected-feature manifests.
+
+## Path magnitude domain modeling
+
+MFE and MAE historical labels are not rewritten. Their external contract remains MFE `>= 0` and MAE `<= 0` in decimal-return units. Model training derives internal nonnegative magnitude targets only for the MFE and MAE heads:
+
+- `mfe_magnitude_target = existing MFE label`;
+- `mae_magnitude_target = -1 * existing MAE label`.
+
+Under `path_metric_magnitude_domain_v1`, linear-family path-magnitude heads use `TweedieRegressor(power=1.5, link="log")`, HistGradientBoosting path-magnitude heads use `HistGradientBoostingRegressor(loss="poisson")`, ExtraTrees path-magnitude heads train directly on nonnegative magnitudes, and naive controls use nonnegative training-magnitude summaries. Expected-return modeling remains signed.
+
+Predictions are mapped back to canonical external units before OOD, scanner, attribution, and gate evaluation. Invalid magnitude output or invalid signed output is a hard integrity failure; no post-prediction clipping may be used to repair it.
 
 ## Target-before-stop calibration governance
 

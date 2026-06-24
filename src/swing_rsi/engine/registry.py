@@ -10,6 +10,7 @@ from swing_rsi.engine.gates import (
     FINAL_HOLDOUT_PROMOTION_GATE_ID,
     GATE_VALUE_NOT_AVAILABLE,
     GateResult,
+    configuration_hash,
     gate_results_from_jsonable,
     gate_results_to_jsonable,
     holdout_status_allows_promotion,
@@ -18,10 +19,30 @@ from swing_rsi.engine.gates import (
     normalized_holdout_status,
     promotion_eligibility,
 )
+from swing_rsi.engine.manifest import hash_file
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 
 ModelState = Literal["EXPERIMENTAL", "CANDIDATE", "CHALLENGER", "CHAMPION", "RETIRED", "REJECTED"]
 MetricValue = float | int | str | bool | None
+
+FINAL_HOLDOUT_SAMPLE_GATE_IDS = (
+    "final_holdout_policy_configured",
+    "final_holdout_matured_outcomes_min_100",
+    "final_holdout_distinct_signal_dates_min_60",
+    "final_holdout_observation_sessions_min_126",
+    "final_holdout_calendar_months_min_4",
+    "final_holdout_positive_class_min_20",
+    "final_holdout_negative_class_min_20",
+    "final_holdout_provenance_valid",
+    "final_holdout_backfill_absent",
+    "final_holdout_data_integrity_valid",
+    "final_holdout_frozen_artifacts_unchanged",
+    "final_holdout_sample_sufficient",
+)
+PATH_METRIC_SCREEN_SCHEMA_VERSION = "path_metric_target_specific_feature_screen_v1"
+PATH_METRIC_SCREEN_PREFIXES = ("expected_return", "mfe", "mae")
+PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
+PATH_MAGNITUDE_DOMAIN_PREFIXES = ("mfe", "mae")
 
 
 @dataclass(frozen=True)
@@ -211,6 +232,120 @@ def _registered_holdout_status(model: RegisteredModel) -> str:
     return normalized_holdout_status(gate.actual_value)
 
 
+def _model_ood_hash(model: RegisteredModel) -> str:
+    payload: dict[str, object] = {
+        key: value
+        for key, value in sorted(model.metrics.items())
+        if "ood" in key or key == "prediction_ood_governance_version"
+    }
+    return configuration_hash(payload)
+
+
+def _final_holdout_freeze_blocker(db_path: str | Path, model: RegisteredModel) -> str | None:
+    run_id = model.metrics.get("final_holdout_run_id")
+    evidence_hash = model.metrics.get("final_holdout_evidence_manifest_hash")
+    if not run_id or not evidence_hash:
+        return "missing final-holdout run ID or evidence manifest hash"
+    gates_by_id = {gate.gate_id: gate for gate in model.gate_results}
+    missing_sample_gates = [
+        gate_id for gate_id in FINAL_HOLDOUT_SAMPLE_GATE_IDS if gate_id not in gates_by_id
+    ]
+    if missing_sample_gates:
+        return f"missing final-holdout sample gates: {missing_sample_gates}"
+    failing_sample_gates = [
+        f"{gate_id}:{gates_by_id[gate_id].status}"
+        for gate_id in FINAL_HOLDOUT_SAMPLE_GATE_IDS
+        if gates_by_id[gate_id].status != "PASS"
+    ]
+    if failing_sample_gates:
+        return f"final-holdout sample gates are not passing: {failing_sample_gates}"
+    with engine_connection(db_path) as connection:
+        run_row = connection.execute(
+            """
+            SELECT execution_policy_hash
+            FROM final_holdout_runs
+            WHERE run_id = ?
+            """,
+            (str(run_id),),
+        ).fetchone()
+        row = connection.execute(
+            """
+            SELECT artifact_path, artifact_hash, selection_policy_hash,
+                   calibration_governance_hash, ood_governance_hash, research_only,
+                   metadata_json
+            FROM final_holdout_models
+            WHERE run_id = ? AND model_id = ?
+            """,
+            (str(run_id), model.model_id),
+        ).fetchone()
+    if run_row is None:
+        return "missing final-holdout run record"
+    if row is None:
+        return "missing final-holdout enrollment record"
+    if bool(row["research_only"]):
+        return "research-only final-holdout enrollment is not promotable"
+    frozen_metadata = cast(dict[str, object], loads(str(row["metadata_json"])))
+    artifact_path = Path(str(row["artifact_path"]))
+    if not artifact_path.exists():
+        return "frozen final-holdout artifact is missing"
+    if hash_file(artifact_path) != str(row["artifact_hash"]):
+        return "frozen final-holdout artifact hash changed"
+    if model.feature_manifest_hash != str(frozen_metadata.get("feature_manifest_hash") or ""):
+        return "frozen final-holdout feature-manifest hash changed"
+    if str(model.metrics.get("selection_policy_configuration_hash") or "") != str(
+        row["selection_policy_hash"]
+    ):
+        return "frozen final-holdout selection-policy hash changed"
+    if str(model.metrics.get("target_before_stop_calibration_manifest_hash") or "") != str(
+        row["calibration_governance_hash"]
+    ):
+        return "frozen final-holdout calibration-governance hash changed"
+    if str(model.metrics.get("target_before_stop_calibrator_artifact_hash") or "") != str(
+        frozen_metadata.get("calibrator_artifact_hash") or ""
+    ):
+        return "frozen final-holdout calibrator artifact hash changed"
+    if _model_ood_hash(model) != str(row["ood_governance_hash"]):
+        return "frozen final-holdout OOD-governance hash changed"
+    frozen_execution_policy = str(frozen_metadata.get("execution_policy_hash") or "")
+    if frozen_execution_policy and frozen_execution_policy != str(run_row["execution_policy_hash"]):
+        return "frozen final-holdout execution-policy hash changed"
+    frozen_code_hash = frozen_metadata.get("code_commit_hash")
+    if frozen_code_hash and model.code_commit_hash != str(frozen_code_hash):
+        return "frozen final-holdout code hash changed"
+    return None
+
+
+def _path_feature_screen_blocker(model: RegisteredModel) -> str | None:
+    missing: list[str] = []
+    for prefix in PATH_METRIC_SCREEN_PREFIXES:
+        schema = str(model.metrics.get(f"{prefix}_feature_screen_schema_version") or "")
+        manifest = str(model.metrics.get(f"{prefix}_screening_manifest_hash") or "")
+        if schema != PATH_METRIC_SCREEN_SCHEMA_VERSION:
+            missing.append(f"{prefix}:schema")
+        if not manifest:
+            missing.append(f"{prefix}:manifest")
+    if missing:
+        return f"missing target-specific path-metric feature screen metadata: {missing}"
+    return None
+
+
+def _path_magnitude_domain_blocker(model: RegisteredModel) -> str | None:
+    missing: list[str] = []
+    for prefix in PATH_MAGNITUDE_DOMAIN_PREFIXES:
+        schema = str(model.metrics.get(f"{prefix}_domain_schema_version") or "")
+        estimator_hash = str(model.metrics.get(f"{prefix}_magnitude_estimator_hash") or "")
+        mapping_version = str(model.metrics.get(f"{prefix}_prediction_mapping_version") or "")
+        if schema != PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION:
+            missing.append(f"{prefix}:schema")
+        if not estimator_hash:
+            missing.append(f"{prefix}:estimator_hash")
+        if not mapping_version:
+            missing.append(f"{prefix}:prediction_mapping")
+    if missing:
+        return f"missing domain-preserving MFE/MAE metadata: {missing}"
+    return None
+
+
 def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
     models = list_models(db_path)
     selected = next((model for model in models if model.model_id == model_id), None)
@@ -229,6 +364,24 @@ def promote_model(db_path: str | Path, model_id: str) -> RegisteredModel:
         raise ValueError(
             "Model cannot be promoted because mandatory gate results block promotion: "
             f"{list(eligibility.blocked_reasons)}"
+        )
+    path_screen_blocker = _path_feature_screen_blocker(selected)
+    if path_screen_blocker is not None:
+        raise ValueError(
+            "Model cannot be promoted because artifact metadata is incomplete: "
+            f"{path_screen_blocker}"
+        )
+    path_domain_blocker = _path_magnitude_domain_blocker(selected)
+    if path_domain_blocker is not None:
+        raise ValueError(
+            "Model cannot be promoted because artifact metadata is incomplete: "
+            f"{path_domain_blocker}"
+        )
+    freeze_blocker = _final_holdout_freeze_blocker(db_path, selected)
+    if freeze_blocker is not None:
+        raise ValueError(
+            "Model cannot be promoted because final-holdout evidence is not valid: "
+            f"{freeze_blocker}"
         )
 
     promoted_at = datetime.now(UTC).isoformat()

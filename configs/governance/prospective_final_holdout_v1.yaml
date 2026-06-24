@@ -1,0 +1,9 @@
+schema_version: prospective_final_holdout_sample_v1
+matured_outcomes_minimum: 100
+distinct_signal_dates_minimum: 60
+observation_sessions_minimum: 126
+calendar_months_minimum: 4
+positive_class_minimum: 20
+negative_class_minimum: 20
+early_diagnostic_matured_outcomes_minimum: 30
+early_diagnostic_distinct_signal_dates_minimum: 20

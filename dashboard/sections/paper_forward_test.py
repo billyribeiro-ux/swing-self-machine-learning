@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dashboard.ui.components import render_page_header, repository_root, st
 from dashboard.ui.formatting import display_frame
-from swing_rsi.application.engine_service import forward_events, run_forward_update
+from swing_rsi.application.engine_service import (
+    final_holdout_event_history,
+    final_holdout_status,
+    forward_events,
+    run_forward_update,
+)
 from swing_rsi.config import ProjectPaths
 from swing_rsi.engine.forward import reconstruct_positions
 
@@ -29,6 +34,25 @@ def render_page() -> None:
     else:
         streamlit.dataframe(
             display_frame(events.drop(columns=["payload"], errors="ignore")),
+            width="stretch",
+            hide_index=True,
+        )
+
+    streamlit.subheader("Prospective Final Holdout")
+    streamlit.info("Prospective shadow validation. Not a live trade recommendation.")
+    final_status = final_holdout_status(root)
+    if final_status.empty:
+        streamlit.info("No prospective final-holdout run is collecting yet.")
+        return
+    streamlit.caption(
+        "Sample-governance progress is shown as actual counts with required-count columns. "
+        "These prospective metrics are separate from development-holdout diagnostics."
+    )
+    streamlit.dataframe(display_frame(final_status), width="stretch", hide_index=True)
+    final_events = final_holdout_event_history(root)
+    if not final_events.empty:
+        streamlit.dataframe(
+            display_frame(final_events.drop(columns=["payload"], errors="ignore")),
             width="stretch",
             hide_index=True,
         )
