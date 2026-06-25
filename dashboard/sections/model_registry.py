@@ -107,6 +107,7 @@ def compact_registry_rows(models: list[RegisteredModel]) -> pd.DataFrame:
                 "Dir": _compact_direction(model.direction),
                 "Hz": model.horizon,
                 "Family": _compact_family(model.family),
+                "Scope": str(model.metrics.get("product_class_scope", "POOLED")),
                 "Created": _date_only(model.created_at_utc),
                 "Train": model.metrics.get("training_samples", ""),
                 "Holdout": model.metrics.get("holdout_samples", ""),
@@ -142,6 +143,26 @@ def _detail_rows(model: RegisteredModel) -> pd.DataFrame:
         {"Field": "Direction", "Value": model.direction},
         {"Field": "Horizon", "Value": model.horizon},
         {"Field": "Family", "Value": model.family},
+        {
+            "Field": "Product-class scope",
+            "Value": model.metrics.get("product_class_scope", "POOLED"),
+        },
+        {
+            "Field": "Product-class schema",
+            "Value": model.metrics.get("product_class_schema_version", ""),
+        },
+        {
+            "Field": "Product-class eligible roles",
+            "Value": model.metrics.get("product_class_eligible_roles_json", ""),
+        },
+        {
+            "Field": "Product-class scope hash",
+            "Value": model.metrics.get("product_class_scope_configuration_hash", ""),
+        },
+        {
+            "Field": "Product-class universe-scope hash",
+            "Value": model.metrics.get("product_class_universe_scope_hash", ""),
+        },
         {"Field": "Training window", "Value": f"{model.training_start} to {model.training_end}"},
         {
             "Field": "Calibration window",
@@ -277,6 +298,7 @@ def render_page() -> None:
     streamlit.caption(
         "Compact default view. Select a row below to inspect full IDs, hashes, metrics, and gates."
     )
+    streamlit.warning("Product-class specialist challenger. Development evidence only.")
     _render_generation_exports(root)
     streamlit.dataframe(
         compact_registry_rows(models),
@@ -296,6 +318,7 @@ def render_page() -> None:
             "Dir": streamlit.column_config.TextColumn("Dir", width="small"),
             "Hz": streamlit.column_config.NumberColumn("Hz", width="small"),
             "Family": streamlit.column_config.TextColumn("Family", width="small"),
+            "Scope": streamlit.column_config.TextColumn("Scope", width="small"),
             "Created": streamlit.column_config.TextColumn("Created", width="small"),
             "Train": streamlit.column_config.NumberColumn("Train", width="small"),
             "Holdout": streamlit.column_config.NumberColumn("Holdout", width="small"),

@@ -23,6 +23,7 @@ def render_page() -> None:
     if rows.empty:
         streamlit.info("No scanner candidates are available yet.")
         return
+    streamlit.warning("Product-class specialist challenger. Development evidence only.")
     options = [
         f"{row.ticker} {row.direction} h{row.horizon} {row.model_id}"
         for row in rows.itertuples(index=False)
@@ -33,6 +34,29 @@ def render_page() -> None:
     columns[0].metric("Probability", f"{float(row['calibrated_probability']):.2%}")
     columns[1].metric("Expected return", f"{float(row['expected_return']):.2%}")
     columns[2].metric("Utility", f"{float(row['composite_utility_score']):.4f}")
+    streamlit.subheader("Product-Class Routing")
+    routing_fields = [
+        "product_class_schema_version",
+        "product_class_scope",
+        "row_product_class_scope",
+        "row_product_class_role",
+        "product_class_scope_match",
+        "scanner_routing_result",
+        "product_class_scope_configuration_hash",
+        "product_class_universe_scope_hash",
+        "product_class_role_scope_mapping_hash",
+        "product_class_eligible_roles",
+        "product_class_eligible_symbol_count",
+    ]
+    streamlit.dataframe(
+        display_frame(
+            pd.DataFrame(
+                [{"Metric": field, "Value": row.get(field, "")} for field in routing_fields]
+            )
+        ),
+        width="stretch",
+        hide_index=True,
+    )
     streamlit.subheader("Recent Price Context")
     try:
         universe = load_engine_universe(root)

@@ -110,6 +110,27 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "direction": model.direction,
             "horizon": model.horizon,
             "family": model.family,
+            "product_class_schema_version": metrics.get("product_class_schema_version"),
+            "product_class_scope": metrics.get("product_class_scope"),
+            "product_class_scope_configuration_hash": metrics.get(
+                "product_class_scope_configuration_hash"
+            ),
+            "product_class_universe_scope_hash": metrics.get("product_class_universe_scope_hash"),
+            "product_class_role_scope_mapping_hash": metrics.get(
+                "product_class_role_scope_mapping_hash"
+            ),
+            "product_class_eligible_roles": metrics.get("product_class_eligible_roles_json"),
+            "product_class_eligible_symbol_count": metrics.get(
+                "product_class_eligible_symbol_count"
+            ),
+            "product_class_training_count": metrics.get("product_class_training_count"),
+            "product_class_calibration_count": metrics.get("product_class_calibration_count"),
+            "product_class_development_holdout_count": metrics.get(
+                "product_class_development_holdout_count"
+            ),
+            "product_class_target_distributions": metrics.get(
+                "product_class_target_distributions_json"
+            ),
             "research_start": metrics.get("research_start"),
             "research_end": metrics.get("research_end"),
             "train_start": model.training_start,

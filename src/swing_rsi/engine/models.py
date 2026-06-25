@@ -69,6 +69,15 @@ from swing_rsi.engine.ood import (
     regression_head_ood_metrics,
 )
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
+from swing_rsi.engine.product_scope import (
+    PRODUCT_CLASS_SCHEMA_VERSION,
+    PRODUCT_CLASS_SCOPE_POOLED,
+    ProductClassScope,
+    ProductClassScopeDefinition,
+    build_product_class_scope_definitions,
+    filter_frame_for_product_class_scope,
+    product_scope_definition_from_frame,
+)
 from swing_rsi.engine.registry import ModelState, RegisteredModel, make_model_id, register_model
 from swing_rsi.engine.selection import (
     SelectionPolicy,
@@ -79,6 +88,7 @@ from swing_rsi.engine.splits import (
     ChronologicalSplit,
     chronological_train_calibration_holdout_split,
 )
+from swing_rsi.engine.universe import UniverseConfig
 
 TEMPORAL_FOLD_STABILITY_SCHEMA_VERSION = "temporal_fold_stability_v1"
 TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS = 3
@@ -93,6 +103,12 @@ PATH_HEAD_CAPABILITY_ACTIVE = "ACTIVE"
 PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR = "RETIRED_UNSUITABLE_ESTIMATOR"
 LINEAR_PATH_HEAD_RETIREMENT_REASON = "linear_family_path_head_retired_unsuitable_estimator"
 LINEAR_PATH_HEAD_RETIREMENT_FAMILIES = frozenset({"logistic_regression"})
+NONLINEAR_SPECIALIST_MODEL_FAMILIES = ("hist_gradient_boosting", "extra_trees")
+DEFAULT_DISCOVERY_MODEL_FAMILIES = (
+    "logistic_regression",
+    "hist_gradient_boosting",
+    "extra_trees",
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +139,15 @@ class ModelBundle:
     feature_screen_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
     feature_screen_records: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
     path_domain_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
+    product_class_schema_version: str = PRODUCT_CLASS_SCHEMA_VERSION
+    product_class_scope: ProductClassScope = PRODUCT_CLASS_SCOPE_POOLED
+    product_class_eligible_roles: tuple[str, ...] = ()
+    product_class_eligible_symbols: tuple[str, ...] = ()
+    product_class_role_scope_mapping: dict[str, str] = field(default_factory=dict)
+    product_class_role_scope_mapping_hash: str = ""
+    product_class_scope_configuration_hash: str = ""
+    product_class_universe_scope_hash: str = ""
+    product_class_scope_metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -152,6 +177,9 @@ class DiscoveryConfig:
     selection_per_date_limit: int | None = 5
     selection_minimum_dollar_volume: float | None = 5_000_000.0
     selection_rate_max: float | None = 0.20
+    product_class_scopes: tuple[ProductClassScope, ...] = (PRODUCT_CLASS_SCOPE_POOLED,)
+    model_families: tuple[str, ...] = DEFAULT_DISCOVERY_MODEL_FAMILIES
+    include_naive_controls: bool = True
 
 
 PRIMARY_HEAD = "primary_positive_return"
@@ -296,6 +324,42 @@ def bundle_path_domain_metadata(bundle: ModelBundle, head: str) -> dict[str, obj
     metadata = getattr(bundle, "path_domain_metadata", {}) or {}
     value = metadata.get(head)
     return dict(value) if isinstance(value, dict) else {}
+
+
+def bundle_product_class_metadata(bundle: ModelBundle) -> dict[str, object]:
+    metrics = getattr(bundle, "metrics", {}) or {}
+    metadata = getattr(bundle, "product_class_scope_metadata", {}) or {}
+    return {
+        "schema_version": str(
+            getattr(bundle, "product_class_schema_version", "")
+            or metrics.get("product_class_schema_version")
+            or PRODUCT_CLASS_SCHEMA_VERSION
+        ),
+        "scope": str(
+            getattr(bundle, "product_class_scope", "")
+            or metrics.get("product_class_scope")
+            or PRODUCT_CLASS_SCOPE_POOLED
+        ),
+        "eligible_roles": tuple(getattr(bundle, "product_class_eligible_roles", ()) or tuple()),
+        "eligible_symbols": tuple(getattr(bundle, "product_class_eligible_symbols", ()) or tuple()),
+        "role_scope_mapping": dict(getattr(bundle, "product_class_role_scope_mapping", {}) or {}),
+        "role_scope_mapping_hash": str(
+            getattr(bundle, "product_class_role_scope_mapping_hash", "")
+            or metrics.get("product_class_role_scope_mapping_hash")
+            or ""
+        ),
+        "scope_configuration_hash": str(
+            getattr(bundle, "product_class_scope_configuration_hash", "")
+            or metrics.get("product_class_scope_configuration_hash")
+            or ""
+        ),
+        "universe_scope_hash": str(
+            getattr(bundle, "product_class_universe_scope_hash", "")
+            or metrics.get("product_class_universe_scope_hash")
+            or ""
+        ),
+        "scope_metadata": dict(metadata) if isinstance(metadata, dict) else {},
+    }
 
 
 def _target_normalization_metadata_from_screen(
@@ -792,8 +856,207 @@ def model_plugins() -> tuple[ModelPlugin, ...]:
     )
 
 
-def _candidate_pipelines(seed: int) -> dict[str, Any]:
-    return {plugin.name: plugin.classifier_factory(seed) for plugin in model_plugins()}
+def _candidate_pipelines(
+    seed: int,
+    *,
+    families: tuple[str, ...] | None = None,
+    include_naive: bool = True,
+) -> dict[str, Any]:
+    requested = set(families or DEFAULT_DISCOVERY_MODEL_FAMILIES)
+    if include_naive:
+        requested.add("naive_base_rate")
+    plugins = {plugin.name: plugin for plugin in model_plugins()}
+    unknown = sorted(requested.difference(plugins))
+    if unknown:
+        raise ValueError(f"Unknown model family requested: {', '.join(unknown)}")
+    return {name: plugins[name].classifier_factory(seed) for name in sorted(requested)}
+
+
+def _scope_definitions_for_discovery(
+    eligible_frame: pd.DataFrame,
+    *,
+    config: DiscoveryConfig,
+    universe: UniverseConfig | None,
+) -> dict[ProductClassScope, ProductClassScopeDefinition]:
+    requested = tuple(config.product_class_scopes or (PRODUCT_CLASS_SCOPE_POOLED,))
+    if universe is not None:
+        return build_product_class_scope_definitions(universe, scopes=requested)
+    if tuple(requested) != (PRODUCT_CLASS_SCOPE_POOLED,):
+        raise ValueError("Specialist product-class discovery requires governed universe metadata")
+    return {
+        PRODUCT_CLASS_SCOPE_POOLED: product_scope_definition_from_frame(
+            eligible_frame,
+            PRODUCT_CLASS_SCOPE_POOLED,
+        )
+    }
+
+
+def _describe_numeric_series(series: pd.Series) -> dict[str, float | int]:
+    values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if values.empty:
+        return {
+            "count": 0,
+            "mean": math.nan,
+            "std": math.nan,
+            "min": math.nan,
+            "q25": math.nan,
+            "median": math.nan,
+            "q75": math.nan,
+            "max": math.nan,
+        }
+    return {
+        "count": len(values),
+        "mean": float(values.mean()),
+        "std": float(values.std(ddof=0)),
+        "min": float(values.min()),
+        "q25": float(values.quantile(0.25)),
+        "median": float(values.median()),
+        "q75": float(values.quantile(0.75)),
+        "max": float(values.max()),
+    }
+
+
+def _classification_distribution(series: pd.Series) -> dict[str, float | int]:
+    values = pd.to_numeric(series, errors="coerce").dropna().astype(int)
+    positives = int((values == 1).sum())
+    negatives = int((values == 0).sum())
+    total = len(values)
+    return {
+        "count": total,
+        "positive": positives,
+        "negative": negatives,
+        "positive_rate": float(positives / total) if total else math.nan,
+    }
+
+
+def _split_distribution_payload(
+    split_name: str,
+    frame: pd.DataFrame,
+    *,
+    target: str,
+    returns: str,
+    mfe: str,
+    mae: str,
+    target_before_stop: str,
+) -> dict[str, object]:
+    return {
+        "split": split_name,
+        "rows": len(frame),
+        "positive_return": _classification_distribution(frame[target])
+        if target in frame.columns
+        else {},
+        "target_before_stop": _classification_distribution(frame[target_before_stop])
+        if target_before_stop in frame.columns
+        else {},
+        "directional_return": _describe_numeric_series(frame[returns])
+        if returns in frame.columns
+        else {},
+        "mfe": _describe_numeric_series(frame[mfe]) if mfe in frame.columns else {},
+        "mae": _describe_numeric_series(frame[mae]) if mae in frame.columns else {},
+    }
+
+
+def _product_class_scope_metric_payload(
+    definition: ProductClassScopeDefinition,
+    *,
+    scoped_frame: pd.DataFrame,
+    train: pd.DataFrame,
+    calibration: pd.DataFrame,
+    holdout: pd.DataFrame,
+    direction: str,
+    horizon: int,
+) -> tuple[dict[str, float | int | str | bool | None], dict[str, object]]:
+    target = f"label_{direction}_positive_return_{horizon}"
+    returns = f"label_{direction}_forward_return_{horizon}"
+    mfe = f"label_{direction}_mfe_{horizon}"
+    mae = f"label_{direction}_mae_{horizon}"
+    target_before_stop = f"label_{direction}_target_before_stop_{horizon}"
+    represented_symbols = (
+        tuple(sorted(str(value) for value in scoped_frame["symbol"].dropna().unique()))
+        if "symbol" in scoped_frame.columns
+        else ()
+    )
+    missing_symbols = tuple(
+        symbol for symbol in definition.eligible_symbols if symbol not in represented_symbols
+    )
+    date_values = pd.to_datetime(scoped_frame["Date"]) if "Date" in scoped_frame.columns else None
+    date_start = _date_label(pd.Timestamp(date_values.min())) if date_values is not None else ""
+    date_end = _date_label(pd.Timestamp(date_values.max())) if date_values is not None else ""
+    target_distributions = [
+        _split_distribution_payload(
+            "train",
+            train,
+            target=target,
+            returns=returns,
+            mfe=mfe,
+            mae=mae,
+            target_before_stop=target_before_stop,
+        ),
+        _split_distribution_payload(
+            "calibration",
+            calibration,
+            target=target,
+            returns=returns,
+            mfe=mfe,
+            mae=mae,
+            target_before_stop=target_before_stop,
+        ),
+        _split_distribution_payload(
+            "development_holdout",
+            holdout,
+            target=target,
+            returns=returns,
+            mfe=mfe,
+            mae=mae,
+            target_before_stop=target_before_stop,
+        ),
+    ]
+    metadata: dict[str, object] = {
+        "schema_version": definition.schema_version,
+        "scope": definition.scope,
+        "direction": direction,
+        "horizon": horizon,
+        "eligible_roles": list(definition.eligible_roles),
+        "eligible_symbols": list(definition.eligible_symbols),
+        "represented_symbols": list(represented_symbols),
+        "missing_symbols": list(missing_symbols),
+        "roles_by_symbol": definition.roles_by_symbol,
+        "role_scope_mapping": definition.role_scope_mapping,
+        "role_scope_mapping_hash": definition.role_scope_mapping_hash,
+        "scope_configuration_hash": definition.scope_configuration_hash,
+        "universe_scope_hash": definition.universe_scope_hash,
+        "row_count": len(scoped_frame),
+        "training_count": len(train),
+        "calibration_count": len(calibration),
+        "development_holdout_count": len(holdout),
+        "date_start": date_start,
+        "date_end": date_end,
+        "target_distributions": target_distributions,
+    }
+    metrics: dict[str, float | int | str | bool | None] = {
+        "product_class_schema_version": definition.schema_version,
+        "product_class_scope": definition.scope,
+        "product_class_scope_configuration_hash": definition.scope_configuration_hash,
+        "product_class_universe_scope_hash": definition.universe_scope_hash,
+        "product_class_role_scope_mapping_hash": definition.role_scope_mapping_hash,
+        "product_class_role_scope_mapping_json": _json_dumps(definition.role_scope_mapping),
+        "product_class_eligible_roles_json": _json_dumps(list(definition.eligible_roles)),
+        "product_class_eligible_symbols_json": _json_dumps(list(definition.eligible_symbols)),
+        "product_class_eligible_symbol_count": len(definition.eligible_symbols),
+        "product_class_represented_symbols_json": _json_dumps(list(represented_symbols)),
+        "product_class_represented_symbol_count": len(represented_symbols),
+        "product_class_missing_symbols_json": _json_dumps(list(missing_symbols)),
+        "product_class_row_count": len(scoped_frame),
+        "product_class_training_count": len(train),
+        "product_class_calibration_count": len(calibration),
+        "product_class_development_holdout_count": len(holdout),
+        "product_class_date_start": date_start,
+        "product_class_date_end": date_end,
+        "product_class_target_distributions_json": _json_dumps(target_distributions),
+        "product_class_scope_metadata_json": _json_dumps(metadata),
+        "product_class_development_evidence_label": "DEVELOPMENT_HOLDOUT_DIAGNOSTIC",
+    }
+    return metrics, metadata
 
 
 def _regressor(seed: int, family: str) -> Pipeline:
@@ -2756,6 +3019,8 @@ def _train_family(
     horizon: int,
     config: DiscoveryConfig,
     calibration_audit_dir: str | Path,
+    product_scope: ProductClassScopeDefinition,
+    scoped_frame: pd.DataFrame,
 ) -> ModelBundle:
     target = f"label_{direction}_positive_return_{horizon}"
     returns = f"label_{direction}_forward_return_{horizon}"
@@ -3526,7 +3791,17 @@ def _train_family(
             "discovery": asdict(config),
             "selection_policy": asdict(selection_policy),
             "portfolio_policy": asdict(portfolio_config),
+            "product_class_scope": product_scope.to_jsonable(),
         }
+    )
+    product_scope_metrics, product_scope_metadata = _product_class_scope_metric_payload(
+        product_scope,
+        scoped_frame=scoped_frame,
+        train=train,
+        calibration=calibration,
+        holdout=holdout,
+        direction=direction,
+        horizon=horizon,
     )
     path_domain_metric_payload: dict[str, float | int | str | bool | None] = {}
     for head_name, metadata in path_domain_metadata.items():
@@ -3865,6 +4140,7 @@ def _train_family(
         ),
         "candidate_ledger_rows": len(portfolio.trades),
         "candidate_audit_rows": len(portfolio.candidate_audit),
+        **product_scope_metrics,
         **selection_metrics,
         **portfolio_metrics,
         **prediction_metrics,
@@ -3945,6 +4221,17 @@ def _train_family(
         feature_screen_metadata=feature_screen_metadata,
         feature_screen_records=feature_screen_records,
         path_domain_metadata=path_domain_metadata,
+        product_class_schema_version=product_scope.schema_version,
+        product_class_scope=product_scope.scope,
+        product_class_eligible_roles=product_scope.eligible_roles,
+        product_class_eligible_symbols=product_scope.eligible_symbols,
+        product_class_role_scope_mapping={
+            key: str(value) for key, value in product_scope.role_scope_mapping.items()
+        },
+        product_class_role_scope_mapping_hash=product_scope.role_scope_mapping_hash,
+        product_class_scope_configuration_hash=product_scope.scope_configuration_hash,
+        product_class_universe_scope_hash=product_scope.universe_scope_hash,
+        product_class_scope_metadata=product_scope_metadata,
     )
     return bundle
 
@@ -3963,6 +4250,24 @@ def load_model_bundle(path: str | Path) -> ModelBundle:
         object.__setattr__(loaded, "feature_screen_records", {})
     if not hasattr(loaded, "path_domain_metadata"):
         object.__setattr__(loaded, "path_domain_metadata", {})
+    if not hasattr(loaded, "product_class_schema_version"):
+        object.__setattr__(loaded, "product_class_schema_version", PRODUCT_CLASS_SCHEMA_VERSION)
+    if not hasattr(loaded, "product_class_scope"):
+        object.__setattr__(loaded, "product_class_scope", PRODUCT_CLASS_SCOPE_POOLED)
+    if not hasattr(loaded, "product_class_eligible_roles"):
+        object.__setattr__(loaded, "product_class_eligible_roles", ())
+    if not hasattr(loaded, "product_class_eligible_symbols"):
+        object.__setattr__(loaded, "product_class_eligible_symbols", ())
+    if not hasattr(loaded, "product_class_role_scope_mapping"):
+        object.__setattr__(loaded, "product_class_role_scope_mapping", {})
+    if not hasattr(loaded, "product_class_role_scope_mapping_hash"):
+        object.__setattr__(loaded, "product_class_role_scope_mapping_hash", "")
+    if not hasattr(loaded, "product_class_scope_configuration_hash"):
+        object.__setattr__(loaded, "product_class_scope_configuration_hash", "")
+    if not hasattr(loaded, "product_class_universe_scope_hash"):
+        object.__setattr__(loaded, "product_class_universe_scope_hash", "")
+    if not hasattr(loaded, "product_class_scope_metadata"):
+        object.__setattr__(loaded, "product_class_scope_metadata", {})
     return loaded
 
 
@@ -3973,6 +4278,64 @@ def save_model_bundle(bundle: ModelBundle, path: str | Path) -> Path:
         raise FileExistsError(output)
     joblib.dump(bundle, output)
     return output
+
+
+def _rejected_model_record(
+    *,
+    model_id: str,
+    horizon: int,
+    direction: str,
+    family: str,
+    universe_snapshot_id: str,
+    feature_manifest_hash: str,
+    raw_manifest_hashes: tuple[str, ...],
+    reason: str,
+    created_at: str,
+    code_root: str | Path | None,
+    product_scope: ProductClassScopeDefinition,
+) -> RegisteredModel:
+    metrics: dict[str, float | int | str | bool | None] = {
+        "product_class_schema_version": product_scope.schema_version,
+        "product_class_scope": product_scope.scope,
+        "product_class_scope_configuration_hash": product_scope.scope_configuration_hash,
+        "product_class_universe_scope_hash": product_scope.universe_scope_hash,
+        "product_class_role_scope_mapping_hash": product_scope.role_scope_mapping_hash,
+        "product_class_eligible_roles_json": _json_dumps(list(product_scope.eligible_roles)),
+        "product_class_eligible_symbols_json": _json_dumps(list(product_scope.eligible_symbols)),
+        "product_class_insufficient_data_reason": reason,
+        "product_class_development_evidence_label": "DEVELOPMENT_HOLDOUT_DIAGNOSTIC",
+    }
+    return RegisteredModel(
+        model_id=model_id,
+        task="swing_direction_probability",
+        horizon=horizon,
+        direction=direction,
+        family=family,
+        state="REJECTED",
+        training_start="n/a",
+        training_end="n/a",
+        validation_start="n/a",
+        validation_end="n/a",
+        holdout_start="n/a",
+        holdout_end="n/a",
+        universe_snapshot_id=universe_snapshot_id,
+        feature_manifest_hash=feature_manifest_hash,
+        raw_manifest_hashes=raw_manifest_hashes,
+        hyperparameters={
+            "reason": reason,
+            "product_class_schema_version": product_scope.schema_version,
+            "product_class_scope": product_scope.scope,
+            "product_class_scope_configuration_hash": product_scope.scope_configuration_hash,
+            "product_class_universe_scope_hash": product_scope.universe_scope_hash,
+        },
+        metrics=metrics,
+        calibration_metrics={},
+        quality_gates={"trainable": False},
+        gate_results=(),
+        artifact_path="",
+        code_commit_hash=current_commit_hash(code_root or Path.cwd()),
+        created_at_utc=created_at,
+    )
 
 
 def discover_models(
@@ -3986,6 +4349,7 @@ def discover_models(
     raw_manifest_hashes: tuple[str, ...] = (),
     config: DiscoveryConfig | None = None,
     code_root: str | Path | None = None,
+    universe: UniverseConfig | None = None,
 ) -> DiscoveryResult:
     config = config or DiscoveryConfig()
     registered: list[RegisteredModel] = []
@@ -3995,40 +4359,65 @@ def discover_models(
         raise ValueError("No eligible modeling rows remain after applying research date bounds")
     research_end = pd.Timestamp(_research_end(frame, config))
     warmup_frame = frame.loc[pd.to_datetime(frame["Date"]) <= research_end].copy()
-    feature_columns = _clean_feature_columns(
+    scope_definitions = _scope_definitions_for_discovery(
         eligible_frame,
-        max_features=config.max_features,
-        correlation_threshold=config.correlation_threshold,
+        config=config,
+        universe=universe,
+    )
+    candidate_pipelines = _candidate_pipelines(
+        config.random_seed,
+        families=config.model_families,
+        include_naive=config.include_naive_controls,
     )
     created_at = datetime.now(UTC).isoformat()
-    for horizon in config.horizons:
-        split = chronological_train_calibration_holdout_split(eligible_frame, horizon=horizon)
-        for direction in config.directions:
-            for family, classifier in _candidate_pipelines(config.random_seed).items():
-                model_id = make_model_id(
-                    task="swing_direction_probability",
+    for scope_name in config.product_class_scopes:
+        product_scope = scope_definitions[scope_name]
+        scoped_frame = filter_frame_for_product_class_scope(eligible_frame, product_scope)
+        for horizon in config.horizons:
+            try:
+                split = chronological_train_calibration_holdout_split(
+                    scoped_frame,
                     horizon=horizon,
-                    direction=direction,
-                    family=family,
-                    universe_snapshot_id=universe_snapshot_id,
-                    feature_manifest_hash=feature_manifest_hash,
-                    created_at_utc=f"{created_at}|{family}|{direction}|{horizon}",
                 )
-                try:
-                    bundle = _train_family(
-                        model_id=model_id,
-                        family=family,
-                        classifier=classifier,
-                        split=split,
-                        full_frame=warmup_frame,
-                        feature_columns=feature_columns,
-                        feature_family_by_column=feature_family_by_column,
-                        direction=direction,
-                        horizon=horizon,
-                        config=config,
-                        calibration_audit_dir=Path(artifact_dir).parent / "calibration",
-                    )
-                except ValueError as exc:
+                feature_columns = _clean_feature_columns(
+                    scoped_frame,
+                    max_features=config.max_features,
+                    correlation_threshold=config.correlation_threshold,
+                )
+            except ValueError as exc:
+                for direction in config.directions:
+                    for family in candidate_pipelines:
+                        model_id = make_model_id(
+                            task="swing_direction_probability",
+                            horizon=horizon,
+                            direction=direction,
+                            family=family,
+                            universe_snapshot_id=universe_snapshot_id,
+                            feature_manifest_hash=feature_manifest_hash,
+                            created_at_utc=(
+                                f"{created_at}|rejected|{product_scope.scope}|"
+                                f"{product_scope.universe_scope_hash}|{family}|{direction}|"
+                                f"{horizon}|{exc}"
+                            ),
+                        )
+                        model = _rejected_model_record(
+                            model_id=model_id,
+                            horizon=horizon,
+                            direction=direction,
+                            family=family,
+                            universe_snapshot_id=universe_snapshot_id,
+                            feature_manifest_hash=feature_manifest_hash,
+                            raw_manifest_hashes=raw_manifest_hashes,
+                            reason=str(exc),
+                            created_at=created_at,
+                            code_root=code_root,
+                            product_scope=product_scope,
+                        )
+                        register_model(db_path, model)
+                        rejected.append(model)
+                continue
+            for direction in config.directions:
+                for family, classifier in candidate_pipelines.items():
                     model_id = make_model_id(
                         task="swing_direction_probability",
                         horizon=horizon,
@@ -4036,105 +4425,144 @@ def discover_models(
                         family=family,
                         universe_snapshot_id=universe_snapshot_id,
                         feature_manifest_hash=feature_manifest_hash,
-                        created_at_utc=f"{created_at}|rejected|{exc}",
+                        created_at_utc=(
+                            f"{created_at}|{product_scope.scope}|"
+                            f"{product_scope.universe_scope_hash}|{family}|{direction}|{horizon}"
+                        ),
                     )
+                    try:
+                        bundle = _train_family(
+                            model_id=model_id,
+                            family=family,
+                            classifier=classifier,
+                            split=split,
+                            full_frame=warmup_frame,
+                            feature_columns=feature_columns,
+                            feature_family_by_column=feature_family_by_column,
+                            direction=direction,
+                            horizon=horizon,
+                            config=config,
+                            calibration_audit_dir=Path(artifact_dir).parent / "calibration",
+                            product_scope=product_scope,
+                            scoped_frame=scoped_frame,
+                        )
+                    except ValueError as exc:
+                        model_id = make_model_id(
+                            task="swing_direction_probability",
+                            horizon=horizon,
+                            direction=direction,
+                            family=family,
+                            universe_snapshot_id=universe_snapshot_id,
+                            feature_manifest_hash=feature_manifest_hash,
+                            created_at_utc=(
+                                f"{created_at}|rejected|{product_scope.scope}|"
+                                f"{product_scope.universe_scope_hash}|{family}|{direction}|"
+                                f"{horizon}|{exc}"
+                            ),
+                        )
+                        model = _rejected_model_record(
+                            model_id=model_id,
+                            horizon=horizon,
+                            direction=direction,
+                            family=family,
+                            universe_snapshot_id=universe_snapshot_id,
+                            feature_manifest_hash=feature_manifest_hash,
+                            raw_manifest_hashes=raw_manifest_hashes,
+                            reason=str(exc),
+                            created_at=created_at,
+                            code_root=code_root,
+                            product_scope=product_scope,
+                        )
+                        register_model(db_path, model)
+                        rejected.append(model)
+                        continue
+
+                    bundle = ModelBundle(
+                        model_id=model_id,
+                        direction=bundle.direction,
+                        horizon=bundle.horizon,
+                        family=bundle.family,
+                        feature_columns=bundle.feature_columns,
+                        feature_family_by_column=bundle.feature_family_by_column,
+                        classifier=bundle.classifier,
+                        calibrator=bundle.calibrator,
+                        target_before_stop_model=bundle.target_before_stop_model,
+                        target_before_stop_calibrator=bundle.target_before_stop_calibrator,
+                        return_model=bundle.return_model,
+                        mfe_model=bundle.mfe_model,
+                        mae_model=bundle.mae_model,
+                        training_medians=bundle.training_medians,
+                        training_means=bundle.training_means,
+                        training_stds=bundle.training_stds,
+                        training_matrix=bundle.training_matrix,
+                        training_labels=bundle.training_labels,
+                        metrics=bundle.metrics,
+                        calibration_metrics=bundle.calibration_metrics,
+                        gate_results=bundle.gate_results,
+                        head_feature_columns=bundle.head_feature_columns,
+                        head_feature_manifests=bundle.head_feature_manifests,
+                        feature_screen_metadata=bundle.feature_screen_metadata,
+                        feature_screen_records=bundle.feature_screen_records,
+                        path_domain_metadata=bundle.path_domain_metadata,
+                        product_class_schema_version=bundle.product_class_schema_version,
+                        product_class_scope=bundle.product_class_scope,
+                        product_class_eligible_roles=bundle.product_class_eligible_roles,
+                        product_class_eligible_symbols=bundle.product_class_eligible_symbols,
+                        product_class_role_scope_mapping=bundle.product_class_role_scope_mapping,
+                        product_class_role_scope_mapping_hash=(
+                            bundle.product_class_role_scope_mapping_hash
+                        ),
+                        product_class_scope_configuration_hash=(
+                            bundle.product_class_scope_configuration_hash
+                        ),
+                        product_class_universe_scope_hash=bundle.product_class_universe_scope_hash,
+                        product_class_scope_metadata=bundle.product_class_scope_metadata,
+                    )
+                    artifact_path = Path(artifact_dir) / f"{model_id}.joblib"
+                    save_model_bundle(bundle, artifact_path)
+                    eligibility = promotion_eligibility(bundle.gate_results)
+                    state: ModelState = "CHALLENGER" if eligibility.eligible else "CANDIDATE"
                     model = RegisteredModel(
                         model_id=model_id,
                         task="swing_direction_probability",
                         horizon=horizon,
                         direction=direction,
                         family=family,
-                        state="REJECTED",
-                        training_start="n/a",
-                        training_end="n/a",
-                        validation_start="n/a",
-                        validation_end="n/a",
-                        holdout_start="n/a",
-                        holdout_end="n/a",
+                        state=state,
+                        training_start=split.train_start,
+                        training_end=split.train_end,
+                        validation_start=split.calibration_start,
+                        validation_end=split.calibration_end,
+                        holdout_start=split.holdout_start,
+                        holdout_end=split.holdout_end,
                         universe_snapshot_id=universe_snapshot_id,
                         feature_manifest_hash=feature_manifest_hash,
                         raw_manifest_hashes=raw_manifest_hashes,
-                        hyperparameters={"reason": str(exc)},
-                        metrics={},
-                        calibration_metrics={},
-                        quality_gates={"trainable": False},
-                        gate_results=(),
-                        artifact_path="",
+                        hyperparameters={
+                            "family": family,
+                            "max_features": config.max_features,
+                            "research_start": config.research_start,
+                            "research_end": _research_end(frame, config),
+                            "selection_policy": asdict(selection_policy_from_config(config)),
+                            "portfolio_policy": bundle.metrics.get("portfolio_policy_json"),
+                            "product_class_schema_version": product_scope.schema_version,
+                            "product_class_scope": product_scope.scope,
+                            "product_class_scope_configuration_hash": (
+                                product_scope.scope_configuration_hash
+                            ),
+                            "product_class_universe_scope_hash": (
+                                product_scope.universe_scope_hash
+                            ),
+                        },
+                        metrics=bundle.metrics,
+                        calibration_metrics=bundle.calibration_metrics,
+                        quality_gates=quality_gate_bool_map(bundle.gate_results),
+                        gate_results=bundle.gate_results,
+                        artifact_path=str(artifact_path),
                         code_commit_hash=current_commit_hash(code_root or Path.cwd()),
                         created_at_utc=created_at,
                     )
                     register_model(db_path, model)
-                    rejected.append(model)
-                    continue
-
-                bundle = ModelBundle(
-                    model_id=model_id,
-                    direction=bundle.direction,
-                    horizon=bundle.horizon,
-                    family=bundle.family,
-                    feature_columns=bundle.feature_columns,
-                    feature_family_by_column=bundle.feature_family_by_column,
-                    classifier=bundle.classifier,
-                    calibrator=bundle.calibrator,
-                    target_before_stop_model=bundle.target_before_stop_model,
-                    target_before_stop_calibrator=bundle.target_before_stop_calibrator,
-                    return_model=bundle.return_model,
-                    mfe_model=bundle.mfe_model,
-                    mae_model=bundle.mae_model,
-                    training_medians=bundle.training_medians,
-                    training_means=bundle.training_means,
-                    training_stds=bundle.training_stds,
-                    training_matrix=bundle.training_matrix,
-                    training_labels=bundle.training_labels,
-                    metrics=bundle.metrics,
-                    calibration_metrics=bundle.calibration_metrics,
-                    gate_results=bundle.gate_results,
-                    head_feature_columns=bundle.head_feature_columns,
-                    head_feature_manifests=bundle.head_feature_manifests,
-                    feature_screen_metadata=bundle.feature_screen_metadata,
-                    feature_screen_records=bundle.feature_screen_records,
-                    path_domain_metadata=bundle.path_domain_metadata,
-                )
-                artifact_path = Path(artifact_dir) / f"{model_id}.joblib"
-                save_model_bundle(bundle, artifact_path)
-                eligibility = promotion_eligibility(bundle.gate_results)
-                state: ModelState = "CHALLENGER" if eligibility.eligible else "CANDIDATE"
-                model = RegisteredModel(
-                    model_id=model_id,
-                    task="swing_direction_probability",
-                    horizon=horizon,
-                    direction=direction,
-                    family=family,
-                    state=state,
-                    training_start=split.train_start,
-                    training_end=split.train_end,
-                    validation_start=split.calibration_start,
-                    validation_end=split.calibration_end,
-                    holdout_start=split.holdout_start,
-                    holdout_end=split.holdout_end,
-                    universe_snapshot_id=universe_snapshot_id,
-                    feature_manifest_hash=feature_manifest_hash,
-                    raw_manifest_hashes=raw_manifest_hashes,
-                    hyperparameters={
-                        "family": family,
-                        "max_features": config.max_features,
-                        "research_start": config.research_start,
-                        "research_end": _research_end(frame, config),
-                        "selection_policy": asdict(selection_policy_from_config(config)),
-                        "portfolio_policy": bundle.metrics.get("portfolio_policy_json"),
-                    },
-                    metrics=bundle.metrics,
-                    calibration_metrics=bundle.calibration_metrics,
-                    quality_gates=quality_gate_bool_map(bundle.gate_results),
-                    gate_results=bundle.gate_results,
-                    artifact_path=str(artifact_path),
-                    code_commit_hash=current_commit_hash(code_root or Path.cwd()),
-                    created_at_utc=created_at,
-                )
-                register_model(db_path, model)
-                if state == "CHALLENGER":
-                    registered.append(model)
-                else:
                     registered.append(model)
     best = sorted(
         registered,
@@ -4164,6 +4592,20 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     output["direction"] = bundle.direction
     output["horizon"] = bundle.horizon
     output["model_id"] = bundle.model_id
+    product_metadata = bundle_product_class_metadata(bundle)
+    product_roles = tuple(cast(tuple[object, ...], product_metadata["eligible_roles"]))
+    product_symbols = tuple(cast(tuple[object, ...], product_metadata["eligible_symbols"]))
+    output["product_class_schema_version"] = str(product_metadata["schema_version"])
+    output["product_class_scope"] = str(product_metadata["scope"])
+    output["product_class_scope_configuration_hash"] = str(
+        product_metadata["scope_configuration_hash"]
+    )
+    output["product_class_universe_scope_hash"] = str(product_metadata["universe_scope_hash"])
+    output["product_class_role_scope_mapping_hash"] = str(
+        product_metadata["role_scope_mapping_hash"]
+    )
+    output["product_class_eligible_roles"] = ";".join(str(value) for value in product_roles)
+    output["product_class_eligible_symbol_count"] = len(product_symbols)
     output["calibrated_probability"] = probability
     output["primary_feature_manifest_hash"] = bundle_head_feature_manifest(bundle, PRIMARY_HEAD)
     for head_name, output_prefix in (
