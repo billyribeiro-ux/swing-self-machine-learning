@@ -1,24 +1,24 @@
 # Linear-Family Path-Head Retirement V1 Handoff
 
-Date: 2026-06-24
+Date: 2026-06-25
 
 ## Scope
 
-Implemented Linear-Family Path-Head Retirement V1 after the immutable baseline generation:
+Implemented and verified Linear-Family Path-Head Retirement V1 after the immutable baseline generation:
 
 `2026-06-22T18:07:43.648509+00:00`
 
-This milestone did not rerun the previous domain-preserving magnitude-modeling task. The baseline remains immutable and was used only for comparison.
+That baseline generation remains immutable and was not rerun. It is only a comparison baseline from the earlier domain-preserving magnitude-modeling task.
 
 ## Implementation
 
-Logistic-family artifacts now keep these heads active:
+Logistic-family artifacts keep these heads active:
 
 - primary positive-return classifier
 - Target-Before-Stop classifier
 - expected-return regressor
 
-Logistic-family artifacts now retire these required path heads:
+Logistic-family artifacts retire these required path heads:
 
 - MFE: `RETIRED_UNSUITABLE_ESTIMATOR`
 - MAE: `RETIRED_UNSUITABLE_ESTIMATOR`
@@ -31,211 +31,154 @@ Retirement reason:
 
 `linear_family_path_head_retired_unsuitable_estimator`
 
-The logistic MFE/MAE path uses `RetiredPathHeadModel` placeholders and does not fit or persist Tweedie MFE/MAE estimators. ExtraTrees and HistGradientBoosting MFE/MAE heads remain active and unchanged under `path_metric_magnitude_domain_v1`.
+The logistic MFE/MAE path uses `RetiredPathHeadModel` placeholders and fits no Tweedie MFE/MAE estimator. ExtraTrees and HistGradientBoosting MFE/MAE heads remain active under `path_metric_magnitude_domain_v1`.
 
-## Enforcement
+## Implementation Commit
 
-Added mandatory gates:
+Retirement cleanup commit reviewed before discovery:
 
-- `mfe_required_path_head_active`
-- `mae_required_path_head_active`
-
-Added scanner rejection reasons for retired heads:
-
-- `mfe_linear_family_path_head_retired_unsuitable_estimator`
-- `mae_linear_family_path_head_retired_unsuitable_estimator`
-
-Promotion and prospective final-holdout enrollment now reject retired required path heads explicitly.
-
-Scanner identity now includes path-head capability state and retirement metadata.
-
-## Implementation Review
+`67b4e17787d7d40cef7bd05118dc94165151a6c7`
 
 Review result: clean.
 
 Checked specifically for:
 
-- hidden Tweedie MFE/MAE fitting in logistic artifacts: none found
-- MFE/MAE placeholder prediction being called by scanner: not called
+- hidden logistic Tweedie MFE/MAE fitting: none found
 - primary/TBS/expected-return heads accidentally retired: not found
 - nonlinear MFE/MAE heads accidentally retired: not found
-- promotion bypass: blocked by mandatory required-head gates and registry metadata blockers
-- scanner bypass: blocked by state/gate eligibility and retired-head prediction integrity
-- final-holdout enrollment bypass: blocked by development-gate blockers
-
-Implementation commit:
-
-`df5c396caed1b9901194a418fd30bfc86d096271`
+- scanner bypass for retired heads: blocked with explicit retired-head reasons
+- generic retired-head scanner noise: removed from scanner exclusion reasons
+- final-holdout enrollment bypass: blocked by required path-head blockers and mandatory gate failures
 
 ## Pre-Discovery Verification
 
 Ran before the post-retirement discovery:
 
-- `.venv/bin/pytest`: 268 passed
+- `.venv/bin/pytest`: 272 passed, 166 warnings
 - `.venv/bin/ruff check .`: passed
 - `.venv/bin/ruff format --check .`: passed
 - `.venv/bin/mypy src`: passed
 
-## Post-Retirement Generation
+## Post-Retirement Discovery
 
-Ran `discover-models` exactly once after the implementation commit:
+Ran `discover-models` exactly once after the implementation commit and review:
 
 `.venv/bin/python -m swing_rsi.cli discover-models --minimum-training-samples 200 --minimum-holdout-samples 80`
 
-New generation:
+New post-retirement generation:
 
-`2026-06-24T12:38:43.122103+00:00`
+`2026-06-25T13:11:51.610283+00:00`
 
 This differs from the immutable baseline:
 
 `2026-06-22T18:07:43.648509+00:00`
 
-Models registered: 8
+Result:
 
-Challengers: 0
-
-Candidates needing review: 8
-
-Promoted models: 0
+- Models registered this run: 8
+- Challengers: 0
+- Candidates needing review: 8
+- Rejected/experimental: 0
+- Promoted models: 0
+- Best failed-gate candidate retained for inspection: `20ec5e2b936145463e2d22bf`
 
 ## New Model IDs
 
 | Direction | Family | Model ID | State |
 |---|---|---|---|
-| bull | logistic_regression | `6368d67eaaa721101de5ceb4` | CANDIDATE |
-| bear | logistic_regression | `49f255fd5496f5d7881499e6` | CANDIDATE |
-| bull | extra_trees | `0ddd122a586fb6c797357ad5` | CANDIDATE |
-| bear | extra_trees | `722fb3fda82754b5bd572e4c` | CANDIDATE |
-| bull | hist_gradient_boosting | `d32c5d3e44372e91342e39d8` | CANDIDATE |
-| bear | hist_gradient_boosting | `b2f4d14b22d11d5875700fee` | CANDIDATE |
-| bull | naive_base_rate | `d881e09a3dc9f92bf6d4c96a` | CANDIDATE |
-| bear | naive_base_rate | `5b6124023f68bcf60ec2d943` | CANDIDATE |
+| bear | extra_trees | `4d66c49b675803520298a243` | CANDIDATE |
+| bear | hist_gradient_boosting | `4b25faeeca72518f3f435fa7` | CANDIDATE |
+| bear | logistic_regression | `7a534a2fcf2a3e8f4e17a83f` | CANDIDATE |
+| bear | naive_base_rate | `e502adcfe8cf8c25c3138ee3` | CANDIDATE |
+| bull | extra_trees | `108bc18cfa5be414666c2512` | CANDIDATE |
+| bull | hist_gradient_boosting | `b93b2258c10aea5cef81d291` | CANDIDATE |
+| bull | logistic_regression | `ed57a9e3a3be12fe39241f62` | CANDIDATE |
+| bull | naive_base_rate | `20ec5e2b936145463e2d22bf` | CANDIDATE |
 
 ## Artifact Verification
 
 | Direction | Family | MFE State | MFE Estimator | MAE State | MAE Estimator | Required-Head Gates |
 |---|---|---|---|---|---|---|
-| bull | logistic_regression | RETIRED_UNSUITABLE_ESTIMATOR | RetiredPathHeadModel | RETIRED_UNSUITABLE_ESTIMATOR | RetiredPathHeadModel | FAIL / FAIL |
 | bear | logistic_regression | RETIRED_UNSUITABLE_ESTIMATOR | RetiredPathHeadModel | RETIRED_UNSUITABLE_ESTIMATOR | RetiredPathHeadModel | FAIL / FAIL |
-| bull | extra_trees | ACTIVE | ExtraTreesRegressor | ACTIVE | ExtraTreesRegressor | PASS / PASS |
+| bull | logistic_regression | RETIRED_UNSUITABLE_ESTIMATOR | RetiredPathHeadModel | RETIRED_UNSUITABLE_ESTIMATOR | RetiredPathHeadModel | FAIL / FAIL |
 | bear | extra_trees | ACTIVE | ExtraTreesRegressor | ACTIVE | ExtraTreesRegressor | PASS / PASS |
-| bull | hist_gradient_boosting | ACTIVE | HistGradientBoostingRegressor | ACTIVE | HistGradientBoostingRegressor | PASS / PASS |
+| bull | extra_trees | ACTIVE | ExtraTreesRegressor | ACTIVE | ExtraTreesRegressor | PASS / PASS |
 | bear | hist_gradient_boosting | ACTIVE | HistGradientBoostingRegressor | ACTIVE | HistGradientBoostingRegressor | PASS / PASS |
+| bull | hist_gradient_boosting | ACTIVE | HistGradientBoostingRegressor | ACTIVE | HistGradientBoostingRegressor | PASS / PASS |
 
 Logistic verification:
 
 - no Tweedie MFE estimator artifact
 - no Tweedie MAE estimator artifact
-- MFE and MAE capability states retired
-- primary feature manifests present
-- Target-Before-Stop feature manifests present
-- expected-return feature manifests present
-- promotion eligibility false
-- final-holdout enrollment blockers include retired MFE/MAE heads
+- MFE and MAE capability states are retired
+- loaded primary classifier remains an active pipeline
+- loaded Target-Before-Stop classifier remains an active pipeline
+- loaded expected-return regressor remains an active pipeline
+- `mfe_required_path_head_active` fails
+- `mae_required_path_head_active` fails
+- final-holdout enrollment blockers include `mfe_path_head_retired_unsuitable_estimator` and `mae_path_head_retired_unsuitable_estimator`
 
-## Baseline Comparison
+Nonlinear verification:
 
-| Direction | Family | Old MFE Estimator | New MFE Estimator | Old MAE Estimator | New MAE Estimator | Old Promo Eligible | New Promo Eligible |
-|---|---|---|---|---|---|---|---|
-| bull | logistic_regression | TweedieRegressor | RetiredPathHeadModel | TweedieRegressor | RetiredPathHeadModel | false | false |
-| bear | logistic_regression | TweedieRegressor | RetiredPathHeadModel | TweedieRegressor | RetiredPathHeadModel | false | false |
-| bull | extra_trees | ExtraTreesRegressor | ExtraTreesRegressor | ExtraTreesRegressor | ExtraTreesRegressor | false | false |
-| bear | extra_trees | ExtraTreesRegressor | ExtraTreesRegressor | ExtraTreesRegressor | ExtraTreesRegressor | false | false |
-| bull | hist_gradient_boosting | HistGradientBoostingRegressor | HistGradientBoostingRegressor | HistGradientBoostingRegressor | HistGradientBoostingRegressor | false | false |
-| bear | hist_gradient_boosting | HistGradientBoostingRegressor | HistGradientBoostingRegressor | HistGradientBoostingRegressor | HistGradientBoostingRegressor | false | false |
+- ExtraTrees MFE/MAE heads load as `ExtraTreesRegressor`
+- HistGradientBoosting MFE/MAE heads load as `HistGradientBoostingRegressor`
+- nonlinear required-path-head gates pass
 
-## Failed Gates
+## Scanner Verification
 
-All new models remain promotion-ineligible. Key blockers:
-
-- all models: `final_holdout_required_for_promotion`
-- logistic models: `mfe_required_path_head_active`, `mae_required_path_head_active`
-- many selected-row-scarce models: expected-value, profit-factor, drawdown, concentration, and temporal-fold evidence gates
-- nonlinear models: remaining OOD severity and selected-candidate quality gates
-- naive controls: `not_naive_control`
-
-## Review-Only Scanner
-
-Ran:
+Ran review-only scanner after the post-retirement discovery:
 
 `.venv/bin/python -m swing_rsi.cli scan --include-challengers`
 
-Scan ID:
+Result:
 
-`4335c449dc0312d1280b5775`
+- Scan ID: `9a0c6eb95e2551a716d16e2b`
+- As-of date: `2026-06-18`
+- Rows: 50
+- Actionable rows: 0
+- Rejected rows: 50
+- Retired-head rows: 13
 
-As-of date:
+Scanner exclusion patterns:
 
-`2026-06-18`
+| Exclusion reason | Rows |
+|---|---:|
+| `model_not_promoted` | 37 |
+| `model_not_promoted;mfe_linear_family_path_head_retired_unsuitable_estimator;mae_linear_family_path_head_retired_unsuitable_estimator` | 13 |
 
-Rows: 50
+Generic retired-head scanner noise:
 
-Actionable rows: 0
-
-Rejected rows: 50
-
-Model states in scan: 50 CANDIDATE rows
-
-Gate-eligible rows: 0
-
-Retired MFE rows: 13
-
-Retired MAE rows: 13
-
-Rows with retired-head rejection reasons: 13
-
-Top rejection patterns:
-
-- 37 rows: `model_not_promoted`
-- 13 rows: `model_not_promoted` plus retired MFE/MAE and nonfinite retired-head prediction reasons
+- `nonfinite_prediction`: 0 rows
+- `mfe_magnitude_prediction_invalid`: 0 rows
+- `mae_magnitude_prediction_invalid`: 0 rows
+- `mfe_prediction_sign_contract_failed`: 0 rows
+- `mae_prediction_sign_contract_failed`: 0 rows
 
 ## State Integrity
 
 No model was promoted.
 
-No forward-update or daily-cycle command was run.
+No `forward-update`, `daily-cycle`, or `final-holdout-init` command was run.
 
-No prospective final-holdout run was initialized.
+No prospective final-holdout run was created.
 
-Current SQLite state after verification:
+State after verification:
 
-- latest generation champions: 0
+- latest generation: `2026-06-25T13:11:51.610283+00:00`
+- total model rows: 146
+- latest generation rows: 8
+- latest generation states: 8 `CANDIDATE`, 0 `CHALLENGER`, 0 `CHAMPION`
 - final-holdout runs: 0
-- forward events table still exists with prior events; this task did not run forward-update
-- latest scanner snapshot: `4335c449dc0312d1280b5775`
-
-## Audit Exports
-
-Model audit export:
-
-`reports/linear_path_head_retirement/`
-
-Key files:
-
-- `model_summary.csv`
-- `full_gate_audit.csv`
-- `feature_screen_audit.csv`
-- `calibration_method_comparison.csv`
-- `calibration_probability_audit.parquet`
-- `calibration_governance.json`
-
-These exports are ignored artifacts and were not committed.
-
-## Assumptions
-
-- Linear family means the repository's `logistic_regression` family.
-- Retired required path heads should remain explicit artifact metadata, not missing metadata.
-- Scanner non-actionability can be verified in review mode through rejected rows without creating paper-forward events.
-
-## Known Limitations
-
-- Retiring linear-family MFE/MAE heads does not improve nonlinear model quality.
-- Logistic-family models remain useful only for historical audit/review because required path heads are unavailable.
-- Current development holdout remains a development holdout, not final validation evidence.
+- forward events: 285, unchanged from the pre-discovery count
+- scanner snapshot created for verification only: `9a0c6eb95e2551a716d16e2b`
 
 ## Data Leakage Review
 
-No raw data, labels, feature definitions, thresholds, calibration methods, OOD governance, or research dates were changed.
+No raw data, labels, feature definitions, thresholds, calibration methods, OOD governance, research dates, signal timestamps, entries, exits, costs, or failed trades were changed.
+
+No discovery was run before the implementation commit review.
+
+No FMP update was run.
 
 No final-holdout data was created or used.
 
@@ -243,12 +186,24 @@ No forward-test outcomes were used.
 
 The post-retirement discovery used existing local market data, existing feature panels, and existing labels.
 
+## Assumptions
+
+- Linear family means the repository's `logistic_regression` family.
+- Retired required path heads are explicit artifact metadata, not missing metadata.
+- Scanner non-actionability can be verified in review mode through rejected rows without creating paper-forward events.
+
+## Known Limitations
+
+- Retiring logistic-family MFE/MAE heads does not improve nonlinear model quality.
+- Logistic-family models remain review/audit artifacts because required MFE/MAE path heads are unavailable.
+- The current holdout remains `DEVELOPMENT_HOLDOUT`, not final validation evidence.
+
 ## Scope Changes
 
 No Version 1 scope expansion.
 
-No options, intraday data, brokerage execution, reinforcement learning, or deep learning were added.
+No options, intraday data, market internals, brokerage execution, reinforcement learning, or deep learning were added.
 
-## Next Smallest Task
+## Next Smallest Milestone
 
-Perform a read-only diagnosis of the remaining nonlinear path-head OOD and selected-candidate gate failures in the post-retirement generation.
+Perform a read-only diagnosis of the remaining nonlinear model quality and selected-candidate gate failures in the new post-retirement generation.
