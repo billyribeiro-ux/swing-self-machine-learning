@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added Product-Class Specialist Challenger V1: discovery now supports governed product-class scopes (`POOLED`, `ORDINARY`, and `LEVERAGED_INVERSE`) derived from universe roles, filters training/calibration/development-holdout target rows by scope while preserving full-universe context features, persists scope hashes and target distributions, and trains active nonlinear specialist challengers with matching naive controls where data is sufficient.
+- Added scope-aware review scanner routing, scanner identity metadata, model-audit/dashboard product-class diagnostics, and regression coverage for deterministic role mapping, unknown-role rejection, no ticker-name heuristics, scoped chronological splits, independent specialist artifacts, scope mismatch rejection, and scanner identity changes from scope metadata.
 - Added a read-only nonlinear model quality diagnosis for the post-retirement generation, documenting that active ExtraTrees and HistGradientBoosting path heads remain finite, sign-valid, and within current OOD limits while selected-candidate and final-holdout gates still block promotion.
 - Refined Linear-Family Path-Head Retirement V1 scanner handling so retired logistic MFE/MAE heads remain explicit non-actionable blockers without surfacing generic nonfinite, sign-contract, or magnitude-prediction rejection noise.
 - Added ATR-Normalized Path Targets V1: active expected-return, MFE, and MAE heads now train and screen in close-known `atr_pct_14` units while preserving historical labels and mapping predictions back to canonical decimal returns for scanner, selection, attribution, portfolio replay, and paper-forward use.

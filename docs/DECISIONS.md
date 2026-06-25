@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-25 — Product-class specialist challengers separate target rows from market context
+
+Decision: Add `product_class_specialist_v1` challenger scope metadata with `POOLED`, `ORDINARY`, and `LEVERAGED_INVERSE` scopes derived only from governed universe roles. Specialist discovery filters eligible prediction rows by scope after full-universe feature construction, so market, sector, breadth, relationship, inverse/leveraged, and regime context remain available while ordinary and leveraged/inverse target distributions are no longer pooled indiscriminately. The first specialist generation trains only active nonlinear learned families, with matching naive controls where data is sufficient; logistic-family specialist challengers are excluded because their MFE/MAE path heads are retired.
+
+Reason: Read-only nonlinear diagnostics showed leveraged and inverse ETFs materially affected path-return, MFE, MAE, OOD, calibration, and concentration behavior. Product specialization tests that heterogeneity without touching the frozen pooled operational model, weakening quality gates, changing labels, changing thresholds, or using development evidence as final-holdout proof.
+
 ## 2026-06-22 — Path-metric heads use target-specific train-only feature screens
 
 Decision: Expected-return, MFE, and MAE regressors now use independent train-only feature screens keyed to their exact continuous path targets. The screens start from the complete eligible numeric feature universe, exclude labels and prohibited metadata, fit missingness/variance/imputation on training rows only, score surviving features with `mutual_info_regression`, prune correlations in score order, and persist separate manifests under `path_metric_target_specific_feature_screen_v1`.
