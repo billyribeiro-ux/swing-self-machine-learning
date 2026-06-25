@@ -1385,8 +1385,16 @@ def test_predict_bundle_marks_retired_logistic_path_heads_without_predicting() -
     assert prediction["mae_path_head_retirement_reason"] == LINEAR_PATH_HEAD_RETIREMENT_REASON
     assert pd.isna(prediction["expected_mfe"])
     assert pd.isna(prediction["expected_mae"])
-    assert bool(prediction["expected_mfe_magnitude_prediction_invalid"]) is True
-    assert bool(prediction["expected_mae_magnitude_prediction_invalid"]) is True
+    assert bool(prediction["expected_mfe_magnitude_prediction_invalid"]) is False
+    assert bool(prediction["expected_mfe_signed_prediction_invalid"]) is False
+    assert bool(prediction["expected_mfe_magnitude_domain_valid"]) is False
+    assert bool(prediction["expected_mfe_signed_domain_valid"]) is False
+    assert bool(prediction["expected_mfe_sign_contract_valid"]) is True
+    assert bool(prediction["expected_mae_magnitude_prediction_invalid"]) is False
+    assert bool(prediction["expected_mae_signed_prediction_invalid"]) is False
+    assert bool(prediction["expected_mae_magnitude_domain_valid"]) is False
+    assert bool(prediction["expected_mae_signed_domain_valid"]) is False
+    assert bool(prediction["expected_mae_sign_contract_valid"]) is True
 
 
 @pytest.mark.parametrize(
@@ -1687,12 +1695,25 @@ def test_scanner_rejects_retired_logistic_path_heads_explicitly(tmp_path: Path) 
     assert row["candidate_status"] == "REJECTED"
     assert f"mfe_{LINEAR_PATH_HEAD_RETIREMENT_REASON}" in row["exclusion_reason"]
     assert f"mae_{LINEAR_PATH_HEAD_RETIREMENT_REASON}" in row["exclusion_reason"]
+    assert "mfe_magnitude_prediction_invalid" not in row["exclusion_reason"]
+    assert "mae_magnitude_prediction_invalid" not in row["exclusion_reason"]
+    assert "mfe_prediction_sign_contract_failed" not in row["exclusion_reason"]
+    assert "mae_prediction_sign_contract_failed" not in row["exclusion_reason"]
+    assert "nonfinite_prediction" not in row["exclusion_reason"]
     assert row["mfe_path_head_capability_state"] == (
         PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
     )
     assert row["mae_path_head_capability_state"] == (
         PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
     )
+    assert bool(row["expected_mfe_magnitude_prediction_invalid"]) is False
+    assert bool(row["expected_mfe_signed_prediction_invalid"]) is False
+    assert bool(row["expected_mfe_magnitude_domain_valid"]) is False
+    assert bool(row["expected_mfe_signed_domain_valid"]) is False
+    assert bool(row["expected_mae_magnitude_prediction_invalid"]) is False
+    assert bool(row["expected_mae_signed_prediction_invalid"]) is False
+    assert bool(row["expected_mae_magnitude_domain_valid"]) is False
+    assert bool(row["expected_mae_signed_domain_valid"]) is False
 
 
 def test_scanner_rejects_invalid_path_magnitude_predictions_explicitly(tmp_path: Path) -> None:

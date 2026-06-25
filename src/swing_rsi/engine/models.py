@@ -4271,6 +4271,7 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         target_prediction: PathTargetPrediction | None = None,
         ood_values: np.ndarray | pd.Series | None = None,
     ) -> None:
+        retired_path_head = False
         output[f"{output_column}_required_feature_missing"] = bool(missing_features)
         output[f"{output_column}_missing_features"] = ";".join(missing_features[:10])
         if metric_prefix in {"mfe", "mae"}:
@@ -4283,6 +4284,9 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             capability_state = str(domain.get("path_head_capability_state") or "")
             if not capability_state and domain_schema == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION:
                 capability_state = PATH_HEAD_CAPABILITY_ACTIVE
+            retired_path_head = (
+                capability_state == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+            )
             output[f"{metric_prefix}_domain_schema_version"] = domain_schema
             output[f"{metric_prefix}_path_head_capability_state"] = capability_state
             output[f"{metric_prefix}_path_head_retirement_schema_version"] = str(
@@ -4291,9 +4295,7 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             output[f"{metric_prefix}_path_head_retirement_reason"] = str(
                 domain.get("path_head_retirement_reason") or ""
             )
-            output[f"{metric_prefix}_path_head_retired"] = (
-                capability_state == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
-            )
+            output[f"{metric_prefix}_path_head_retired"] = retired_path_head
             output[f"{metric_prefix}_domain_metadata_missing"] = (
                 domain_schema != PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
             )
@@ -4369,14 +4371,16 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         output[f"{output_column}_ood_metadata_missing"] = [
             check.metadata_missing for check in checks
         ]
-        if metric_prefix == "mfe":
+        if retired_path_head:
+            output[f"{output_column}_sign_contract_valid"] = True
+        elif metric_prefix == "mfe":
             output[f"{output_column}_sign_contract_valid"] = numeric >= 0.0
         elif metric_prefix == "mae":
             output[f"{output_column}_sign_contract_valid"] = numeric <= 0.0
         else:
             output[f"{output_column}_sign_contract_valid"] = True
         if metric_prefix in {"mfe", "mae"}:
-            if domain_prediction is None:
+            if retired_path_head or domain_prediction is None:
                 magnitude = np.full(len(frame), math.nan)
                 magnitude_nonfinite = np.full(len(frame), False)
                 magnitude_violation = np.full(len(frame), False)
@@ -4384,8 +4388,12 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
                 magnitude = domain_prediction.internal_magnitude.to_numpy(dtype=float)
                 magnitude_nonfinite = ~np.isfinite(magnitude)
                 magnitude_violation = np.isfinite(magnitude) & (magnitude < 0.0)
-            signed_nonfinite = ~np.isfinite(numeric)
-            if metric_prefix == "mfe":
+            signed_nonfinite = (
+                np.full(len(frame), False) if retired_path_head else ~np.isfinite(numeric)
+            )
+            if retired_path_head:
+                signed_violation = np.full(len(frame), False)
+            elif metric_prefix == "mfe":
                 signed_violation = np.isfinite(numeric) & (numeric < 0.0)
             else:
                 signed_violation = np.isfinite(numeric) & (numeric > 0.0)
@@ -4397,10 +4405,16 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             output[f"{output_column}_signed_prediction_invalid"] = (
                 signed_nonfinite | signed_violation
             )
-            output[f"{output_column}_magnitude_domain_valid"] = ~(
-                magnitude_nonfinite | magnitude_violation
+            output[f"{output_column}_magnitude_domain_valid"] = (
+                np.full(len(frame), False)
+                if retired_path_head
+                else ~(magnitude_nonfinite | magnitude_violation)
             )
-            output[f"{output_column}_signed_domain_valid"] = ~(signed_nonfinite | signed_violation)
+            output[f"{output_column}_signed_domain_valid"] = (
+                np.full(len(frame), False)
+                if retired_path_head
+                else ~(signed_nonfinite | signed_violation)
+            )
             output[f"{output_column}_magnitude_domain_violation"] = magnitude_violation
             output[f"{output_column}_signed_domain_violation"] = signed_violation
 
@@ -4439,15 +4453,17 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         ood_values=expected_return_ood_values,
     )
     mfe_target_normalization = _target_normalization_metadata_for_bundle(bundle, MFE_HEAD)
-    mfe_missing_features = [column for column in mfe_features if column not in frame.columns]
-    if mfe_target_normalization and not path_atr_valid:
-        mfe_missing_features.append(PATH_TARGET_ATR_FEATURE)
-    mfe_missing_features = list(dict.fromkeys(mfe_missing_features))
     mfe_domain_metadata = bundle_path_domain_metadata(bundle, MFE_HEAD)
     mfe_retired = (
         str(mfe_domain_metadata.get("path_head_capability_state") or "")
         == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
     )
+    mfe_missing_features = (
+        [] if mfe_retired else [column for column in mfe_features if column not in frame.columns]
+    )
+    if mfe_target_normalization and not path_atr_valid and not mfe_retired:
+        mfe_missing_features.append(PATH_TARGET_ATR_FEATURE)
+    mfe_missing_features = list(dict.fromkeys(mfe_missing_features))
     mfe_has_domain = (
         str(mfe_domain_metadata.get("domain_schema_version") or "")
         == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
@@ -4486,15 +4502,17 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         ood_values=mfe_ood_values,
     )
     mae_target_normalization = _target_normalization_metadata_for_bundle(bundle, MAE_HEAD)
-    mae_missing_features = [column for column in mae_features if column not in frame.columns]
-    if mae_target_normalization and not path_atr_valid:
-        mae_missing_features.append(PATH_TARGET_ATR_FEATURE)
-    mae_missing_features = list(dict.fromkeys(mae_missing_features))
     mae_domain_metadata = bundle_path_domain_metadata(bundle, MAE_HEAD)
     mae_retired = (
         str(mae_domain_metadata.get("path_head_capability_state") or "")
         == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
     )
+    mae_missing_features = (
+        [] if mae_retired else [column for column in mae_features if column not in frame.columns]
+    )
+    if mae_target_normalization and not path_atr_valid and not mae_retired:
+        mae_missing_features.append(PATH_TARGET_ATR_FEATURE)
+    mae_missing_features = list(dict.fromkeys(mae_missing_features))
     mae_has_domain = (
         str(mae_domain_metadata.get("domain_schema_version") or "")
         == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION

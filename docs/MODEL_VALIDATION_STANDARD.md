@@ -75,7 +75,7 @@ Historical path labels are not rewritten. Their external contract remains expect
 - `mfe_magnitude_atr_target = existing MFE label / atr_pct_14`;
 - `mae_magnitude_atr_target = (-1 * existing MAE label) / atr_pct_14`.
 
-Under `path_metric_magnitude_domain_v1`, linear-family path-magnitude heads use `TweedieRegressor(power=1.5, link="log")`, HistGradientBoosting path-magnitude heads use `HistGradientBoostingRegressor(loss="poisson")`, ExtraTrees path-magnitude heads train directly on nonnegative magnitudes, and naive controls use nonnegative training-magnitude summaries. Expected-return modeling remains signed.
+Under `path_metric_magnitude_domain_v1`, active HistGradientBoosting path-magnitude heads use `HistGradientBoostingRegressor(loss="poisson")`, active ExtraTrees path-magnitude heads train directly on nonnegative magnitudes, and naive controls use nonnegative training-magnitude summaries. Under `linear_family_path_head_retirement_v1`, logistic-family MFE and MAE heads are marked `RETIRED_UNSUITABLE_ESTIMATOR` and fit no Tweedie MFE/MAE estimator. Expected-return modeling remains signed and active.
 
 Predictions are mapped back to canonical decimal-return units before scanner output, selection policy, attribution, portfolio replay, and paper-forward testing. Invalid magnitude output or invalid signed output is a hard integrity failure; no post-prediction clipping may be used to repair it.
 

@@ -224,15 +224,17 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
             "mae_prediction_sign_contract_failed",
         ),
     ):
-        if (
+        retired_path_head = (
             str(item.get(f"{head_name}_path_head_capability_state") or "")
             == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
-        ):
+        )
+        if retired_path_head:
             retirement_reason = str(
                 item.get(f"{head_name}_path_head_retirement_reason")
                 or LINEAR_PATH_HEAD_RETIREMENT_REASON
             )
             rejection_reasons.append(f"{head_name}_{retirement_reason}")
+            continue
         if bool(item.get(f"{head_name}_domain_metadata_missing", False)):
             rejection_reasons.append(metadata_reason)
         if bool(item.get(f"{output_column}_magnitude_prediction_invalid", False)):
@@ -259,6 +261,12 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
     max_severity = 0.0
     for head in REGRESSION_HEADS:
         output_column = HEAD_OUTPUT_COLUMNS[head]
+        if (
+            head in {"mfe", "mae"}
+            and str(item.get(f"{head}_path_head_capability_state") or "")
+            == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+        ):
+            continue
         if (
             (head == "return" and expected_return_missing)
             or (head == "mfe" and mfe_missing)

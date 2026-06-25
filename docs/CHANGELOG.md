@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refined Linear-Family Path-Head Retirement V1 scanner handling so retired logistic MFE/MAE heads remain explicit non-actionable blockers without surfacing generic nonfinite, sign-contract, or magnitude-prediction rejection noise.
 - Added ATR-Normalized Path Targets V1: active expected-return, MFE, and MAE heads now train and screen in close-known `atr_pct_14` units while preserving historical labels and mapping predictions back to canonical decimal returns for scanner, selection, attribution, portfolio replay, and paper-forward use.
 - Updated Prediction OOD Governance V2 integration so active path heads are evaluated in normalized model space while canonical external MFE/MAE sign output is validated separately; scanner identity now includes path-target normalization hashes.
 - Added regression coverage for unchanged labels, ATR-unit target derivation, canonical prediction mapping, normalized OOD checks, missing-ATR rejection, no clipping in ATR mapping, and scanner identity changes from target-normalization metadata.
