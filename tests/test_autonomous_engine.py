@@ -12,7 +12,11 @@ import pytest
 
 from swing_rsi.engine.calibration_governance import TBS_CALIBRATION_GOVERNANCE_SCHEMA_VERSION
 from swing_rsi.engine.drift import build_drift_report
-from swing_rsi.engine.features import build_feature_panel, reject_label_columns
+from swing_rsi.engine.features import (
+    build_feature_panel,
+    numeric_feature_columns,
+    reject_label_columns,
+)
 from swing_rsi.engine.forward import (
     advance_forward_positions,
     create_pending_events_from_snapshot,
@@ -57,6 +61,19 @@ from swing_rsi.engine.models import (
 )
 from swing_rsi.engine.ood import PREDICTION_OOD_GOVERNANCE_VERSION
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
+from swing_rsi.engine.product_scope import (
+    PRODUCT_CLASS_SCHEMA_VERSION,
+    PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
+    PRODUCT_CLASS_SCOPE_MISMATCH_REASON,
+    PRODUCT_CLASS_SCOPE_ORDINARY,
+    PRODUCT_CLASS_SCOPE_POOLED,
+    PRODUCT_CLASS_SCOPES,
+    build_product_class_scope_definition,
+    build_product_class_scope_definitions,
+    canonical_role_scope_mapping,
+    filter_frame_for_product_class_scope,
+    product_class_scope_for_role,
+)
 from swing_rsi.engine.registry import (
     FINAL_HOLDOUT_SAMPLE_GATE_IDS,
     RegisteredModel,
@@ -130,6 +147,228 @@ def _universe() -> UniverseConfig:
             UniverseSymbol("SQQQ", role="leveraged_inverse_etf", sector="inverse_technology"),
         ),
         relationships={"SPY": ("SQQQ",)},
+    )
+
+
+def _product_scope_universe() -> UniverseConfig:
+    return UniverseConfig(
+        name="product-scope-test",
+        provider="fmp",
+        default_start="2018-01-02",
+        symbols=(
+            UniverseSymbol("ABC", role="stock", sector="technology", sector_proxy="XLK"),
+            UniverseSymbol("SPY", role="broad_market_etf", sector="broad_market", benchmark=True),
+            UniverseSymbol("XLK", role="sector_etf", sector="technology"),
+            UniverseSymbol("SH", role="inverse_etf", sector="inverse_market"),
+            UniverseSymbol("TQQQ", role="leveraged_long_etf", sector="leveraged_growth"),
+            UniverseSymbol("ZZZ", role="leveraged_inverse_etf", sector="inverse_growth"),
+        ),
+        relationships={"SPY": ("SH", "TQQQ", "ZZZ")},
+    )
+
+
+def test_product_class_roles_map_deterministically_from_metadata() -> None:
+    universe = _product_scope_universe()
+    definitions = build_product_class_scope_definitions(universe, scopes=PRODUCT_CLASS_SCOPES)
+
+    assert product_class_scope_for_role("stock") == PRODUCT_CLASS_SCOPE_ORDINARY
+    assert product_class_scope_for_role("broad_market_etf") == PRODUCT_CLASS_SCOPE_ORDINARY
+    assert product_class_scope_for_role("sector_etf") == PRODUCT_CLASS_SCOPE_ORDINARY
+    assert product_class_scope_for_role("inverse_etf") == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    assert product_class_scope_for_role("leveraged_long_etf") == (
+        PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    )
+    assert product_class_scope_for_role("leveraged_inverse_etf") == (
+        PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    )
+    assert definitions[PRODUCT_CLASS_SCOPE_POOLED].eligible_symbols == (
+        "ABC",
+        "SH",
+        "SPY",
+        "TQQQ",
+        "XLK",
+        "ZZZ",
+    )
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].eligible_symbols == ("ABC", "SPY", "XLK")
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].eligible_symbols == (
+        "SH",
+        "TQQQ",
+        "ZZZ",
+    )
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].role_scope_mapping_hash == (
+        definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].role_scope_mapping_hash
+    )
+
+
+def test_product_class_unknown_roles_are_rejected() -> None:
+    universe = UniverseConfig(
+        name="bad-role",
+        provider="fmp",
+        default_start="2018-01-02",
+        symbols=(UniverseSymbol("AAPL", role="mystery_etf"),),
+        relationships={},
+    )
+
+    with pytest.raises(ValueError, match="Unknown product-class universe role"):
+        build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_ORDINARY)
+
+
+def test_product_class_scope_is_not_ticker_name_heuristic() -> None:
+    universe = UniverseConfig(
+        name="ticker-agnostic",
+        provider="fmp",
+        default_start="2018-01-02",
+        symbols=(
+            UniverseSymbol("SOXL", role="stock", sector="technology"),
+            UniverseSymbol("ABC", role="leveraged_inverse_etf", sector="inverse_market"),
+        ),
+        relationships={},
+    )
+    definitions = build_product_class_scope_definitions(universe, scopes=PRODUCT_CLASS_SCOPES)
+
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].eligible_symbols == ("SOXL",)
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].eligible_symbols == ("ABC",)
+
+
+def _scope_modeling_frame() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    symbols = (
+        ("ABC", "stock"),
+        ("SPY", "broad_market_etf"),
+        ("SH", "inverse_etf"),
+        ("TQQQ", "leveraged_long_etf"),
+    )
+    dates = pd.bdate_range("2020-01-02", periods=80)
+    for position, date_value in enumerate(dates):
+        for symbol, role in symbols:
+            rows.append(
+                {
+                    "Date": date_value,
+                    "symbol": symbol,
+                    "role": role,
+                    "sector": "test",
+                    "sector_proxy": "",
+                    "market_regime_label": "mixed",
+                    "Open": 100.0,
+                    "High": 101.0,
+                    "Low": 99.0,
+                    "Close": 100.0,
+                    "Volume": 1_000_000.0,
+                    "dollar_volume": 20_000_000.0,
+                    "market_context_signal": float(position),
+                    "relationship_context_signal": float(position % 5),
+                    PATH_TARGET_ATR_FEATURE: 1.0,
+                    "label_bull_positive_return_10": float(position % 2),
+                    "label_bull_forward_return_10": 0.01 if position % 2 else -0.01,
+                    "label_bull_mfe_10": 0.02 + (0.001 * (position % 7)),
+                    "label_bull_mae_10": -0.01 - (0.001 * (position % 5)),
+                    "label_bull_target_before_stop_10": float(position % 3 == 0),
+                    "label_end_date_10": date_value + pd.offsets.BDay(10),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_product_class_row_filter_preserves_full_universe_context_columns() -> None:
+    universe = _product_scope_universe()
+    frame = _scope_modeling_frame()
+    ordinary = build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_ORDINARY)
+    leveraged = build_product_class_scope_definition(
+        universe, PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    )
+
+    ordinary_rows = filter_frame_for_product_class_scope(frame, ordinary)
+    leveraged_rows = filter_frame_for_product_class_scope(frame, leveraged)
+
+    assert set(ordinary_rows["role"]) == {"stock", "broad_market_etf"}
+    assert set(leveraged_rows["role"]) == {"inverse_etf", "leveraged_long_etf"}
+    assert "market_context_signal" in ordinary_rows.columns
+    assert "relationship_context_signal" in leveraged_rows.columns
+    assert "product_class_scope" not in numeric_feature_columns(ordinary_rows)
+    assert "label_bull_forward_return_10" not in numeric_feature_columns(ordinary_rows)
+
+
+def test_product_class_splits_remain_chronological_and_purged_within_scope() -> None:
+    universe = _product_scope_universe()
+    frame = _scope_modeling_frame()
+    ordinary = filter_frame_for_product_class_scope(
+        frame,
+        build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_ORDINARY),
+    )
+
+    split = chronological_train_calibration_holdout_split(ordinary, horizon=10)
+
+    assert pd.Timestamp(split.train["Date"].max()) < pd.Timestamp(split.calibration["Date"].min())
+    assert pd.Timestamp(split.calibration["Date"].max()) < pd.Timestamp(split.holdout["Date"].min())
+    assert pd.to_datetime(split.train["label_end_date_10"]).max() < pd.Timestamp(
+        split.calibration_start
+    )
+    assert pd.to_datetime(split.calibration["label_end_date_10"]).max() < pd.Timestamp(
+        split.holdout_start
+    )
+    assert set(split.train["role"]) == {"stock", "broad_market_etf"}
+
+
+def test_discovery_persists_independent_product_class_specialist_artifacts(
+    tmp_path: Path,
+) -> None:
+    frame = _scope_modeling_frame()
+    family_map = {
+        column: "market_relative"
+        for column in frame.columns
+        if not str(column).startswith("label_")
+    }
+    family_map["relationship_context_signal"] = "relationship_graph"
+    family_map["market_context_signal"] = "market_relative"
+
+    result = discover_models(
+        frame,
+        db_path=tmp_path / "engine.sqlite3",
+        artifact_dir=tmp_path / "models",
+        universe_snapshot_id="u",
+        feature_manifest_hash="features",
+        feature_family_by_column=family_map,
+        config=DiscoveryConfig(
+            horizons=(10,),
+            directions=("bull",),
+            minimum_training_samples=20,
+            minimum_holdout_samples=10,
+            max_features=8,
+            mutual_information_top_k=4,
+            research_start=None,
+            random_seed=7,
+            product_class_scopes=(
+                PRODUCT_CLASS_SCOPE_ORDINARY,
+                PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
+            ),
+            model_families=("extra_trees",),
+            include_naive_controls=False,
+        ),
+        code_root=tmp_path,
+        universe=_product_scope_universe(),
+    )
+
+    assert len(result.registered_models) == 2
+    by_scope = {model.metrics["product_class_scope"]: model for model in result.registered_models}
+    ordinary = by_scope[PRODUCT_CLASS_SCOPE_ORDINARY]
+    leveraged = by_scope[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE]
+    ordinary_bundle = load_model_bundle(ordinary.artifact_path)
+    leveraged_bundle = load_model_bundle(leveraged.artifact_path)
+
+    assert ordinary.model_id != leveraged.model_id
+    assert ordinary.artifact_path != leveraged.artifact_path
+    assert ordinary.metrics["product_class_schema_version"] == PRODUCT_CLASS_SCHEMA_VERSION
+    assert ordinary_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_ORDINARY
+    assert leveraged_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    assert set(ordinary_bundle.training_labels["symbol"]) <= {"ABC", "SPY"}
+    assert set(leveraged_bundle.training_labels["symbol"]) <= {"SH", "TQQQ"}
+    assert ordinary_bundle.product_class_universe_scope_hash != (
+        leveraged_bundle.product_class_universe_scope_hash
+    )
+    assert ordinary_bundle.classifier is not leveraged_bundle.classifier
+    assert "product_class_scope" not in ordinary_bundle.feature_columns
+    assert ordinary.metrics["product_class_development_evidence_label"] == (
+        "DEVELOPMENT_HOLDOUT_DIAGNOSTIC"
     )
 
 
@@ -895,12 +1134,36 @@ def _bundle(
     calibrator_artifact_hash: str = "calibrator-artifact-a",
     include_feature_screen_metadata: bool = True,
     include_path_domain_metadata: bool = True,
+    product_class_scope: str = PRODUCT_CLASS_SCOPE_POOLED,
+    product_class_scope_hash: str = "scope-hash-pooled",
+    product_class_universe_scope_hash: str = "universe-scope-hash-pooled",
+    product_class_role_mapping_hash: str = "role-mapping-hash",
 ) -> ModelBundle:
     target_feature_columns = target_feature_columns or ("f1", "dollar_volume")
     expected_return_feature_columns = expected_return_feature_columns or ("f1", "dollar_volume")
     mfe_feature_columns = mfe_feature_columns or ("f1", "dollar_volume")
     mae_feature_columns = mae_feature_columns or ("f1", "dollar_volume")
     target_normalization_payloads = _path_target_normalization_payloads()
+    if product_class_scope == PRODUCT_CLASS_SCOPE_ORDINARY:
+        product_roles = ("broad_market_etf", "ordinary_etf", "sector_etf", "stock")
+        product_symbols = ("AAPL", "MSFT")
+    elif product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE:
+        product_roles = ("inverse_etf", "leveraged_inverse_etf", "leveraged_long_etf")
+        product_symbols = ("SH", "SQQQ", "TQQQ")
+    else:
+        product_roles = tuple(sorted(canonical_role_scope_mapping()))
+        product_symbols = ("AAPL", "MSFT", "SH", "SQQQ", "TQQQ")
+    product_scope_metrics = {
+        "product_class_schema_version": PRODUCT_CLASS_SCHEMA_VERSION,
+        "product_class_scope": product_class_scope,
+        "product_class_scope_configuration_hash": product_class_scope_hash,
+        "product_class_universe_scope_hash": product_class_universe_scope_hash,
+        "product_class_role_scope_mapping_hash": product_class_role_mapping_hash,
+        "product_class_eligible_roles_json": json.dumps(list(product_roles), sort_keys=True),
+        "product_class_eligible_symbols_json": json.dumps(list(product_symbols), sort_keys=True),
+        "product_class_eligible_symbol_count": len(product_symbols),
+        "product_class_development_evidence_label": "DEVELOPMENT_HOLDOUT_DIAGNOSTIC",
+    }
     training = pd.DataFrame(
         {
             "f1": [0.0, 1.0, 2.0],
@@ -960,6 +1223,7 @@ def _bundle(
                 calibration_manifest_hash=calibration_manifest_hash,
                 calibrator_artifact_hash=calibrator_artifact_hash,
             )
+            | product_scope_metrics
             if include_policy
             else {
                 **(
@@ -981,6 +1245,7 @@ def _bundle(
                 ),
                 **_path_domain_metrics(),
                 **_path_target_normalization_metrics(),
+                **product_scope_metrics,
             }
         ),
         calibration_metrics={},
@@ -1098,6 +1363,22 @@ def _bundle(
             if include_path_domain_metadata
             else {}
         ),
+        product_class_schema_version=PRODUCT_CLASS_SCHEMA_VERSION,
+        product_class_scope=product_class_scope,
+        product_class_eligible_roles=product_roles,
+        product_class_eligible_symbols=product_symbols,
+        product_class_role_scope_mapping={
+            key: str(value) for key, value in canonical_role_scope_mapping().items()
+        },
+        product_class_role_scope_mapping_hash=product_class_role_mapping_hash,
+        product_class_scope_configuration_hash=product_class_scope_hash,
+        product_class_universe_scope_hash=product_class_universe_scope_hash,
+        product_class_scope_metadata={
+            "schema_version": PRODUCT_CLASS_SCHEMA_VERSION,
+            "scope": product_class_scope,
+            "eligible_roles": list(product_roles),
+            "eligible_symbols": list(product_symbols),
+        },
     )
 
 
@@ -1117,6 +1398,137 @@ def _scanner_feature_panel(symbols: tuple[str, ...] = ("AAPL",)) -> pd.DataFrame
             "market_regime_label": ["mixed"] * len(symbols),
         }
     )
+
+
+def _product_scope_scanner_panel() -> pd.DataFrame:
+    frame = _scanner_feature_panel(("ABC", "SH"))
+    frame["role"] = ["stock", "inverse_etf"]
+    frame["sector"] = ["technology", "inverse_market"]
+    return frame
+
+
+def test_scanner_routes_specialists_only_to_matching_product_scope(tmp_path: Path) -> None:
+    universe = _product_scope_universe()
+    ordinary = _bundle(
+        "ordinary-model",
+        product_class_scope=PRODUCT_CLASS_SCOPE_ORDINARY,
+        product_class_scope_hash="ordinary-scope-hash",
+        product_class_universe_scope_hash="ordinary-universe-scope-hash",
+    )
+    leveraged = _bundle(
+        "leveraged-model",
+        product_class_scope=PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
+        product_class_scope_hash="leveraged-scope-hash",
+        product_class_universe_scope_hash="leveraged-universe-scope-hash",
+    )
+
+    snapshot = run_scanner(
+        _product_scope_scanner_panel(),
+        bundles=(ordinary, leveraged),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id=universe.snapshot_id,
+        model_states={"ordinary-model": "CHAMPION", "leveraged-model": "CHAMPION"},
+        model_eligibility={"ordinary-model": True, "leveraged-model": True},
+        config=ScannerConfig(probability_threshold=0.5),
+        universe=universe,
+    )
+
+    mismatch = snapshot.rows[
+        snapshot.rows["exclusion_reason"]
+        .astype(str)
+        .str.contains(PRODUCT_CLASS_SCOPE_MISMATCH_REASON)
+    ]
+    assert len(mismatch) == 2
+    assert set(mismatch["scanner_routing_result"]) == {PRODUCT_CLASS_SCOPE_MISMATCH_REASON}
+    assert bool(
+        snapshot.rows.loc[
+            (snapshot.rows["model_id"] == "ordinary-model") & (snapshot.rows["ticker"] == "ABC"),
+            "product_class_scope_match",
+        ].iloc[0]
+    )
+    assert (
+        snapshot.rows.loc[
+            (snapshot.rows["model_id"] == "leveraged-model") & (snapshot.rows["ticker"] == "SH"),
+            "row_product_class_scope",
+        ].iloc[0]
+        == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    )
+    assert (
+        snapshot.rows.loc[
+            (snapshot.rows["model_id"] == "ordinary-model") & (snapshot.rows["ticker"] == "SH"),
+            "candidate_status",
+        ].iloc[0]
+        == "REJECTED"
+    )
+
+
+def test_scanner_identity_includes_product_class_scope_metadata(tmp_path: Path) -> None:
+    universe = _product_scope_universe()
+    ordinary = _bundle(
+        product_class_scope=PRODUCT_CLASS_SCOPE_ORDINARY,
+        product_class_scope_hash="ordinary-scope-hash-a",
+        product_class_universe_scope_hash="ordinary-universe-scope-hash",
+    )
+
+    snapshot = run_scanner(
+        _product_scope_scanner_panel(),
+        bundles=(ordinary,),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id=universe.snapshot_id,
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        universe=universe,
+    )
+
+    with engine_connection(tmp_path / "engine.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM scanner_snapshots WHERE scan_id = ?",
+            (snapshot.scan_id,),
+        ).fetchone()
+    metadata = json.loads(row["metadata_json"])
+    identity = metadata["canonical_scan_execution_identity"]
+    assert metadata["scanner_identity_schema_version"] == 10
+    assert metadata["product_class_scope_metadata_hash"]
+    assert identity["product_class_schema_version"] == PRODUCT_CLASS_SCHEMA_VERSION
+    assert identity["product_class_scope_metadata"]["model-a"]["scope"] == (
+        PRODUCT_CLASS_SCOPE_ORDINARY
+    )
+
+
+def test_scanner_identity_changes_when_product_scope_hash_changes(tmp_path: Path) -> None:
+    universe = _product_scope_universe()
+    base_kwargs = {
+        "feature_panel": _product_scope_scanner_panel(),
+        "db_path": tmp_path / "engine.sqlite3",
+        "output_dir": tmp_path / "scanner",
+        "universe_snapshot_id": universe.snapshot_id,
+        "model_states": {"model-a": "CHAMPION"},
+        "model_eligibility": {"model-a": True},
+        "universe": universe,
+    }
+
+    first = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                product_class_scope=PRODUCT_CLASS_SCOPE_ORDINARY,
+                product_class_scope_hash="ordinary-scope-hash-a",
+            ),
+        ),
+    )
+    second = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                product_class_scope=PRODUCT_CLASS_SCOPE_ORDINARY,
+                product_class_scope_hash="ordinary-scope-hash-b",
+            ),
+        ),
+    )
+
+    assert first.scan_id != second.scan_id
 
 
 def test_predict_bundle_outputs_separate_target_before_stop_probability() -> None:
@@ -2602,7 +3014,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 9
+    assert metadata["scanner_identity_schema_version"] == 10
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
