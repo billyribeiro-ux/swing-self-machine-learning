@@ -3101,17 +3101,29 @@ def _train_family(
         hygiene_audits.append(audit)
         return sanitized
 
+    def sanitized_screen_frame(
+        frame: pd.DataFrame, columns: list[str], *, stage: str
+    ) -> pd.DataFrame:
+        sanitized_features = sanitize(
+            frame[columns],
+            split_label="training",
+            stage=stage,
+            context=frame,
+        )
+        output = frame.copy()
+        for column in columns:
+            output[column] = sanitized_features[column]
+        return output
+
     train = split.train.dropna(subset=[*feature_columns, *path_required]).copy()
     calibration = split.calibration.dropna(subset=[*feature_columns, *path_required]).copy()
     holdout = split.holdout.dropna(subset=[*feature_columns, *path_required]).copy()
     if train.empty or calibration.empty or holdout.empty:
         raise ValueError("Training, calibration, and holdout sets must be nonempty")
-    primary_screen_train = train.copy()
-    primary_screen_train.loc[:, feature_columns] = sanitize(
-        train[feature_columns],
-        split_label="training",
+    primary_screen_train = sanitized_screen_frame(
+        train,
+        feature_columns,
         stage="primary_feature_screening",
-        context=train,
     )
     feature_columns, mutual_information_summary = _mutual_information_screen(
         primary_screen_train,
@@ -3152,12 +3164,10 @@ def _train_family(
     holdout_probability = np.asarray(calibrator.predict(holdout_raw), dtype=float)
 
     target_train = split.train.dropna(subset=required).copy()
-    target_screen_train = target_train.copy()
-    target_screen_train.loc[:, feature_columns] = sanitize(
-        target_train[feature_columns],
-        split_label="training",
+    target_screen_train = sanitized_screen_frame(
+        target_train,
+        feature_columns,
         stage="target_before_stop_feature_screening",
-        context=target_train,
     )
     target_screen = screen_features_for_target(
         target_screen_train,
@@ -3250,12 +3260,10 @@ def _train_family(
     plugin_by_name = {plugin.name: plugin for plugin in model_plugins()}
     plugin = plugin_by_name[family]
     path_screen_train = split.train.dropna(subset=path_required).copy()
-    path_feature_screen_train = path_screen_train.copy()
-    path_feature_screen_train.loc[:, feature_columns] = sanitize(
-        path_screen_train[feature_columns],
-        split_label="training",
+    path_feature_screen_train = sanitized_screen_frame(
+        path_screen_train,
+        feature_columns,
         stage="path_feature_screening",
-        context=path_screen_train,
     )
     path_train_atr = _path_atr_values(path_screen_train)
     calibration_atr = _path_atr_values(calibration)
