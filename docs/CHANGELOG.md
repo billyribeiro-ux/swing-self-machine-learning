@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added Nonfinite Feature Hygiene V1: model feature matrices now convert infinities and unsafe float64 magnitudes to missing values before feature screening, preprocessing, fitting, calibration prediction, holdout prediction, and scanner prediction; artifacts persist hygiene audit metadata and scanner identity includes the hygiene policy hash.
+- Replaced raw `obv_change_20` percentage change with safe denominator semantics so zero or near-zero OBV denominators produce `NaN` rather than positive or negative infinity.
 - Added Product-Class Specialist Scope V2: the prior mixed `LEVERAGED_INVERSE` research bucket is split into governed `INVERSE`, `LEVERAGED_LONG`, and `LEVERAGED_INVERSE` scopes while preserving `POOLED` and `ORDINARY`, so inverse-only, leveraged-long, and leveraged-inverse target rows can train and route independently in the next challenger generation.
 - Added Product-Class Specialist Challenger V1: discovery now supports governed product-class scopes (`POOLED`, `ORDINARY`, and `LEVERAGED_INVERSE`) derived from universe roles, filters training/calibration/development-holdout target rows by scope while preserving full-universe context features, persists scope hashes and target distributions, and trains active nonlinear specialist challengers with matching naive controls where data is sufficient.
 - Added scope-aware review scanner routing, scanner identity metadata, model-audit/dashboard product-class diagnostics, and regression coverage for deterministic role mapping, unknown-role rejection, no ticker-name heuristics, scoped chronological splits, independent specialist artifacts, scope mismatch rejection, and scanner identity changes from scope metadata.

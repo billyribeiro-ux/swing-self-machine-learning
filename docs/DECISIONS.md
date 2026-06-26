@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-26 — Model feature matrices sanitize nonfinite values before estimators
+
+Decision: Add `model_feature_nonfinite_hygiene_v1` as a model-matrix boundary policy. Feature matrices used for training, calibration, development holdout, scanner prediction, and audit prediction replace positive infinity, negative infinity, and unsafe finite float64 magnitudes with `NaN` before the existing train-fitted imputation path. Existing `NaN` values remain missing values, not market signals. New model artifacts persist nonfinite hygiene counts, affected columns, affected feature families, affected symbols/dates, split/stage records, and the hygiene policy hash. Scanner identity includes the hygiene metadata hash, and legacy artifacts are labeled `legacy_pre_nonfinite_hygiene` when loaded.
+
+Reason: The Product-Class Specialist V2 evidence diagnosis reproduced rejected `INVERSE` bull models caused by `obv_change_20 = -inf` for `RWM` and `SH` on `2016-07-19`. The root cause was missing nonfinite input hygiene with a contributing scope-specific data-quality issue. Treating infinities as missing values preserves labels, raw OHLCV, thresholds, quality gates, OOD Governance V2, and calibration governance while preventing invalid numerical values from reaching estimators.
+
 ## 2026-06-25 — Product-class specialist scopes separate inverse and leveraged instruments
 
 Decision: Advance product-class specialist metadata to `product_class_specialist_v2` and replace the mixed non-ordinary target bucket with separate `INVERSE`, `LEVERAGED_LONG`, and `LEVERAGED_INVERSE` scopes. `inverse_etf` rows map to `INVERSE`, `leveraged_long_etf` rows map to `LEVERAGED_LONG`, and `leveraged_inverse_etf` rows map to `LEVERAGED_INVERSE`. `POOLED` and `ORDINARY` remain unchanged. Scope membership continues to derive only from governed universe roles, and full-universe context features remain available before target rows are filtered by scope.
