@@ -63,7 +63,9 @@ from swing_rsi.engine.ood import PREDICTION_OOD_GOVERNANCE_VERSION
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
 from swing_rsi.engine.product_scope import (
     PRODUCT_CLASS_SCHEMA_VERSION,
+    PRODUCT_CLASS_SCOPE_INVERSE,
     PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
+    PRODUCT_CLASS_SCOPE_LEVERAGED_LONG,
     PRODUCT_CLASS_SCOPE_MISMATCH_REASON,
     PRODUCT_CLASS_SCOPE_ORDINARY,
     PRODUCT_CLASS_SCOPE_POOLED,
@@ -174,10 +176,8 @@ def test_product_class_roles_map_deterministically_from_metadata() -> None:
     assert product_class_scope_for_role("stock") == PRODUCT_CLASS_SCOPE_ORDINARY
     assert product_class_scope_for_role("broad_market_etf") == PRODUCT_CLASS_SCOPE_ORDINARY
     assert product_class_scope_for_role("sector_etf") == PRODUCT_CLASS_SCOPE_ORDINARY
-    assert product_class_scope_for_role("inverse_etf") == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
-    assert product_class_scope_for_role("leveraged_long_etf") == (
-        PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
-    )
+    assert product_class_scope_for_role("inverse_etf") == PRODUCT_CLASS_SCOPE_INVERSE
+    assert product_class_scope_for_role("leveraged_long_etf") == PRODUCT_CLASS_SCOPE_LEVERAGED_LONG
     assert product_class_scope_for_role("leveraged_inverse_etf") == (
         PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
     )
@@ -190,10 +190,14 @@ def test_product_class_roles_map_deterministically_from_metadata() -> None:
         "ZZZ",
     )
     assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].eligible_symbols == ("ABC", "SPY", "XLK")
-    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].eligible_symbols == (
-        "SH",
-        "TQQQ",
-        "ZZZ",
+    assert definitions[PRODUCT_CLASS_SCOPE_INVERSE].eligible_symbols == ("SH",)
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_LONG].eligible_symbols == ("TQQQ",)
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].eligible_symbols == ("ZZZ",)
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].role_scope_mapping_hash == (
+        definitions[PRODUCT_CLASS_SCOPE_INVERSE].role_scope_mapping_hash
+    )
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].role_scope_mapping_hash == (
+        definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_LONG].role_scope_mapping_hash
     )
     assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].role_scope_mapping_hash == (
         definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].role_scope_mapping_hash
@@ -228,6 +232,8 @@ def test_product_class_scope_is_not_ticker_name_heuristic() -> None:
 
     assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].eligible_symbols == ("SOXL",)
     assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].eligible_symbols == ("ABC",)
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_LONG].eligible_symbols == ()
+    assert definitions[PRODUCT_CLASS_SCOPE_INVERSE].eligible_symbols == ()
 
 
 def _scope_modeling_frame() -> pd.DataFrame:
@@ -237,6 +243,7 @@ def _scope_modeling_frame() -> pd.DataFrame:
         ("SPY", "broad_market_etf"),
         ("SH", "inverse_etf"),
         ("TQQQ", "leveraged_long_etf"),
+        ("ZZZ", "leveraged_inverse_etf"),
     )
     dates = pd.bdate_range("2020-01-02", periods=80)
     for position, date_value in enumerate(dates):
@@ -273,17 +280,27 @@ def test_product_class_row_filter_preserves_full_universe_context_columns() -> N
     universe = _product_scope_universe()
     frame = _scope_modeling_frame()
     ordinary = build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_ORDINARY)
-    leveraged = build_product_class_scope_definition(
+    inverse = build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_INVERSE)
+    leveraged_long = build_product_class_scope_definition(
+        universe, PRODUCT_CLASS_SCOPE_LEVERAGED_LONG
+    )
+    leveraged_inverse = build_product_class_scope_definition(
         universe, PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
     )
 
     ordinary_rows = filter_frame_for_product_class_scope(frame, ordinary)
-    leveraged_rows = filter_frame_for_product_class_scope(frame, leveraged)
+    inverse_rows = filter_frame_for_product_class_scope(frame, inverse)
+    leveraged_long_rows = filter_frame_for_product_class_scope(frame, leveraged_long)
+    leveraged_inverse_rows = filter_frame_for_product_class_scope(frame, leveraged_inverse)
 
     assert set(ordinary_rows["role"]) == {"stock", "broad_market_etf"}
-    assert set(leveraged_rows["role"]) == {"inverse_etf", "leveraged_long_etf"}
+    assert set(inverse_rows["role"]) == {"inverse_etf"}
+    assert set(leveraged_long_rows["role"]) == {"leveraged_long_etf"}
+    assert set(leveraged_inverse_rows["role"]) == {"leveraged_inverse_etf"}
     assert "market_context_signal" in ordinary_rows.columns
-    assert "relationship_context_signal" in leveraged_rows.columns
+    assert "relationship_context_signal" in inverse_rows.columns
+    assert "relationship_context_signal" in leveraged_long_rows.columns
+    assert "relationship_context_signal" in leveraged_inverse_rows.columns
     assert "product_class_scope" not in numeric_feature_columns(ordinary_rows)
     assert "label_bull_forward_return_10" not in numeric_feature_columns(ordinary_rows)
 
@@ -339,6 +356,8 @@ def test_discovery_persists_independent_product_class_specialist_artifacts(
             random_seed=7,
             product_class_scopes=(
                 PRODUCT_CLASS_SCOPE_ORDINARY,
+                PRODUCT_CLASS_SCOPE_INVERSE,
+                PRODUCT_CLASS_SCOPE_LEVERAGED_LONG,
                 PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
             ),
             model_families=("extra_trees",),
@@ -348,24 +367,40 @@ def test_discovery_persists_independent_product_class_specialist_artifacts(
         universe=_product_scope_universe(),
     )
 
-    assert len(result.registered_models) == 2
+    assert len(result.registered_models) == 4
     by_scope = {model.metrics["product_class_scope"]: model for model in result.registered_models}
     ordinary = by_scope[PRODUCT_CLASS_SCOPE_ORDINARY]
-    leveraged = by_scope[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE]
+    inverse = by_scope[PRODUCT_CLASS_SCOPE_INVERSE]
+    leveraged_long = by_scope[PRODUCT_CLASS_SCOPE_LEVERAGED_LONG]
+    leveraged_inverse = by_scope[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE]
     ordinary_bundle = load_model_bundle(ordinary.artifact_path)
-    leveraged_bundle = load_model_bundle(leveraged.artifact_path)
+    inverse_bundle = load_model_bundle(inverse.artifact_path)
+    leveraged_long_bundle = load_model_bundle(leveraged_long.artifact_path)
+    leveraged_inverse_bundle = load_model_bundle(leveraged_inverse.artifact_path)
 
-    assert ordinary.model_id != leveraged.model_id
-    assert ordinary.artifact_path != leveraged.artifact_path
+    assert len({model.model_id for model in result.registered_models}) == 4
+    assert len({model.artifact_path for model in result.registered_models}) == 4
     assert ordinary.metrics["product_class_schema_version"] == PRODUCT_CLASS_SCHEMA_VERSION
     assert ordinary_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_ORDINARY
-    assert leveraged_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    assert inverse_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_INVERSE
+    assert leveraged_long_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_LONG
+    assert leveraged_inverse_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
     assert set(ordinary_bundle.training_labels["symbol"]) <= {"ABC", "SPY"}
-    assert set(leveraged_bundle.training_labels["symbol"]) <= {"SH", "TQQQ"}
+    assert set(inverse_bundle.training_labels["symbol"]) <= {"SH"}
+    assert set(leveraged_long_bundle.training_labels["symbol"]) <= {"TQQQ"}
+    assert set(leveraged_inverse_bundle.training_labels["symbol"]) <= {"ZZZ"}
     assert ordinary_bundle.product_class_universe_scope_hash != (
-        leveraged_bundle.product_class_universe_scope_hash
+        inverse_bundle.product_class_universe_scope_hash
     )
-    assert ordinary_bundle.classifier is not leveraged_bundle.classifier
+    assert inverse_bundle.product_class_universe_scope_hash != (
+        leveraged_long_bundle.product_class_universe_scope_hash
+    )
+    assert leveraged_long_bundle.product_class_universe_scope_hash != (
+        leveraged_inverse_bundle.product_class_universe_scope_hash
+    )
+    assert ordinary_bundle.classifier is not inverse_bundle.classifier
+    assert inverse_bundle.classifier is not leveraged_long_bundle.classifier
+    assert leveraged_long_bundle.classifier is not leveraged_inverse_bundle.classifier
     assert "product_class_scope" not in ordinary_bundle.feature_columns
     assert ordinary.metrics["product_class_development_evidence_label"] == (
         "DEVELOPMENT_HOLDOUT_DIAGNOSTIC"
@@ -1147,9 +1182,15 @@ def _bundle(
     if product_class_scope == PRODUCT_CLASS_SCOPE_ORDINARY:
         product_roles = ("broad_market_etf", "ordinary_etf", "sector_etf", "stock")
         product_symbols = ("AAPL", "MSFT")
+    elif product_class_scope == PRODUCT_CLASS_SCOPE_INVERSE:
+        product_roles = ("inverse_etf",)
+        product_symbols = ("SH",)
+    elif product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_LONG:
+        product_roles = ("leveraged_long_etf",)
+        product_symbols = ("TQQQ",)
     elif product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE:
-        product_roles = ("inverse_etf", "leveraged_inverse_etf", "leveraged_long_etf")
-        product_symbols = ("SH", "SQQQ", "TQQQ")
+        product_roles = ("leveraged_inverse_etf",)
+        product_symbols = ("SQQQ",)
     else:
         product_roles = tuple(sorted(canonical_role_scope_mapping()))
         product_symbols = ("AAPL", "MSFT", "SH", "SQQQ", "TQQQ")
@@ -1415,21 +1456,21 @@ def test_scanner_routes_specialists_only_to_matching_product_scope(tmp_path: Pat
         product_class_scope_hash="ordinary-scope-hash",
         product_class_universe_scope_hash="ordinary-universe-scope-hash",
     )
-    leveraged = _bundle(
-        "leveraged-model",
-        product_class_scope=PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
-        product_class_scope_hash="leveraged-scope-hash",
-        product_class_universe_scope_hash="leveraged-universe-scope-hash",
+    inverse = _bundle(
+        "inverse-model",
+        product_class_scope=PRODUCT_CLASS_SCOPE_INVERSE,
+        product_class_scope_hash="inverse-scope-hash",
+        product_class_universe_scope_hash="inverse-universe-scope-hash",
     )
 
     snapshot = run_scanner(
         _product_scope_scanner_panel(),
-        bundles=(ordinary, leveraged),
+        bundles=(ordinary, inverse),
         db_path=tmp_path / "engine.sqlite3",
         output_dir=tmp_path / "scanner",
         universe_snapshot_id=universe.snapshot_id,
-        model_states={"ordinary-model": "CHAMPION", "leveraged-model": "CHAMPION"},
-        model_eligibility={"ordinary-model": True, "leveraged-model": True},
+        model_states={"ordinary-model": "CHAMPION", "inverse-model": "CHAMPION"},
+        model_eligibility={"ordinary-model": True, "inverse-model": True},
         config=ScannerConfig(probability_threshold=0.5),
         universe=universe,
     )
@@ -1449,10 +1490,10 @@ def test_scanner_routes_specialists_only_to_matching_product_scope(tmp_path: Pat
     )
     assert (
         snapshot.rows.loc[
-            (snapshot.rows["model_id"] == "leveraged-model") & (snapshot.rows["ticker"] == "SH"),
+            (snapshot.rows["model_id"] == "inverse-model") & (snapshot.rows["ticker"] == "SH"),
             "row_product_class_scope",
         ].iloc[0]
-        == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+        == PRODUCT_CLASS_SCOPE_INVERSE
     )
     assert (
         snapshot.rows.loc[

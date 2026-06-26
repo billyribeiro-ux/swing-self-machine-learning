@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-25 — Product-class specialist scopes separate inverse and leveraged instruments
+
+Decision: Advance product-class specialist metadata to `product_class_specialist_v2` and replace the mixed non-ordinary target bucket with separate `INVERSE`, `LEVERAGED_LONG`, and `LEVERAGED_INVERSE` scopes. `inverse_etf` rows map to `INVERSE`, `leveraged_long_etf` rows map to `LEVERAGED_LONG`, and `leveraged_inverse_etf` rows map to `LEVERAGED_INVERSE`. `POOLED` and `ORDINARY` remain unchanged. Scope membership continues to derive only from governed universe roles, and full-universe context features remain available before target rows are filtered by scope.
+
+Reason: The product-class evidence diagnosis showed that the combined leveraged/inverse cohort still mixed mechanically different instruments. SOXL/SOXS-related path errors and mixed specialist evidence justify testing narrower target distributions without changing labels, thresholds, quality gates, OOD Governance V2, feature construction, or the frozen operational prospective model.
+
 ## 2026-06-25 — Product-class specialist challengers separate target rows from market context
 
 Decision: Add `product_class_specialist_v1` challenger scope metadata with `POOLED`, `ORDINARY`, and `LEVERAGED_INVERSE` scopes derived only from governed universe roles. Specialist discovery filters eligible prediction rows by scope after full-universe feature construction, so market, sector, breadth, relationship, inverse/leveraged, and regime context remain available while ordinary and leveraged/inverse target distributions are no longer pooled indiscriminately. The first specialist generation trains only active nonlinear learned families, with matching naive controls where data is sufficient; logistic-family specialist challengers are excluded because their MFE/MAE path heads are retired.

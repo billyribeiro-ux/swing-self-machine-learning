@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Product-Class Specialist Scope V2: the prior mixed `LEVERAGED_INVERSE` research bucket is split into governed `INVERSE`, `LEVERAGED_LONG`, and `LEVERAGED_INVERSE` scopes while preserving `POOLED` and `ORDINARY`, so inverse-only, leveraged-long, and leveraged-inverse target rows can train and route independently in the next challenger generation.
 - Added Product-Class Specialist Challenger V1: discovery now supports governed product-class scopes (`POOLED`, `ORDINARY`, and `LEVERAGED_INVERSE`) derived from universe roles, filters training/calibration/development-holdout target rows by scope while preserving full-universe context features, persists scope hashes and target distributions, and trains active nonlinear specialist challengers with matching naive controls where data is sufficient.
 - Added scope-aware review scanner routing, scanner identity metadata, model-audit/dashboard product-class diagnostics, and regression coverage for deterministic role mapping, unknown-role rejection, no ticker-name heuristics, scoped chronological splits, independent specialist artifacts, scope mismatch rejection, and scanner identity changes from scope metadata.
 - Added a read-only nonlinear model quality diagnosis for the post-retirement generation, documenting that active ExtraTrees and HistGradientBoosting path heads remain finite, sign-valid, and within current OOD limits while selected-candidate and final-holdout gates still block promotion.

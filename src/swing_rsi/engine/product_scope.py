@@ -8,16 +8,26 @@ import pandas as pd
 from swing_rsi.engine.gates import configuration_hash
 from swing_rsi.engine.universe import UniverseConfig, symbol_metadata
 
-PRODUCT_CLASS_SCHEMA_VERSION = "product_class_specialist_v1"
+PRODUCT_CLASS_SCHEMA_VERSION = "product_class_specialist_v2"
 
-ProductClassScope = Literal["POOLED", "ORDINARY", "LEVERAGED_INVERSE"]
+ProductClassScope = Literal[
+    "POOLED",
+    "ORDINARY",
+    "INVERSE",
+    "LEVERAGED_LONG",
+    "LEVERAGED_INVERSE",
+]
 
 PRODUCT_CLASS_SCOPE_POOLED: ProductClassScope = "POOLED"
 PRODUCT_CLASS_SCOPE_ORDINARY: ProductClassScope = "ORDINARY"
+PRODUCT_CLASS_SCOPE_INVERSE: ProductClassScope = "INVERSE"
+PRODUCT_CLASS_SCOPE_LEVERAGED_LONG: ProductClassScope = "LEVERAGED_LONG"
 PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE: ProductClassScope = "LEVERAGED_INVERSE"
 PRODUCT_CLASS_SCOPES: tuple[ProductClassScope, ...] = (
     PRODUCT_CLASS_SCOPE_POOLED,
     PRODUCT_CLASS_SCOPE_ORDINARY,
+    PRODUCT_CLASS_SCOPE_INVERSE,
+    PRODUCT_CLASS_SCOPE_LEVERAGED_LONG,
     PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
 )
 
@@ -29,7 +39,11 @@ ORDINARY_PRODUCT_ROLES = (
     "sector_etf",
     "ordinary_etf",
 )
-LEVERAGED_INVERSE_PRODUCT_ROLES = (
+INVERSE_PRODUCT_ROLES = ("inverse_etf",)
+LEVERAGED_LONG_PRODUCT_ROLES = ("leveraged_long_etf",)
+LEVERAGED_INVERSE_PRODUCT_ROLES = ("leveraged_inverse_etf",)
+
+NON_ORDINARY_PRODUCT_ROLES = (
     "inverse_etf",
     "leveraged_inverse_etf",
     "leveraged_long_etf",
@@ -39,6 +53,8 @@ LEVERAGED_INVERSE_PRODUCT_ROLES = (
 def canonical_role_scope_mapping() -> dict[str, ProductClassScope]:
     return {
         **{role: PRODUCT_CLASS_SCOPE_ORDINARY for role in ORDINARY_PRODUCT_ROLES},
+        **{role: PRODUCT_CLASS_SCOPE_INVERSE for role in INVERSE_PRODUCT_ROLES},
+        **{role: PRODUCT_CLASS_SCOPE_LEVERAGED_LONG for role in LEVERAGED_LONG_PRODUCT_ROLES},
         **{role: PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE for role in LEVERAGED_INVERSE_PRODUCT_ROLES},
     }
 
