@@ -9,9 +9,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 
 from swing_rsi.engine.calibration_governance import TBS_CALIBRATION_GOVERNANCE_SCHEMA_VERSION
 from swing_rsi.engine.drift import build_drift_report
+from swing_rsi.engine.feature_hygiene import (
+    MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION,
+    nonfinite_hygiene_policy_hash,
+)
 from swing_rsi.engine.features import (
     build_feature_panel,
     numeric_feature_columns,
@@ -127,6 +134,65 @@ class ConstantRegressor:
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         return np.full(len(frame), self.value)
+
+
+class FiniteAssertingClassifier(ClassifierMixin, BaseEstimator):
+    def __init__(self, probability: float = 0.75) -> None:
+        self.probability = probability
+
+    def fit(
+        self, frame: pd.DataFrame | np.ndarray, target: np.ndarray
+    ) -> FiniteAssertingClassifier:
+        assert np.isfinite(np.asarray(frame, dtype=float)).all()
+        self.classes_ = np.array([0, 1])
+        self.is_fitted_ = True
+        return self
+
+    def predict_proba(self, frame: pd.DataFrame | np.ndarray) -> np.ndarray:
+        assert np.isfinite(np.asarray(frame, dtype=float)).all()
+        return np.tile(np.array([[1.0 - self.probability, self.probability]]), (len(frame), 1))
+
+
+class FiniteAssertingRegressor(RegressorMixin, BaseEstimator):
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def fit(self, frame: pd.DataFrame | np.ndarray, target: np.ndarray) -> FiniteAssertingRegressor:
+        assert np.isfinite(np.asarray(frame, dtype=float)).all()
+        self.is_fitted_ = True
+        return self
+
+    def predict(self, frame: pd.DataFrame | np.ndarray) -> np.ndarray:
+        assert np.isfinite(np.asarray(frame, dtype=float)).all()
+        return np.full(len(frame), self.value)
+
+
+def _finite_classifier_pipeline(probability: float = 0.75) -> Pipeline:
+    pipeline = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+            ("model", FiniteAssertingClassifier(probability)),
+        ]
+    )
+    pipeline.fit(
+        pd.DataFrame({"f1": [0.0, 1.0], "dollar_volume": [10_000_000.0, 20_000_000.0]}),
+        np.array([0, 1]),
+    )
+    return pipeline
+
+
+def _finite_regressor_pipeline(value: float) -> Pipeline:
+    pipeline = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+            ("model", FiniteAssertingRegressor(value)),
+        ]
+    )
+    pipeline.fit(
+        pd.DataFrame({"f1": [0.0, 1.0], "dollar_volume": [10_000_000.0, 20_000_000.0]}),
+        np.array([value, value]),
+    )
+    return pipeline
 
 
 class FeatureEchoRegressor:
@@ -1156,6 +1222,7 @@ def _bundle(
     mae_feature_columns: tuple[str, ...] | None = None,
     target_classifier: object | None = None,
     target_calibrator: object | None = None,
+    classifier: object | None = None,
     return_model: object | None = None,
     mfe_model: object | None = None,
     mae_model: object | None = None,
@@ -1173,6 +1240,7 @@ def _bundle(
     product_class_scope_hash: str = "scope-hash-pooled",
     product_class_universe_scope_hash: str = "universe-scope-hash-pooled",
     product_class_role_mapping_hash: str = "role-mapping-hash",
+    feature_hygiene_metadata: dict[str, object] | None = None,
 ) -> ModelBundle:
     target_feature_columns = target_feature_columns or ("f1", "dollar_volume")
     expected_return_feature_columns = expected_return_feature_columns or ("f1", "dollar_volume")
@@ -1238,7 +1306,7 @@ def _bundle(
             "dollar_volume": "volume participation",
             PATH_TARGET_ATR_FEATURE: "volatility_range",
         },
-        classifier=ConstantClassifier(probability),
+        classifier=classifier or ConstantClassifier(probability),
         calibrator=IdentityCalibrator(),
         target_before_stop_model=target_classifier or ConstantClassifier(target_probability),
         target_before_stop_calibrator=target_calibrator or IdentityCalibrator(),
@@ -1420,6 +1488,12 @@ def _bundle(
             "eligible_roles": list(product_roles),
             "eligible_symbols": list(product_symbols),
         },
+        feature_hygiene_metadata=feature_hygiene_metadata
+        or {
+            "schema_version": MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION,
+            "policy_hash": nonfinite_hygiene_policy_hash(),
+            "records": [],
+        },
     )
 
 
@@ -1530,11 +1604,15 @@ def test_scanner_identity_includes_product_class_scope_metadata(tmp_path: Path) 
         ).fetchone()
     metadata = json.loads(row["metadata_json"])
     identity = metadata["canonical_scan_execution_identity"]
-    assert metadata["scanner_identity_schema_version"] == 10
+    assert metadata["scanner_identity_schema_version"] == 11
     assert metadata["product_class_scope_metadata_hash"]
+    assert metadata["model_feature_nonfinite_hygiene_metadata_hash"]
     assert identity["product_class_schema_version"] == PRODUCT_CLASS_SCHEMA_VERSION
     assert identity["product_class_scope_metadata"]["model-a"]["scope"] == (
         PRODUCT_CLASS_SCOPE_ORDINARY
+    )
+    assert identity["model_feature_nonfinite_hygiene_metadata"]["model-a"]["schema_version"] == (
+        MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION
     )
 
 
@@ -1587,6 +1665,31 @@ def test_predict_bundle_outputs_separate_target_before_stop_probability() -> Non
 
     assert "target_before_stop_probability" in prediction.columns
     assert prediction["target_before_stop_probability"].iloc[0] == pytest.approx(0.75)
+
+
+def test_predict_bundle_sanitizes_nonfinite_features_before_estimators() -> None:
+    bundle = _bundle(
+        classifier=_finite_classifier_pipeline(0.65),
+        target_classifier=_finite_classifier_pipeline(0.70),
+        return_model=_finite_regressor_pipeline(0.02),
+        mfe_model=_finite_regressor_pipeline(0.04),
+        mae_model=_finite_regressor_pipeline(0.015),
+    )
+    frame = _scanner_feature_panel()
+    frame.loc[0, "f1"] = -np.inf
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["calibrated_probability"] == pytest.approx(0.65)
+    assert prediction["target_before_stop_probability"] == pytest.approx(0.70)
+    assert prediction["expected_return"] == pytest.approx(0.02)
+    assert bool(prediction["model_feature_nonfinite_hygiene_warning"])
+    assert prediction["model_feature_invalid_pre_sanitization_count"] >= 1
+    assert prediction["model_feature_invalid_post_sanitization_count"] == 0
+    assert "f1" in str(prediction["model_feature_hygiene_sanitized_columns"])
+    assert prediction["model_feature_nonfinite_hygiene_schema_version"] == (
+        MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION
+    )
 
 
 def test_target_before_stop_classifier_receives_own_selected_columns() -> None:
@@ -2793,6 +2896,16 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    hygiene_bundle = _bundle(policy=SelectionPolicy(per_date_limit=2))
+    hygiene_metadata = dict(hygiene_bundle.feature_hygiene_metadata)
+    hygiene_metadata["policy_hash"] = "changed-nonfinite-hygiene-policy-hash"
+    feature_hygiene = run_scanner(
+        **base_kwargs,
+        bundles=(replace(hygiene_bundle, feature_hygiene_metadata=hygiene_metadata),),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -2809,9 +2922,10 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 path_manifest.scan_id,
                 path_domain.scan_id,
                 target_normalization.scan_id,
+                feature_hygiene.scan_id,
             }
         )
-        == 12
+        == 13
     )
 
 
@@ -3055,7 +3169,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 10
+    assert metadata["scanner_identity_schema_version"] == 11
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
@@ -3070,12 +3184,17 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     assert metadata["path_metric_feature_metadata_hash"]
     assert metadata["path_metric_domain_metadata_json"]
     assert metadata["path_metric_domain_metadata_hash"]
+    assert metadata["model_feature_nonfinite_hygiene_metadata_json"]
+    assert metadata["model_feature_nonfinite_hygiene_metadata_hash"]
     assert metadata["persisted_model_policy_hashes"] == {"model-a": "policy-hash"}
     identity = metadata["canonical_scan_execution_identity"]
     assert identity["prediction_ood_governance_schema_version"] == PREDICTION_OOD_GOVERNANCE_VERSION
     assert identity["feature_manifest_hash"] == "features-a"
     assert identity["model_generation_ids"] == {"model-a": "generation-a"}
     assert identity["model_artifact_hashes"] == {"model-a": "artifact-hash-a"}
+    assert identity["model_feature_nonfinite_hygiene_metadata"]["model-a"]["schema_version"] == (
+        MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION
+    )
     assert identity["model_ood_governance_metadata"]["model-a"]["governance_schema_version"] == (
         PREDICTION_OOD_GOVERNANCE_VERSION
     )
