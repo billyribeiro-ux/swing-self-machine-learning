@@ -306,6 +306,45 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             ),
             "prediction_bounds_training_only": metrics.get("prediction_bounds_training_only"),
             "prediction_path_metric_sign_valid": metrics.get("prediction_path_metric_sign_valid"),
+            "model_feature_nonfinite_hygiene_schema_version": metrics.get(
+                "model_feature_nonfinite_hygiene_schema_version"
+            ),
+            "model_feature_nonfinite_hygiene_policy_hash": metrics.get(
+                "model_feature_nonfinite_hygiene_policy_hash"
+            ),
+            "model_feature_nonfinite_hygiene_metadata": metrics.get(
+                "model_feature_nonfinite_hygiene_metadata_json"
+            ),
+            "model_feature_nonfinite_hygiene_records": metrics.get(
+                "model_feature_nonfinite_hygiene_records_json"
+            ),
+            "model_feature_nonfinite_pre_sanitization_count": metrics.get(
+                "model_feature_nonfinite_pre_sanitization_count"
+            ),
+            "model_feature_invalid_pre_sanitization_count": metrics.get(
+                "model_feature_invalid_pre_sanitization_count"
+            ),
+            "model_feature_invalid_post_sanitization_count": metrics.get(
+                "model_feature_invalid_post_sanitization_count"
+            ),
+            "model_feature_post_sanitization_missing_count": metrics.get(
+                "model_feature_post_sanitization_missing_count"
+            ),
+            "model_feature_hygiene_affected_columns": metrics.get(
+                "model_feature_hygiene_affected_columns_json"
+            ),
+            "model_feature_hygiene_sanitized_columns": metrics.get(
+                "model_feature_hygiene_sanitized_columns_json"
+            ),
+            "model_feature_hygiene_affected_feature_families": metrics.get(
+                "model_feature_hygiene_affected_feature_families_json"
+            ),
+            "model_feature_hygiene_affected_symbols": metrics.get(
+                "model_feature_hygiene_affected_symbols_json"
+            ),
+            "model_feature_hygiene_affected_dates": metrics.get(
+                "model_feature_hygiene_affected_dates_json"
+            ),
             "temporal_fold_schema_version": metrics.get("temporal_fold_schema_version"),
             "temporal_fold_folds_requested": metrics.get("temporal_fold_folds_requested"),
             "temporal_fold_folds_evaluated": metrics.get("temporal_fold_folds_evaluated"),

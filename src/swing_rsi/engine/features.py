@@ -223,6 +223,12 @@ def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return numerator / denominator.replace(0, np.nan)
 
 
+def _safe_pct_change(series: pd.Series, periods: int, *, epsilon: float = 1e-12) -> pd.Series:
+    prior = series.shift(periods)
+    safe_prior = prior.where(prior.abs() > epsilon)
+    return _safe_divide(series - prior, safe_prior)
+
+
 def _rolling_percentile(series: pd.Series, window: int, min_periods: int) -> pd.Series:
     return series.rolling(window=window, min_periods=min_periods).apply(
         lambda values: float(np.mean(values <= values[-1])),
@@ -382,7 +388,7 @@ def _symbol_features(
     )
     result["return_volume_interaction_20"] = result["return_20"] * result["relative_volume_20"]
     obv_step = np.sign(close.diff()).fillna(0.0) * volume
-    result["obv_change_20"] = obv_step.cumsum().pct_change(20)
+    result["obv_change_20"] = _safe_pct_change(obv_step.cumsum(), 20)
     result["volume_expansion_after_compression"] = (
         result["relative_volume_20"]
         / result["relative_volume_20"].shift(1).rolling(20, min_periods=10).median()

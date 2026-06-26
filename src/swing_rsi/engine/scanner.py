@@ -23,6 +23,7 @@ from swing_rsi.engine.models import (
     PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     ModelBundle,
+    bundle_feature_hygiene_metadata,
     bundle_feature_screen_metadata,
     bundle_head_feature_manifest,
     bundle_path_domain_metadata,
@@ -59,8 +60,8 @@ from swing_rsi.engine.selection import (
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 from swing_rsi.engine.universe import UniverseConfig
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 10
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v10-product-class-scope"
+SCANNER_IDENTITY_SCHEMA_VERSION = 11
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v11-nonfinite-hygiene"
 
 
 @dataclass(frozen=True)
@@ -365,6 +366,7 @@ def _build_scan_execution_identity(
     model_path_feature_metadata: dict[str, dict[str, object]],
     model_path_domain_metadata: dict[str, dict[str, object]],
     model_product_scope_metadata: dict[str, dict[str, object]],
+    model_feature_hygiene_metadata: dict[str, dict[str, object]],
     scanner_config: ScannerConfig,
     universe_snapshot_id: str,
     feature_manifest_hash: str,
@@ -410,6 +412,10 @@ def _build_scan_execution_identity(
         model_id: model_product_scope_metadata.get(model_id, {}) for model_id in model_ids
     }
     product_scope_metadata_hash = _stable_hash(product_scope_metadata_payload)
+    feature_hygiene_metadata_payload = {
+        model_id: model_feature_hygiene_metadata.get(model_id, {}) for model_id in model_ids
+    }
+    feature_hygiene_metadata_hash = _stable_hash(feature_hygiene_metadata_payload)
     identity_payload: dict[str, object] = {
         "scanner_identity_schema_version": SCANNER_IDENTITY_SCHEMA_VERSION,
         "scanner_implementation_version": SCANNER_IMPLEMENTATION_VERSION,
@@ -448,6 +454,8 @@ def _build_scan_execution_identity(
         "path_metric_domain_metadata_hash": path_domain_metadata_hash,
         "product_class_scope_metadata": product_scope_metadata_payload,
         "product_class_scope_metadata_hash": product_scope_metadata_hash,
+        "model_feature_nonfinite_hygiene_metadata": feature_hygiene_metadata_payload,
+        "model_feature_nonfinite_hygiene_metadata_hash": feature_hygiene_metadata_hash,
         "effective_selection_policies": effective_policy_payload,
         "raw_scanner_config": raw_config,
         "raw_scanner_config_hash": raw_config_hash,
@@ -473,6 +481,8 @@ def _build_scan_execution_identity(
         "path_metric_domain_metadata_hash": path_domain_metadata_hash,
         "product_class_scope_metadata_json": dumps(product_scope_metadata_payload),
         "product_class_scope_metadata_hash": product_scope_metadata_hash,
+        "model_feature_nonfinite_hygiene_metadata_json": dumps(feature_hygiene_metadata_payload),
+        "model_feature_nonfinite_hygiene_metadata_hash": feature_hygiene_metadata_hash,
         "effective_model_policy_json": dumps(effective_policy_payload),
         "effective_policy_bundle_hash": effective_policy_bundle_hash,
         "canonical_scan_execution_identity": identity_payload,
@@ -522,6 +532,8 @@ def _metadata_matches_scan_identity(
         == expected_metadata["path_metric_domain_metadata_hash"]
         and metadata.get("product_class_scope_metadata_hash")
         == expected_metadata["product_class_scope_metadata_hash"]
+        and metadata.get("model_feature_nonfinite_hygiene_metadata_hash")
+        == expected_metadata["model_feature_nonfinite_hygiene_metadata_hash"]
         and metadata.get("feature_manifest_hash") == expected_metadata["feature_manifest_hash"]
         and metadata.get("universe_snapshot_id") == expected_metadata["universe_snapshot_id"]
         and metadata.get("model_generation_ids") == expected_metadata["model_generation_ids"]
@@ -779,6 +791,9 @@ def run_scanner(
         model_id: _normalized_product_scope_metadata(bundles_by_id[model_id])
         for model_id in model_ids
     }
+    normalized_feature_hygiene_metadata = {
+        model_id: bundle_feature_hygiene_metadata(bundles_by_id[model_id]) for model_id in model_ids
+    }
     for model_id in model_ids:
         bundle = bundles_by_id[model_id]
         head_payload: dict[str, object] = {}
@@ -856,6 +871,7 @@ def run_scanner(
         model_path_feature_metadata=normalized_path_feature_metadata,
         model_path_domain_metadata=normalized_path_domain_metadata,
         model_product_scope_metadata=normalized_product_scope_metadata,
+        model_feature_hygiene_metadata=normalized_feature_hygiene_metadata,
         scanner_config=config,
         universe_snapshot_id=universe_snapshot_id,
         feature_manifest_hash=feature_manifest_hash,
@@ -1311,6 +1327,33 @@ def run_scanner(
                 ),
                 "ood_warning_details": dumps(prediction_integrity["ood_warning_details"]),
                 "ood_max_severity": prediction_integrity["ood_max_severity"],
+                "model_feature_nonfinite_hygiene_schema_version": item.get(
+                    "model_feature_nonfinite_hygiene_schema_version", ""
+                ),
+                "model_feature_nonfinite_hygiene_policy_hash": item.get(
+                    "model_feature_nonfinite_hygiene_policy_hash", ""
+                ),
+                "model_feature_nonfinite_hygiene_warning": bool(
+                    item.get("model_feature_nonfinite_hygiene_warning", False)
+                ),
+                "model_feature_invalid_pre_sanitization_count": int(
+                    item.get("model_feature_invalid_pre_sanitization_count", 0) or 0
+                ),
+                "model_feature_invalid_post_sanitization_count": int(
+                    item.get("model_feature_invalid_post_sanitization_count", 0) or 0
+                ),
+                "model_feature_hygiene_sanitized_columns": item.get(
+                    "model_feature_hygiene_sanitized_columns", ""
+                ),
+                "model_feature_hygiene_affected_symbols": item.get(
+                    "model_feature_hygiene_affected_symbols", ""
+                ),
+                "model_feature_hygiene_affected_dates": item.get(
+                    "model_feature_hygiene_affected_dates", ""
+                ),
+                "model_feature_hygiene_runtime_metadata_json": item.get(
+                    "model_feature_hygiene_runtime_metadata_json", ""
+                ),
                 "composite_utility_score": utility,
                 "liquidity_score": dollar_volume,
                 "regime": item.get("market_regime_label", "unknown"),

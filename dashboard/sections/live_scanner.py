@@ -34,6 +34,11 @@ def render_page() -> None:
             "row_product_class_scope",
             "scanner_routing_result",
             "product_class_scope_match",
+            "model_feature_nonfinite_hygiene_schema_version",
+            "model_feature_nonfinite_hygiene_warning",
+            "model_feature_invalid_pre_sanitization_count",
+            "model_feature_invalid_post_sanitization_count",
+            "model_feature_hygiene_sanitized_columns",
         )
         if column in rows.columns
     ]

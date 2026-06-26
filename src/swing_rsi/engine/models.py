@@ -35,6 +35,16 @@ from swing_rsi.engine.calibration_governance import (
     select_tbs_calibrator,
     write_calibration_audit_artifacts,
 )
+from swing_rsi.engine.feature_hygiene import (
+    LEGACY_PRE_NONFINITE_HYGIENE_SCHEMA_VERSION,
+    MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION,
+    FeatureMatrixHygieneAudit,
+    combine_hygiene_audits,
+    legacy_nonfinite_hygiene_metadata,
+    nonfinite_hygiene_policy_hash,
+    sanitize_model_feature_matrix,
+    sanitize_model_feature_matrix_only,
+)
 from swing_rsi.engine.feature_screen import (
     FEATURE_SCREEN_SCHEMA_VERSION,
     PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
@@ -148,6 +158,7 @@ class ModelBundle:
     product_class_scope_configuration_hash: str = ""
     product_class_universe_scope_hash: str = ""
     product_class_scope_metadata: dict[str, object] = field(default_factory=dict)
+    feature_hygiene_metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -318,6 +329,13 @@ def bundle_feature_screen_records(bundle: ModelBundle, head: str) -> tuple[dict[
     if not value:
         return ()
     return tuple(dict(record) for record in value if isinstance(record, dict))
+
+
+def bundle_feature_hygiene_metadata(bundle: ModelBundle) -> dict[str, object]:
+    metadata = getattr(bundle, "feature_hygiene_metadata", {}) or {}
+    if isinstance(metadata, dict) and metadata:
+        return dict(metadata)
+    return legacy_nonfinite_hygiene_metadata()
 
 
 def bundle_path_domain_metadata(bundle: ModelBundle, head: str) -> dict[str, object]:
@@ -1101,6 +1119,7 @@ def _regressor(seed: int, family: str) -> Pipeline:
 
 
 def _positive_class_probability(model: Any, features: pd.DataFrame) -> np.ndarray:
+    features = sanitize_model_feature_matrix_only(features)
     if hasattr(model, "predict_proba"):
         probabilities = model.predict_proba(features)
         return np.asarray(probabilities[:, 1], dtype=float)
@@ -1126,6 +1145,35 @@ def _max_drawdown(returns: pd.Series) -> float:
 
 def _json_dumps(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _metadata_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int | np.integer):
+        return int(value)
+    if isinstance(value, float | np.floating):
+        return int(value) if math.isfinite(float(value)) else default
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _metadata_list(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return sorted(value, key=str)
+    return []
+
+
+def _metadata_dict(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
 
 
 def _date_label(value: pd.Timestamp) -> str:
@@ -1428,6 +1476,7 @@ def _permutation_importance_summary(
         values = permuted[column].to_numpy(copy=True)
         rng.shuffle(values)
         permuted[column] = values
+        permuted = sanitize_model_feature_matrix_only(permuted)
         raw = _positive_class_probability(classifier, permuted)
         probability = np.asarray(calibrator.predict(raw), dtype=float)
         brier = float(brier_score_loss(holdout[target].astype(int), probability))
@@ -1456,6 +1505,7 @@ def _permutation_importance_by_family(
         values = permuted[column].to_numpy(copy=True)
         rng.shuffle(values)
         permuted[column] = values
+        permuted = sanitize_model_feature_matrix_only(permuted)
         raw = _positive_class_probability(classifier, permuted)
         probability = np.asarray(calibrator.predict(raw), dtype=float)
         delta = float(brier_score_loss(holdout[target].astype(int), probability) - baseline_brier)
@@ -1505,6 +1555,7 @@ def _regression_permutation_importance_by_family(
         values = permuted[column].to_numpy(copy=True)
         rng.shuffle(values)
         permuted[column] = values
+        permuted = sanitize_model_feature_matrix_only(permuted)
         raw_prediction = pd.Series(
             np.asarray(regressor.predict(permuted), dtype=float), index=holdout.index
         )
@@ -1804,6 +1855,7 @@ def _path_magnitude_prediction(
     index: pd.Index,
     atr_values: pd.Series | None = None,
 ) -> PathMagnitudePrediction:
+    features = sanitize_model_feature_matrix_only(features)
     magnitude = pd.Series(
         np.asarray(estimator.predict(features), dtype=float),
         index=index,
@@ -1842,6 +1894,7 @@ def _path_target_prediction(
     atr_values: pd.Series,
     index: pd.Index,
 ) -> PathTargetPrediction:
+    features = sanitize_model_feature_matrix_only(features)
     internal = pd.Series(
         np.asarray(estimator.predict(features), dtype=float),
         index=index,
@@ -3029,35 +3082,85 @@ def _train_family(
     target_before_stop = f"label_{direction}_target_before_stop_{horizon}"
     required = [target, returns, mfe, mae, target_before_stop]
     path_required = [*required, PATH_TARGET_ATR_FEATURE]
+    hygiene_audits: list[FeatureMatrixHygieneAudit] = []
+
+    def sanitize(
+        matrix: pd.DataFrame,
+        *,
+        split_label: str,
+        stage: str,
+        context: pd.DataFrame,
+    ) -> pd.DataFrame:
+        sanitized, audit = sanitize_model_feature_matrix(
+            matrix,
+            split=split_label,
+            stage=stage,
+            feature_family_by_column=feature_family_by_column,
+            context_frame=context,
+        )
+        hygiene_audits.append(audit)
+        return sanitized
+
     train = split.train.dropna(subset=[*feature_columns, *path_required]).copy()
     calibration = split.calibration.dropna(subset=[*feature_columns, *path_required]).copy()
     holdout = split.holdout.dropna(subset=[*feature_columns, *path_required]).copy()
     if train.empty or calibration.empty or holdout.empty:
         raise ValueError("Training, calibration, and holdout sets must be nonempty")
+    primary_screen_train = train.copy()
+    primary_screen_train.loc[:, feature_columns] = sanitize(
+        train[feature_columns],
+        split_label="training",
+        stage="primary_feature_screening",
+        context=train,
+    )
     feature_columns, mutual_information_summary = _mutual_information_screen(
-        train,
+        primary_screen_train,
         feature_columns,
         target,
         seed=config.random_seed,
         top_k=config.mutual_information_top_k,
     )
 
-    x_train = train[feature_columns]
+    x_train = sanitize(
+        train[feature_columns],
+        split_label="training",
+        stage="primary_classifier_fit",
+        context=train,
+    )
     y_train = train[target].astype(int)
     if y_train.nunique() < 2:
         raise ValueError("Training target contains only one class")
     classifier.fit(x_train, y_train)
 
-    calibration_raw = _positive_class_probability(classifier, calibration[feature_columns])
+    calibration_primary_features = sanitize(
+        calibration[feature_columns],
+        split_label="calibration",
+        stage="primary_classifier_probability",
+        context=calibration,
+    )
+    calibration_raw = _positive_class_probability(classifier, calibration_primary_features)
     calibrator = IsotonicRegression(out_of_bounds="clip")
     calibrator.fit(calibration_raw, calibration[target].astype(int))
     calibration_probability = np.asarray(calibrator.predict(calibration_raw), dtype=float)
-    holdout_raw = _positive_class_probability(classifier, holdout[feature_columns])
+    holdout_primary_features = sanitize(
+        holdout[feature_columns],
+        split_label="development_holdout",
+        stage="primary_classifier_probability",
+        context=holdout,
+    )
+    holdout_raw = _positive_class_probability(classifier, holdout_primary_features)
     holdout_probability = np.asarray(calibrator.predict(holdout_raw), dtype=float)
 
     target_train = split.train.dropna(subset=required).copy()
+    target_screen_train = target_train.copy()
+    target_screen_train.loc[:, feature_columns] = sanitize(
+        target_train[feature_columns],
+        split_label="training",
+        stage="target_before_stop_feature_screening",
+        context=target_train,
+    )
     target_screen = screen_features_for_target(
-        target_train,
+        target_screen_train,
         target_train[target_before_stop],
         target_name=target_before_stop,
         head_name=TARGET_BEFORE_STOP_HEAD,
@@ -3078,9 +3181,21 @@ def _train_family(
     target_y = target_train[target_before_stop].astype(int)
     if target_y.nunique() < 2:
         target_classifier = BaseRateClassifier()
-    target_classifier.fit(target_train[list(target_feature_columns)], target_y)
+    target_train_features = sanitize(
+        target_train[list(target_feature_columns)],
+        split_label="training",
+        stage="target_before_stop_classifier_fit",
+        context=target_train,
+    )
+    target_classifier.fit(target_train_features, target_y)
+    target_calibration_features = sanitize(
+        calibration[list(target_feature_columns)],
+        split_label="calibration",
+        stage="target_before_stop_classifier_probability",
+        context=calibration,
+    )
     target_calibration_raw = _positive_class_probability(
-        target_classifier, calibration[list(target_feature_columns)]
+        target_classifier, target_calibration_features
     )
     target_calibration_selection = select_tbs_calibrator(
         raw_probability=target_calibration_raw,
@@ -3092,9 +3207,13 @@ def _train_family(
     target_calibration_probability = np.asarray(
         target_calibrator.predict(target_calibration_raw), dtype=float
     )
-    target_holdout_raw = _positive_class_probability(
-        target_classifier, holdout[list(target_feature_columns)]
+    target_holdout_features = sanitize(
+        holdout[list(target_feature_columns)],
+        split_label="development_holdout",
+        stage="target_before_stop_classifier_probability",
+        context=holdout,
     )
+    target_holdout_raw = _positive_class_probability(target_classifier, target_holdout_features)
     target_holdout_probability = np.asarray(
         target_calibrator.predict(target_holdout_raw), dtype=float
     )
@@ -3131,6 +3250,13 @@ def _train_family(
     plugin_by_name = {plugin.name: plugin for plugin in model_plugins()}
     plugin = plugin_by_name[family]
     path_screen_train = split.train.dropna(subset=path_required).copy()
+    path_feature_screen_train = path_screen_train.copy()
+    path_feature_screen_train.loc[:, feature_columns] = sanitize(
+        path_screen_train[feature_columns],
+        split_label="training",
+        stage="path_feature_screening",
+        context=path_screen_train,
+    )
     path_train_atr = _path_atr_values(path_screen_train)
     calibration_atr = _path_atr_values(calibration)
     holdout_atr = _path_atr_values(holdout)
@@ -3210,7 +3336,7 @@ def _train_family(
         horizon=horizon,
     )
     return_screen = _screen_path_metric_head(
-        training_frame=path_screen_train,
+        training_frame=path_feature_screen_train,
         target=return_atr_train,
         target_name=str(return_atr_train.name),
         head_name=EXPECTED_RETURN_HEAD,
@@ -3221,7 +3347,7 @@ def _train_family(
         seed_offset=10,
     )
     mfe_screen = _screen_path_metric_head(
-        training_frame=path_screen_train,
+        training_frame=path_feature_screen_train,
         target=mfe_magnitude_train,
         target_name=str(mfe_magnitude_train.name),
         head_name=MFE_HEAD,
@@ -3232,7 +3358,7 @@ def _train_family(
         seed_offset=11,
     )
     mae_screen = _screen_path_metric_head(
-        training_frame=path_screen_train,
+        training_frame=path_feature_screen_train,
         target=mae_magnitude_train,
         target_name=str(mae_magnitude_train.name),
         head_name=MAE_HEAD,
@@ -3268,9 +3394,25 @@ def _train_family(
             head_name=MAE_HEAD,
             seed=config.random_seed + 2,
         )
-    return_model.fit(path_screen_train[list(return_feature_columns)], return_atr_train)
-    mfe_train_features = path_screen_train[list(mfe_feature_columns)]
-    mae_train_features = path_screen_train[list(mae_feature_columns)]
+    return_train_features = sanitize(
+        path_screen_train[list(return_feature_columns)],
+        split_label="training",
+        stage="expected_return_regressor_fit",
+        context=path_screen_train,
+    )
+    return_model.fit(return_train_features, return_atr_train)
+    mfe_train_features = sanitize(
+        path_screen_train[list(mfe_feature_columns)],
+        split_label="training",
+        stage="mfe_regressor_fit",
+        context=path_screen_train,
+    )
+    mae_train_features = sanitize(
+        path_screen_train[list(mae_feature_columns)],
+        split_label="training",
+        stage="mae_regressor_fit",
+        context=path_screen_train,
+    )
     _validate_path_magnitude_training_target(
         feature_frame=mfe_train_features,
         magnitude_target=mfe_magnitude_train,
@@ -3285,58 +3427,94 @@ def _train_family(
         mfe_model.fit(mfe_train_features, mfe_magnitude_train)
     if not mae_retired:
         mae_model.fit(mae_train_features, mae_magnitude_train)
+    calibration_return_features = sanitize(
+        calibration[list(return_feature_columns)],
+        split_label="calibration",
+        stage="expected_return_regressor_prediction",
+        context=calibration,
+    )
     calibration_return_prediction = _path_target_prediction(
         return_model,
-        calibration[list(return_feature_columns)],
+        calibration_return_features,
         atr_values=calibration_atr,
         index=calibration.index,
+    )
+    calibration_mfe_features = sanitize(
+        calibration[list(mfe_feature_columns)],
+        split_label="calibration",
+        stage="mfe_regressor_prediction",
+        context=calibration,
     )
     calibration_mfe_prediction = (
         _retired_path_prediction(calibration.index, head_name=MFE_HEAD)
         if mfe_retired
         else _path_magnitude_prediction(
             mfe_model,
-            calibration[list(mfe_feature_columns)],
+            calibration_mfe_features,
             head_name=MFE_HEAD,
             index=calibration.index,
             atr_values=calibration_atr,
         )
+    )
+    calibration_mae_features = sanitize(
+        calibration[list(mae_feature_columns)],
+        split_label="calibration",
+        stage="mae_regressor_prediction",
+        context=calibration,
     )
     calibration_mae_prediction = (
         _retired_path_prediction(calibration.index, head_name=MAE_HEAD)
         if mae_retired
         else _path_magnitude_prediction(
             mae_model,
-            calibration[list(mae_feature_columns)],
+            calibration_mae_features,
             head_name=MAE_HEAD,
             index=calibration.index,
             atr_values=calibration_atr,
         )
     )
+    holdout_return_features = sanitize(
+        holdout[list(return_feature_columns)],
+        split_label="development_holdout",
+        stage="expected_return_regressor_prediction",
+        context=holdout,
+    )
     holdout_return_prediction = _path_target_prediction(
         return_model,
-        holdout[list(return_feature_columns)],
+        holdout_return_features,
         atr_values=holdout_atr,
         index=holdout.index,
     )
     expected_return = holdout_return_prediction.canonical_external
+    holdout_mfe_features = sanitize(
+        holdout[list(mfe_feature_columns)],
+        split_label="development_holdout",
+        stage="mfe_regressor_prediction",
+        context=holdout,
+    )
     holdout_mfe_prediction = (
         _retired_path_prediction(holdout.index, head_name=MFE_HEAD)
         if mfe_retired
         else _path_magnitude_prediction(
             mfe_model,
-            holdout[list(mfe_feature_columns)],
+            holdout_mfe_features,
             head_name=MFE_HEAD,
             index=holdout.index,
             atr_values=holdout_atr,
         )
+    )
+    holdout_mae_features = sanitize(
+        holdout[list(mae_feature_columns)],
+        split_label="development_holdout",
+        stage="mae_regressor_prediction",
+        context=holdout,
     )
     holdout_mae_prediction = (
         _retired_path_prediction(holdout.index, head_name=MAE_HEAD)
         if mae_retired
         else _path_magnitude_prediction(
             mae_model,
-            holdout[list(mae_feature_columns)],
+            holdout_mae_features,
             head_name=MAE_HEAD,
             index=holdout.index,
             atr_values=holdout_atr,
@@ -3803,6 +3981,7 @@ def _train_family(
         direction=direction,
         horizon=horizon,
     )
+    feature_hygiene_metadata = combine_hygiene_audits(hygiene_audits)
     path_domain_metric_payload: dict[str, float | int | str | bool | None] = {}
     for head_name, metadata in path_domain_metadata.items():
         path_domain_metric_payload.update(
@@ -3866,6 +4045,41 @@ def _train_family(
         "model_eligible_first_date": _date_label(pd.Timestamp(split.train["Date"].min())),
         "research_start": config.research_start,
         "research_end": _research_end(full_frame, config),
+        "model_feature_nonfinite_hygiene_schema_version": (
+            MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION
+        ),
+        "model_feature_nonfinite_hygiene_policy_hash": nonfinite_hygiene_policy_hash(),
+        "model_feature_nonfinite_hygiene_metadata_json": _json_dumps(feature_hygiene_metadata),
+        "model_feature_nonfinite_hygiene_records_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("records"))
+        ),
+        "model_feature_nonfinite_pre_sanitization_count": (
+            _metadata_int(feature_hygiene_metadata.get("pre_sanitization_nonfinite_count"))
+        ),
+        "model_feature_invalid_pre_sanitization_count": (
+            _metadata_int(feature_hygiene_metadata.get("pre_sanitization_invalid_count"))
+        ),
+        "model_feature_invalid_post_sanitization_count": (
+            _metadata_int(feature_hygiene_metadata.get("post_sanitization_nonfinite_count"))
+        ),
+        "model_feature_post_sanitization_missing_count": (
+            _metadata_int(feature_hygiene_metadata.get("post_sanitization_nan_count"))
+        ),
+        "model_feature_hygiene_affected_columns_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("columns_containing_nonfinite"))
+        ),
+        "model_feature_hygiene_sanitized_columns_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("columns_sanitized"))
+        ),
+        "model_feature_hygiene_affected_feature_families_json": _json_dumps(
+            _metadata_dict(feature_hygiene_metadata.get("affected_feature_families"))
+        ),
+        "model_feature_hygiene_affected_symbols_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("affected_symbols"))
+        ),
+        "model_feature_hygiene_affected_dates_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("affected_dates"))
+        ),
         "holdout_win_rate": float((selected_returns > 0).mean())
         if not selected_returns.empty
         else math.nan,
@@ -4232,6 +4446,7 @@ def _train_family(
         product_class_scope_configuration_hash=product_scope.scope_configuration_hash,
         product_class_universe_scope_hash=product_scope.universe_scope_hash,
         product_class_scope_metadata=product_scope_metadata,
+        feature_hygiene_metadata=feature_hygiene_metadata,
     )
     return bundle
 
@@ -4268,6 +4483,8 @@ def load_model_bundle(path: str | Path) -> ModelBundle:
         object.__setattr__(loaded, "product_class_universe_scope_hash", "")
     if not hasattr(loaded, "product_class_scope_metadata"):
         object.__setattr__(loaded, "product_class_scope_metadata", {})
+    if not hasattr(loaded, "feature_hygiene_metadata"):
+        object.__setattr__(loaded, "feature_hygiene_metadata", legacy_nonfinite_hygiene_metadata())
     return loaded
 
 
@@ -4517,6 +4734,7 @@ def discover_models(
                         ),
                         product_class_universe_scope_hash=bundle.product_class_universe_scope_hash,
                         product_class_scope_metadata=bundle.product_class_scope_metadata,
+                        feature_hygiene_metadata=bundle.feature_hygiene_metadata,
                     )
                     artifact_path = Path(artifact_dir) / f"{model_id}.joblib"
                     save_model_bundle(bundle, artifact_path)
@@ -4582,10 +4800,26 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     expected_return_features = bundle_head_feature_columns(bundle, EXPECTED_RETURN_HEAD)
     mfe_features = bundle_head_feature_columns(bundle, MFE_HEAD)
     mae_features = bundle_head_feature_columns(bundle, MAE_HEAD)
+    runtime_hygiene_audits: list[FeatureMatrixHygieneAudit] = []
+
+    def sanitize_runtime(matrix: pd.DataFrame, *, stage: str) -> pd.DataFrame:
+        sanitized, audit = sanitize_model_feature_matrix(
+            matrix,
+            split="scanner_or_prediction",
+            stage=stage,
+            feature_family_by_column=bundle.feature_family_by_column,
+            context_frame=frame,
+        )
+        runtime_hygiene_audits.append(audit)
+        return sanitized
+
     missing = [column for column in primary_features if column not in frame.columns]
     if missing:
         raise ValueError(f"Feature frame is missing required model columns: {missing[:5]}")
-    x = frame[list(primary_features)]
+    x = sanitize_runtime(
+        frame[list(primary_features)],
+        stage="primary_classifier_prediction",
+    )
     raw = _positive_class_probability(bundle.classifier, x)
     probability = np.asarray(bundle.calibrator.predict(raw), dtype=float)
     output = frame[["Date", "symbol"]].copy()
@@ -4607,6 +4841,13 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     output["product_class_eligible_roles"] = ";".join(str(value) for value in product_roles)
     output["product_class_eligible_symbol_count"] = len(product_symbols)
     output["calibrated_probability"] = probability
+    hygiene_metadata = bundle_feature_hygiene_metadata(bundle)
+    output["model_feature_nonfinite_hygiene_schema_version"] = str(
+        hygiene_metadata.get("schema_version") or LEGACY_PRE_NONFINITE_HYGIENE_SCHEMA_VERSION
+    )
+    output["model_feature_nonfinite_hygiene_policy_hash"] = str(
+        hygiene_metadata.get("policy_hash") or ""
+    )
     output["primary_feature_manifest_hash"] = bundle_head_feature_manifest(bundle, PRIMARY_HEAD)
     for head_name, output_prefix in (
         (EXPECTED_RETURN_HEAD, "expected_return"),
@@ -4690,7 +4931,10 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         output["target_before_stop_raw_probability"] = np.full(len(frame), math.nan)
         output["target_before_stop_probability"] = np.full(len(frame), math.nan)
     else:
-        target_x = frame[list(target_before_stop_features)]
+        target_x = sanitize_runtime(
+            frame[list(target_before_stop_features)],
+            stage="target_before_stop_classifier_prediction",
+        )
         target_raw = _positive_class_probability(bundle.target_before_stop_model, target_x)
         output["target_before_stop_raw_probability"] = np.asarray(target_raw, dtype=float)
         output["target_before_stop_probability"] = np.asarray(
@@ -4875,16 +5119,24 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         expected_return_values = None
         expected_return_ood_values = None
     elif return_normalized:
+        return_features = sanitize_runtime(
+            frame[list(expected_return_features)],
+            stage="expected_return_regressor_prediction",
+        )
         return_prediction = _path_target_prediction(
             bundle.return_model,
-            frame[list(expected_return_features)],
+            return_features,
             atr_values=_path_atr_values(frame),
             index=frame.index,
         )
         expected_return_values = return_prediction.canonical_external.to_numpy(dtype=float)
         expected_return_ood_values = return_prediction.internal_atr_units
     else:
-        expected_return_values = bundle.return_model.predict(frame[list(expected_return_features)])
+        return_features = sanitize_runtime(
+            frame[list(expected_return_features)],
+            stage="expected_return_regressor_prediction",
+        )
+        expected_return_values = bundle.return_model.predict(return_features)
         expected_return_ood_values = expected_return_values
     add_regression_prediction(
         "expected_return",
@@ -4920,9 +5172,13 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         mfe_values = mfe_domain_prediction.canonical_signed.to_numpy(dtype=float)
         mfe_ood_values = mfe_domain_prediction.internal_magnitude
     elif mfe_has_domain:
+        mfe_prediction_features = sanitize_runtime(
+            frame[list(mfe_features)],
+            stage="mfe_regressor_prediction",
+        )
         mfe_domain_prediction = _path_magnitude_prediction(
             bundle.mfe_model,
-            frame[list(mfe_features)],
+            mfe_prediction_features,
             head_name=MFE_HEAD,
             index=frame.index,
             atr_values=_path_atr_values(frame) if mfe_target_normalization else None,
@@ -4932,7 +5188,11 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             mfe_domain_prediction.internal_magnitude if mfe_target_normalization else mfe_values
         )
     else:
-        mfe_values = bundle.mfe_model.predict(frame[list(mfe_features)])
+        mfe_prediction_features = sanitize_runtime(
+            frame[list(mfe_features)],
+            stage="mfe_regressor_prediction",
+        )
+        mfe_values = bundle.mfe_model.predict(mfe_prediction_features)
         mfe_ood_values = mfe_values
     add_regression_prediction(
         "expected_mfe",
@@ -4969,9 +5229,13 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         mae_values = mae_domain_prediction.canonical_signed.to_numpy(dtype=float)
         mae_ood_values = mae_domain_prediction.internal_magnitude
     elif mae_has_domain:
+        mae_prediction_features = sanitize_runtime(
+            frame[list(mae_features)],
+            stage="mae_regressor_prediction",
+        )
         mae_domain_prediction = _path_magnitude_prediction(
             bundle.mae_model,
-            frame[list(mae_features)],
+            mae_prediction_features,
             head_name=MAE_HEAD,
             index=frame.index,
             atr_values=_path_atr_values(frame) if mae_target_normalization else None,
@@ -4981,7 +5245,11 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             mae_domain_prediction.internal_magnitude if mae_target_normalization else mae_values
         )
     else:
-        mae_values = bundle.mae_model.predict(frame[list(mae_features)])
+        mae_prediction_features = sanitize_runtime(
+            frame[list(mae_features)],
+            stage="mae_regressor_prediction",
+        )
+        mae_values = bundle.mae_model.predict(mae_prediction_features)
         mae_ood_values = mae_values
     add_regression_prediction(
         "expected_mae",
@@ -4992,4 +5260,24 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         domain_prediction=mae_domain_prediction,
         ood_values=mae_ood_values,
     )
+    runtime_hygiene = combine_hygiene_audits(runtime_hygiene_audits)
+    output["model_feature_nonfinite_hygiene_warning"] = bool(
+        runtime_hygiene.get("pre_sanitization_invalid_count") or 0
+    )
+    output["model_feature_invalid_pre_sanitization_count"] = int(
+        _metadata_int(runtime_hygiene.get("pre_sanitization_invalid_count"))
+    )
+    output["model_feature_invalid_post_sanitization_count"] = int(
+        _metadata_int(runtime_hygiene.get("post_sanitization_nonfinite_count"))
+    )
+    output["model_feature_hygiene_sanitized_columns"] = ";".join(
+        str(column) for column in _metadata_list(runtime_hygiene.get("columns_sanitized"))
+    )
+    output["model_feature_hygiene_affected_symbols"] = ";".join(
+        str(symbol) for symbol in _metadata_list(runtime_hygiene.get("affected_symbols"))
+    )
+    output["model_feature_hygiene_affected_dates"] = ";".join(
+        str(date) for date in _metadata_list(runtime_hygiene.get("affected_dates"))
+    )
+    output["model_feature_hygiene_runtime_metadata_json"] = _json_dumps(runtime_hygiene)
     return output

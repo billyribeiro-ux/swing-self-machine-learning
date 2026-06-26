@@ -163,6 +163,26 @@ def _detail_rows(model: RegisteredModel) -> pd.DataFrame:
             "Field": "Product-class universe-scope hash",
             "Value": model.metrics.get("product_class_universe_scope_hash", ""),
         },
+        {
+            "Field": "Nonfinite hygiene schema",
+            "Value": model.metrics.get("model_feature_nonfinite_hygiene_schema_version", ""),
+        },
+        {
+            "Field": "Nonfinite hygiene policy hash",
+            "Value": model.metrics.get("model_feature_nonfinite_hygiene_policy_hash", ""),
+        },
+        {
+            "Field": "Nonfinite invalid values before sanitization",
+            "Value": model.metrics.get("model_feature_invalid_pre_sanitization_count", ""),
+        },
+        {
+            "Field": "Nonfinite invalid values after sanitization",
+            "Value": model.metrics.get("model_feature_invalid_post_sanitization_count", ""),
+        },
+        {
+            "Field": "Nonfinite sanitized columns",
+            "Value": model.metrics.get("model_feature_hygiene_sanitized_columns_json", ""),
+        },
         {"Field": "Training window", "Value": f"{model.training_start} to {model.training_end}"},
         {
             "Field": "Calibration window",
@@ -621,6 +641,9 @@ def render_page() -> None:
                     "return_",
                     "mfe_",
                     "mae_",
+                    "hygiene",
+                    "sanitization",
+                    "nonfinite",
                 ),
             )
             streamlit.dataframe(display_frame(sanity), width="stretch", hide_index=True)

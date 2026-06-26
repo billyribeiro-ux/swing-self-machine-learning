@@ -102,6 +102,27 @@ def render_page() -> None:
         width="stretch",
         hide_index=True,
     )
+    streamlit.subheader("Nonfinite Feature Hygiene")
+    hygiene_fields = [
+        "model_feature_nonfinite_hygiene_schema_version",
+        "model_feature_nonfinite_hygiene_policy_hash",
+        "model_feature_nonfinite_hygiene_warning",
+        "model_feature_invalid_pre_sanitization_count",
+        "model_feature_invalid_post_sanitization_count",
+        "model_feature_hygiene_sanitized_columns",
+        "model_feature_hygiene_affected_symbols",
+        "model_feature_hygiene_affected_dates",
+        "model_feature_hygiene_runtime_metadata_json",
+    ]
+    streamlit.dataframe(
+        display_frame(
+            pd.DataFrame(
+                [{"Metric": field, "Value": row.get(field, "")} for field in hygiene_fields]
+            )
+        ),
+        width="stretch",
+        hide_index=True,
+    )
     streamlit.subheader("Target-Before-Stop Calibration")
     calibration_fields = [
         "target_before_stop_raw_probability",

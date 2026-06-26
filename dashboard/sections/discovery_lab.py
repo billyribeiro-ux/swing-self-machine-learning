@@ -63,6 +63,7 @@ def render_page() -> None:
     path_screen_rows: list[dict[str, object]] = []
     calibration_rows: list[dict[str, object]] = []
     product_scope_rows: list[dict[str, object]] = []
+    hygiene_rows: list[dict[str, object]] = []
     for model in models:
         eligibility = promotion_eligibility(model.gate_results)
         scope = model.metrics.get("product_class_scope", "POOLED")
@@ -125,6 +126,15 @@ def render_page() -> None:
                 "probability_contract_valid": model.metrics.get(
                     "prediction_probability_contract_valid"
                 ),
+                "nonfinite_hygiene_schema": model.metrics.get(
+                    "model_feature_nonfinite_hygiene_schema_version"
+                ),
+                "nonfinite_pre_sanitization_invalid": model.metrics.get(
+                    "model_feature_invalid_pre_sanitization_count"
+                ),
+                "nonfinite_post_sanitization_invalid": model.metrics.get(
+                    "model_feature_invalid_post_sanitization_count"
+                ),
                 "mandatory_gates_failed": eligibility.mandatory_failed,
                 "mandatory_gates_not_configured": eligibility.not_configured,
                 "promotion_eligible": eligibility.eligible,
@@ -174,6 +184,46 @@ def render_page() -> None:
                 "mae_feature_families": model.metrics.get(
                     "mae_selected_feature_family_counts_json"
                 ),
+                "nonfinite_hygiene_schema": model.metrics.get(
+                    "model_feature_nonfinite_hygiene_schema_version"
+                ),
+                "nonfinite_hygiene_policy_hash": model.metrics.get(
+                    "model_feature_nonfinite_hygiene_policy_hash"
+                ),
+                "nonfinite_pre_sanitization_invalid": model.metrics.get(
+                    "model_feature_invalid_pre_sanitization_count"
+                ),
+                "nonfinite_post_sanitization_invalid": model.metrics.get(
+                    "model_feature_invalid_post_sanitization_count"
+                ),
+            }
+        )
+        hygiene_rows.append(
+            {
+                "model_id": model.model_id,
+                "state": model.state,
+                "product_class_scope": scope,
+                "direction": model.direction,
+                "horizon": model.horizon,
+                "family": model.family,
+                "schema": model.metrics.get("model_feature_nonfinite_hygiene_schema_version"),
+                "policy_hash": model.metrics.get("model_feature_nonfinite_hygiene_policy_hash"),
+                "pre_nonfinite": model.metrics.get(
+                    "model_feature_nonfinite_pre_sanitization_count"
+                ),
+                "pre_invalid": model.metrics.get("model_feature_invalid_pre_sanitization_count"),
+                "post_invalid": model.metrics.get("model_feature_invalid_post_sanitization_count"),
+                "post_missing": model.metrics.get("model_feature_post_sanitization_missing_count"),
+                "sanitized_columns": model.metrics.get(
+                    "model_feature_hygiene_sanitized_columns_json"
+                ),
+                "affected_families": model.metrics.get(
+                    "model_feature_hygiene_affected_feature_families_json"
+                ),
+                "affected_symbols": model.metrics.get(
+                    "model_feature_hygiene_affected_symbols_json"
+                ),
+                "affected_dates": model.metrics.get("model_feature_hygiene_affected_dates_json"),
             }
         )
         family_counts: dict[str, object] = {}
@@ -297,6 +347,7 @@ def render_page() -> None:
             "Path-Metric Feature Screens",
             "Target-Before-Stop Calibration",
             "Product-Class Diagnostics",
+            "Nonfinite Hygiene",
         ]
     )
     with tabs[0]:
@@ -329,6 +380,12 @@ def render_page() -> None:
     with tabs[4]:
         streamlit.dataframe(
             display_frame(pd.DataFrame(product_scope_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+    with tabs[5]:
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(hygiene_rows)),
             width="stretch",
             hide_index=True,
         )
