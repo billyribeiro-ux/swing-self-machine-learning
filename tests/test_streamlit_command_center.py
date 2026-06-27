@@ -246,6 +246,11 @@ relationships: []
             ),
         )
     monkeypatch.setattr("dashboard.ui.components.resolve_project_root", lambda _: tmp_path)
+
+    def fail_download(*_: object, **__: object) -> None:
+        raise AssertionError("Command Center page load attempted an FMP download")
+
+    monkeypatch.setattr("swing_rsi.data.loader.download_daily", fail_download)
     monkeypatch.delenv("FMP_API_KEY", raising=False)
     return tmp_path
 
@@ -273,8 +278,10 @@ def test_dashboard_identifies_development_repo(monkeypatch: pytest.MonkeyPatch) 
 def test_pages_load_without_fmp_key_or_mutation(command_center_root: Path) -> None:
     db = command_center_root / "state" / "engine.sqlite3"
     scanner = command_center_root / "artifacts" / "scanner" / "scan-demo_scanner.csv"
+    artifact = command_center_root / "artifacts" / "models" / "model.joblib"
     before_db = db.read_bytes()
     before_scanner = scanner.read_bytes()
+    before_artifact = artifact.read_bytes()
     for page in (
         "dashboard/sections/overview.py",
         "dashboard/sections/data_universe.py",
@@ -293,6 +300,7 @@ def test_pages_load_without_fmp_key_or_mutation(command_center_root: Path) -> No
         _assert_no_streamlit_exceptions(app)
     assert db.read_bytes() == before_db
     assert scanner.read_bytes() == before_scanner
+    assert artifact.read_bytes() == before_artifact
 
 
 def test_app_shell_exposes_password_only_fmp_settings(command_center_root: Path) -> None:

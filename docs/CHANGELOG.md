@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed Streamlit Command Center navigation verification by proving the actual `dashboard/app.py` entrypoint registers exactly the 12 Command Center pages, documenting the operational-repository 9-page sidebar as the stale launch-path source, and extending page-load safety checks for no FMP calls and no SQLite/model-artifact mutation.
 - Added Streamlit Command Center Dashboard V1 with 12 explicit pages, read-only startup safety checks, development/operational state separation, password-only FMP key settings, model/gate/product-class/scanner/attribution/final-holdout/paper-forward views, CSV/XLSX exports, confirmed engine command buttons, and dashboard-specific safety/export tests.
 - Added a consolidated end-to-end development challenger work report covering latest-generation triage, enrollment package preparation, prospective final-holdout enrollment, FMP refresh, feature rebuild, first processed shadow session, state deltas, guardrails, and next task.
 - Processed the first successful development prospective final-holdout session for run `d25d6fa11a2e50daa430c15e`: refreshed 35 symbols through `2026-06-26`, rebuilt feature/label/modeling parquet artifacts under the frozen manifest hash, created shadow scanner snapshot `dbc51686179c4291a0c890dd`, inserted 26 final-holdout-prefixed shadow events, and left the model non-promoted with zero matured outcomes.

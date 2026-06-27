@@ -5,6 +5,7 @@
 The dashboard is a local Streamlit presentation layer over the existing Python engine and application services. New read-only dashboard helpers live in `src/swing_rsi/application/dashboard_service.py`; export helpers live in `src/swing_rsi/application/dashboard_exports.py`.
 
 Page renderers live in `dashboard/sections/`, and explicit page registration lives in `dashboard/ui/navigation.py`.
+The launch entrypoint is `dashboard/app.py`; it calls `st.navigation(streamlit_pages(st), position="sidebar")`.
 
 ## Page List
 
@@ -20,6 +21,12 @@ Page renderers live in `dashboard/sections/`, and explicit page registration liv
 10. Reports and Exports
 11. Engine Commands
 12. Legacy Baselines
+
+The legacy primary labels `Discovery Lab`, `Live Scanner`, `Portfolio Backtests`,
+and `Baselines and Legacy RSI` are not registered as visible Command Center
+pages. If they appear in a sidebar, the running process is using the old
+operational dashboard or a stale process, not the development Command Center V1
+entrypoint.
 
 ## Safety Boundaries
 
@@ -89,22 +96,26 @@ Each command displays the exact command, requires confirmation, runs from the de
 
 Added and updated tests cover explicit navigation, page-load smoke tests, no-FMP page loads, no page-load SQLite/artifact mutation, model registry reads, gate audit failures, product-class scopes, scanner snapshots, missing attribution handling, final-holdout progress display, empty ordinary paper-forward state, report inventory, disabled discovery/promotion commands, CSV/XLSX generation, openpyxl workbook validation, secret redaction, command confirmation/refusal, command output capture, Git-ignore coverage, operational separation, and FMP settings.
 
+The navigation regression coverage now captures the actual `st.Page`
+registrations made by `dashboard/app.py`; it is not limited to testing the
+internal helper list.
+
 ## Verification Results
 
 Completed in the development worktree:
 
-- `.venv/bin/pytest`: 318 passed, 11776 warnings
+- `.venv/bin/pytest`: 320 passed, 11776 warnings
 - `.venv/bin/ruff check .`: passed
 - `.venv/bin/ruff format --check .`: 111 files already formatted
 - `.venv/bin/mypy src`: success, no issues in 61 source files
 - Streamlit AppTest real-state smoke for all 12 Command Center pages: passed
-- Local Streamlit HTTP smoke at `http://localhost:8501`: `HTTP/1.1 200 OK`
+- Local Streamlit HTTP smoke at `http://localhost:8502`: `HTTP/1.1 200 OK`
 
 Warnings were existing pandas/joblib/performance warnings from autonomous-engine tests, not dashboard failures.
 
 ## Commit Hashes
 
-Exact local commit hashes are reported in the Codex completion handoff after the three requested commits are created. The handoff file itself cannot contain its own final commit hash without changing that hash.
+Exact local commit hashes are reported in the Codex completion handoff. The handoff file itself cannot contain its own final commit hash without changing that hash.
 
 ## Launch Command
 

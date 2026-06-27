@@ -1,5 +1,19 @@
 # Decision Log
 
+## 2026-06-27 — Dashboard navigation tests target the launched entrypoint
+
+Decision: Command Center navigation regression tests must execute `dashboard/app.py`
+and capture the `st.Page` registrations made by the actual launched Streamlit
+entrypoint. Helper-only page-list tests remain useful, but they are not
+sufficient evidence that `streamlit run dashboard/app.py` exposes the required
+12 visible Command Center pages.
+
+Reason: A reported sidebar mismatch showed the old 9-page navigation from the
+operational repository while the development helper list already contained the
+12 Command Center labels. Testing the launched entrypoint catches drift between
+reports, helpers, and the UI path users actually run, while preserving the
+development/operational safety boundary.
+
 ## 2026-06-27 — Streamlit Command Center V1 is the local development operations console
 
 Decision: Replace the V0 autonomous dashboard navigation with a local-only Streamlit Command Center V1 registered through explicit `st.navigation` pages: Overview, Data and Universe, Model Registry, Gate Audit, Product-Class Specialists, Scanner Snapshots, Candidate Attribution, Shadow Final Holdout, Paper Forward Test, Reports and Exports, Engine Commands, and Legacy Baselines. Page loads use read-only local state readers for SQLite, artifacts, reports, manifests, raw data, feature data, and universe configuration. Mutating actions require explicit confirmation and remain limited to development commands; discovery and promotion are disabled in the dashboard. FMP key entry is password-only, writes only to the development `.env` after confirmation, and never displays or logs the key.

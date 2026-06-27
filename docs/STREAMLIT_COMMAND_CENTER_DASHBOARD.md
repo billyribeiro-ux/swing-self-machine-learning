@@ -32,6 +32,12 @@ cd /Users/billyribeiro/Trading-Projects/swing-rsi-self-learner-dev
 .venv/bin/streamlit run dashboard/app.py
 ```
 
+If the sidebar shows `Discovery Lab`, `Live Scanner`, `Portfolio Backtests`, or
+`Baselines and Legacy RSI`, the running process is not the Command Center V1
+entrypoint from this development worktree. That old 9-page navigation still
+exists in the frozen operational repository for historical context and must not
+be used for development Command Center checks.
+
 ## Pages
 
 The dashboard uses explicit `st.navigation` page registration in this order:
@@ -50,6 +56,8 @@ The dashboard uses explicit `st.navigation` page registration in this order:
 12. Legacy Baselines
 
 Streamlit filename-derived pages are not used.
+There is no tracked `dashboard/pages/` source directory in the Command Center
+development worktree.
 
 ## Safety Boundaries
 
