@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Robust MAE Target Transformation V1 for only the POOLED bull HistGradientBoosting MAE head: the estimator trains on a train-only `log1p` internal adverse-magnitude target, predictions are inverse-mapped before canonical signed MAE output and OOD Governance V2 checks, scanner identity includes the path-target-transform hash, and all unaffected heads persist `path_target_transform = none`.
 - Added Nonfinite Feature Hygiene V1: model feature matrices now convert infinities and unsafe float64 magnitudes to missing values before feature screening, preprocessing, fitting, calibration prediction, holdout prediction, and scanner prediction; artifacts persist hygiene audit metadata and scanner identity includes the hygiene policy hash.
 - Replaced raw `obv_change_20` percentage change with safe denominator semantics so zero or near-zero OBV denominators produce `NaN` rather than positive or negative infinity.
 - Added Product-Class Specialist Scope V2: the prior mixed `LEVERAGED_INVERSE` research bucket is split into governed `INVERSE`, `LEVERAGED_LONG`, and `LEVERAGED_INVERSE` scopes while preserving `POOLED` and `ORDINARY`, so inverse-only, leveraged-long, and leveraged-inverse target rows can train and route independently in the next challenger generation.

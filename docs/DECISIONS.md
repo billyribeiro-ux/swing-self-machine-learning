@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-27 — POOLED bull HistGradientBoosting MAE uses a scoped robust target transform
+
+Decision: Add `robust_path_target_transform_v1` only for the `POOLED` bull `hist_gradient_boosting` MAE head at the 10-session horizon. This head trains its HistGradientBoostingRegressor on `log1p` of the nonnegative internal adverse MAE magnitude target fitted from training rows only. Runtime prediction inverse-maps with `expm1`, then applies the existing canonical MAE sign contract and unchanged OOD Governance V2 bounds in canonical internal magnitude units. All other scopes, directions, families, and heads persist `path_target_transform = none`.
+
+Reason: The remaining OOD source diagnosis found no failing learned-model OOD gate and no feature-sanitization, label, or OOD-bound defect. The only repeated learned-model OOD pattern was six non-selected development-holdout warnings for POOLED bull HistGradientBoosting MAE on 2025-10-31, classified as estimator extrapolation with product-class heterogeneity and a localized date/regime effect. A train-only monotonic log transform is narrower than changing labels, thresholds, gates, product-class scopes, model families, final-holdout rules, or OOD Governance V2.
+
 ## 2026-06-26 — Model feature matrices sanitize nonfinite values before estimators
 
 Decision: Add `model_feature_nonfinite_hygiene_v1` as a model-matrix boundary policy. Feature matrices used for training, calibration, development holdout, scanner prediction, and audit prediction replace positive infinity, negative infinity, and unsafe finite float64 magnitudes with `NaN` before the existing train-fitted imputation path. Existing `NaN` values remain missing values, not market signals. New model artifacts persist nonfinite hygiene counts, affected columns, affected feature families, affected symbols/dates, split/stage records, and the hygiene policy hash. Scanner identity includes the hygiene metadata hash, and legacy artifacts are labeled `legacy_pre_nonfinite_hygiene` when loaded.
