@@ -17,11 +17,16 @@ from swing_rsi.application.dashboard_exports import (
 from swing_rsi.application.dashboard_service import (
     CommandSpec,
     command_specs,
+    complete_engine_snapshot_frames,
     dashboard_startup_state,
     gate_audit_frame,
+    model_edge_status_frame,
     model_registry_frame,
     run_dashboard_command,
     save_development_fmp_settings,
+    scanner_results_frame,
+    signal_board_frame,
+    signal_board_metrics,
 )
 from swing_rsi.data.loader import save_ohlcv_csv
 from swing_rsi.engine.gates import make_gate
@@ -164,12 +169,32 @@ relationships: []
                 "expected_mae": -0.01,
                 "target_before_stop_probability": 0.55,
                 "candidate_status": "REJECTED",
-                "exclusion_reason": "failed_gate",
+                "exclusion_reason": "model_not_promoted; failed_gate",
                 "top_attribution_categories": "Model contribution",
                 "supporting_evidence": "Supporting evidence",
                 "historical_analogs": "[]",
                 "feature_snapshot_hash": "featurehash",
-            }
+            },
+            {
+                "scan_id": "scan-demo",
+                "as_of_date": "2026-05-26",
+                "ticker": "DEMO2",
+                "product_class_scope": "POOLED",
+                "direction": "Bullish",
+                "horizon": 10,
+                "model_id": "model-demo",
+                "calibrated_probability": 0.63,
+                "expected_return": 0.03,
+                "expected_mfe": None,
+                "expected_mae": None,
+                "target_before_stop_probability": 0.57,
+                "candidate_status": "ACTIONABLE_PAPER_CANDIDATE",
+                "exclusion_reason": "",
+                "top_attribution_categories": "Model contribution",
+                "supporting_evidence": "Supporting evidence",
+                "historical_analogs": "[]",
+                "feature_snapshot_hash": "featurehash",
+            },
         ]
     ).to_csv(scanner_path, index=False)
     with engine_connection(db) as connection:
@@ -186,8 +211,8 @@ relationships: []
                 "featurehash",
                 str(scanner_path),
                 str(scanner_path.with_suffix(".parquet")),
-                1,
-                json.dumps({"rejected_rows": 1, "actionable_rows": 0}),
+                2,
+                json.dumps({"rejected_rows": 1, "actionable_rows": 1}),
             ),
         )
         connection.execute(
@@ -283,18 +308,18 @@ def test_pages_load_without_fmp_key_or_mutation(command_center_root: Path) -> No
     before_scanner = scanner.read_bytes()
     before_artifact = artifact.read_bytes()
     for page in (
-        "dashboard/sections/overview.py",
-        "dashboard/sections/data_universe.py",
-        "dashboard/sections/model_registry.py",
+        "dashboard/sections/signal_board.py",
+        "dashboard/sections/shadow_forward_test.py",
+        "dashboard/sections/model_edge_status.py",
+        "dashboard/sections/scanner_results.py",
+        "dashboard/sections/candidate_detail.py",
+        "dashboard/sections/product_class_research.py",
         "dashboard/sections/gate_audit.py",
-        "dashboard/sections/product_class_specialists.py",
-        "dashboard/sections/scanner_snapshots.py",
-        "dashboard/sections/candidate_attribution.py",
-        "dashboard/sections/shadow_final_holdout.py",
-        "dashboard/sections/paper_forward_test.py",
+        "dashboard/sections/data_universe.py",
         "dashboard/sections/reports_and_exports.py",
         "dashboard/sections/engine_commands.py",
         "dashboard/sections/baselines_legacy.py",
+        "dashboard/sections/developer_diagnostics.py",
     ):
         app = AppTest.from_file(page).run(timeout=30)
         _assert_no_streamlit_exceptions(app)
@@ -315,8 +340,53 @@ def test_app_shell_exposes_password_only_fmp_settings(command_center_root: Path)
 def test_model_registry_and_gate_audit_load_local_state(command_center_root: Path) -> None:
     models = model_registry_frame(command_center_root)
     gates = gate_audit_frame(command_center_root)
+    edges = model_edge_status_frame(command_center_root)
     assert "model-demo" in set(models["model_id"])
     assert "FAIL" in set(gates["status"])
+    assert "SHADOW VALIDATION" in set(edges["edge_status"])
+
+
+def test_signal_first_tables_label_live_shadow_and_missing_paths(
+    command_center_root: Path,
+) -> None:
+    metrics = signal_board_metrics(command_center_root)
+    board = signal_board_frame(command_center_root)
+    scanner = scanner_results_frame(command_center_root)
+
+    assert metrics["live_actionable_signals"] == 0
+    assert "REJECTED" in set(board["live_shadow_rejected_classification"])
+    assert "SHADOW ONLY" in set(board["live_shadow_rejected_classification"])
+    shadow = board.loc[board["ticker"].astype(str) == "DEMO2"].iloc[0]
+    assert shadow["expected_mfe"] == "Not available"
+    assert shadow["expected_mae"] == "Not available"
+    joined = " ".join(scanner.astype(str).stack().tolist())
+    assert "Trade signal" not in joined
+    rejected = scanner.loc[scanner["candidate_classification"].astype(str) == "REJECTED"]
+    assert not rejected.empty
+
+
+def test_complete_engine_snapshot_export_contains_required_sheets(
+    command_center_root: Path,
+    tmp_path: Path,
+) -> None:
+    frames = complete_engine_snapshot_frames(command_center_root)
+    xlsx_bytes = to_xlsx_bytes(frames)
+    workbook_path = tmp_path / "complete_snapshot.xlsx"
+    workbook_path.write_bytes(xlsx_bytes)
+    workbook = openpyxl.load_workbook(workbook_path)
+    assert set(workbook.sheetnames) == {
+        "signal_board",
+        "shadow_forward_status",
+        "model_edge_status",
+        "scanner_results",
+        "gate_audit",
+        "product_class_research",
+        "candidate_attribution",
+        "data_universe",
+        "reports_index",
+    }
+    assert workbook["signal_board"]["A1"].value == "ticker"
+    assert "secret" not in workbook_path.read_bytes().decode("latin1", errors="ignore")
 
 
 def test_exports_create_csv_and_xlsx_without_secrets(tmp_path: Path) -> None:
@@ -348,6 +418,29 @@ def test_engine_commands_exclude_discovery_and_promotion(command_center_root: Pa
     assert "discover-models" not in labels
     assert "promote-model" not in labels
     assert "universe-update" not in labels
+
+
+def test_engine_command_buttons_require_confirmation_and_disable_mutations(
+    command_center_root: Path,
+) -> None:
+    app = AppTest.from_file("dashboard/sections/engine_commands.py").run(timeout=30)
+    _assert_no_streamlit_exceptions(app)
+
+    buttons = {button.label: button for button in app.button}
+    assert buttons["Run selected command"].disabled is True
+    for label in (
+        "discover-models disabled",
+        "promote-model disabled",
+        "final-holdout-init disabled",
+        "forward-update disabled",
+    ):
+        assert buttons[label].disabled is True
+
+    app.checkbox[0].set_value(True)
+    app.run(timeout=30)
+    _assert_no_streamlit_exceptions(app)
+    buttons = {button.label: button for button in app.button}
+    assert buttons["Run selected command"].disabled is False
 
 
 def test_command_runner_refuses_operational_repo(monkeypatch: pytest.MonkeyPatch) -> None:

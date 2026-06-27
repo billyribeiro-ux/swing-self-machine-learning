@@ -13,19 +13,19 @@ from dashboard.ui.navigation import USER_FACING_SECTIONS, section_titles
 from swing_rsi.application.datasets import DatasetSummary
 from swing_rsi.data.loader import save_ohlcv_csv
 
-REQUIRED_COMMAND_CENTER_PAGE_TITLES = (
-    "Overview",
-    "Data and Universe",
-    "Model Registry",
+REQUIRED_SIGNAL_FIRST_PAGE_TITLES = (
+    "Signal Board",
+    "Shadow Forward Test",
+    "Model Edge Status",
+    "Scanner Results",
+    "Candidate Detail",
+    "Product-Class Research",
     "Gate Audit",
-    "Product-Class Specialists",
-    "Scanner Snapshots",
-    "Candidate Attribution",
-    "Shadow Final Holdout",
-    "Paper Forward Test",
+    "Data and Universe",
     "Reports and Exports",
     "Engine Commands",
     "Legacy Baselines",
+    "Developer Diagnostics",
 )
 
 LEGACY_PRIMARY_PAGE_TITLES = {
@@ -122,18 +122,25 @@ def test_dashboard_imports_do_not_mutate_data_or_call_fmp(
 
     modules = (
         "dashboard.app",
-        "dashboard.sections.overview",
-        "dashboard.sections.data_universe",
-        "dashboard.sections.model_registry",
+        "dashboard.sections.signal_board",
+        "dashboard.sections.shadow_forward_test",
+        "dashboard.sections.model_edge_status",
+        "dashboard.sections.scanner_results",
+        "dashboard.sections.candidate_detail",
+        "dashboard.sections.product_class_research",
         "dashboard.sections.gate_audit",
+        "dashboard.sections.data_universe",
+        "dashboard.sections.reports_and_exports",
+        "dashboard.sections.engine_commands",
+        "dashboard.sections.baselines_legacy",
+        "dashboard.sections.developer_diagnostics",
+        "dashboard.sections.overview",
+        "dashboard.sections.model_registry",
         "dashboard.sections.product_class_specialists",
         "dashboard.sections.scanner_snapshots",
         "dashboard.sections.candidate_attribution",
         "dashboard.sections.shadow_final_holdout",
         "dashboard.sections.paper_forward_test",
-        "dashboard.sections.reports_and_exports",
-        "dashboard.sections.engine_commands",
-        "dashboard.sections.baselines_legacy",
         "dashboard.sections.data_audit",
         "dashboard.sections.discovery_lab",
         "dashboard.sections.live_scanner",
@@ -149,23 +156,23 @@ def test_dashboard_imports_do_not_mutate_data_or_call_fmp(
 
 
 def test_dashboard_registers_autonomous_engine_sections() -> None:
-    assert section_titles() == REQUIRED_COMMAND_CENTER_PAGE_TITLES
+    assert section_titles() == REQUIRED_SIGNAL_FIRST_PAGE_TITLES
     assert len(USER_FACING_SECTIONS) == 12
     assert "app" not in {title.lower() for title in section_titles()}
     assert not LEGACY_PRIMARY_PAGE_TITLES.intersection(section_titles())
     assert [section.url_path for section in USER_FACING_SECTIONS] == [
-        "overview",
-        "data-universe",
-        "model-registry",
+        "signal-board",
+        "shadow-forward-test",
+        "model-edge-status",
+        "scanner-results",
+        "candidate-detail",
+        "product-class-research",
         "gate-audit",
-        "product-class-specialists",
-        "scanner-snapshots",
-        "candidate-attribution",
-        "shadow-final-holdout",
-        "paper-forward-test",
+        "data-universe",
         "reports-and-exports",
         "engine-commands",
         "legacy-baselines",
+        "developer-diagnostics",
     ]
     assert all("dashboard/sections" in section.path.as_posix() for section in USER_FACING_SECTIONS)
     assert not tuple(Path("dashboard/pages").glob("*.py"))
@@ -184,21 +191,21 @@ def test_dashboard_app_entrypoint_registers_command_center_pages(
     app_module.main()
 
     pages = captured["pages"]
-    assert [page.title for page in pages] == list(REQUIRED_COMMAND_CENTER_PAGE_TITLES)
+    assert [page.title for page in pages] == list(REQUIRED_SIGNAL_FIRST_PAGE_TITLES)
     assert not LEGACY_PRIMARY_PAGE_TITLES.intersection({page.title for page in pages})
     assert [page.url_path for page in pages] == [
-        "overview",
-        "data-universe",
-        "model-registry",
+        "signal-board",
+        "shadow-forward-test",
+        "model-edge-status",
+        "scanner-results",
+        "candidate-detail",
+        "product-class-research",
         "gate-audit",
-        "product-class-specialists",
-        "scanner-snapshots",
-        "candidate-attribution",
-        "shadow-final-holdout",
-        "paper-forward-test",
+        "data-universe",
         "reports-and-exports",
         "engine-commands",
         "legacy-baselines",
+        "developer-diagnostics",
     ]
     assert [page.default for page in pages] == [True] + [False] * 11
     assert captured["position"] == "sidebar"
