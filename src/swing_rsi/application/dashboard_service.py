@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pandas as pd
 
@@ -37,6 +37,36 @@ OPERATIONAL_REPOSITORY = Path("/Users/billyribeiro/Trading-Projects/swing-rsi-se
 FROZEN_OPERATIONAL_RUN_ID = "3493ee8ac37bf96475c362e1"
 FROZEN_OPERATIONAL_MODEL_ID = "b93b2258c10aea5cef81d291"
 FROZEN_OPERATIONAL_BASELINE_DATE = "2026-06-25"
+
+EDGE_RESEARCH_ONLY = "RESEARCH ONLY"
+EDGE_DEVELOPMENT_CANDIDATE = "DEVELOPMENT CANDIDATE"
+EDGE_SHADOW_VALIDATION = "SHADOW VALIDATION"
+EDGE_FINAL_HOLDOUT_QUALIFIED = "FINAL-HOLDOUT QUALIFIED"
+EDGE_PROMOTED = "PROMOTED"
+
+LIVE_ACTIONABLE = "LIVE ACTIONABLE"
+SHADOW_ONLY = "SHADOW ONLY"
+REJECTED = "REJECTED"
+PENDING_ENTRY = "PENDING ENTRY"
+OPEN_SHADOW_POSITION = "OPEN SHADOW POSITION"
+CLOSED = "CLOSED"
+RESEARCH_ONLY = "RESEARCH ONLY"
+NOT_AVAILABLE = "Not available"
+
+SIGNAL_FIRST_PAGE_TITLES: tuple[str, ...] = (
+    "Signal Board",
+    "Shadow Forward Test",
+    "Model Edge Status",
+    "Scanner Results",
+    "Candidate Detail",
+    "Product-Class Research",
+    "Gate Audit",
+    "Data and Universe",
+    "Reports and Exports",
+    "Engine Commands",
+    "Legacy Baselines",
+    "Developer Diagnostics",
+)
 
 
 @dataclass(frozen=True)
@@ -96,7 +126,7 @@ ALLOWED_COMMANDS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         "scan-include-challengers",
-        "scan --include-challengers",
+        "scanner review run",
         (sys.executable, "-m", "swing_rsi.cli", "scan", "--include-challengers"),
         mutates=True,
     ),
@@ -277,6 +307,631 @@ def _safe_metric(model: RegisteredModel, *names: str) -> object:
         if name in model.calibration_metrics:
             return model.calibration_metrics.get(name)
     return ""
+
+
+def _model_scope(model: RegisteredModel | None) -> str:
+    return "" if model is None else str(model.metrics.get("product_class_scope") or "POOLED")
+
+
+def _safe_int(value: object) -> int:
+    try:
+        if bool(pd.isna(cast(Any, value))):
+            return 0
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(float(cast(Any, value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_float(value: object) -> float | None:
+    try:
+        if bool(pd.isna(cast(Any, value))):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        numeric = float(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
+    return numeric if pd.notna(numeric) else None
+
+
+def _display_value(value: object) -> object:
+    if value in {"", None, GATE_VALUE_NOT_AVAILABLE, GATE_VALUE_NOT_APPLICABLE}:
+        return NOT_AVAILABLE
+    try:
+        if bool(pd.isna(cast(Any, value))):
+            return NOT_AVAILABLE
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _clean_text(value: object) -> str:
+    if _display_value(value) == NOT_AVAILABLE:
+        return ""
+    return str(value).strip()
+
+
+def _first_available(*values: object) -> object:
+    for value in values:
+        if _display_value(value) != NOT_AVAILABLE:
+            return value
+    return NOT_AVAILABLE
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {"true", "1", "yes", "y", "pass"}
+
+
+def _model_maps(
+    root: str | Path,
+) -> tuple[dict[str, RegisteredModel], dict[str, dict[str, object]]]:
+    models = {model.model_id: model for model in registered_models_readonly(root)}
+    final_rows = _read_rows(
+        _db_path(root),
+        """
+        SELECT fm.model_id, fm.run_id, fm.research_only, fm.development_gate_eligible,
+               fr.status, fr.baseline_market_date, fr.first_eligible_future_signal_date
+        FROM final_holdout_models fm
+        JOIN final_holdout_runs fr ON fr.run_id = fm.run_id
+        ORDER BY fr.created_at_utc DESC
+        """,
+    )
+    final_map: dict[str, dict[str, object]] = {}
+    for row in final_rows:
+        final_map.setdefault(
+            str(row["model_id"]),
+            {
+                "run_id": row["run_id"],
+                "status": row["status"],
+                "research_only": bool(row["research_only"]),
+                "development_gate_eligible": bool(row["development_gate_eligible"]),
+                "baseline_market_date": row["baseline_market_date"],
+                "first_eligible_future_signal_date": row["first_eligible_future_signal_date"],
+            },
+        )
+    return models, final_map
+
+
+def edge_status_for_model(
+    model: RegisteredModel | None,
+    final_holdout: dict[str, object] | None = None,
+) -> str:
+    if model is None:
+        return RESEARCH_ONLY
+    eligibility = promotion_eligibility(model.gate_results)
+    holdout_status = str(
+        model.metrics.get("holdout_status") or model.metrics.get("final_holdout_status") or ""
+    ).upper()
+    if model.promoted_at_utc or (
+        model.state == "CHAMPION" and eligibility.eligible and holdout_status == "FINAL_HOLDOUT"
+    ):
+        return EDGE_PROMOTED
+    if holdout_status == "FINAL_HOLDOUT" and eligibility.eligible:
+        return EDGE_FINAL_HOLDOUT_QUALIFIED
+    if final_holdout and str(final_holdout.get("status", "")).upper() not in {
+        "INVALIDATED",
+        "CLOSED",
+    }:
+        return EDGE_SHADOW_VALIDATION
+    if model.state in {"CANDIDATE", "CHALLENGER"}:
+        return EDGE_DEVELOPMENT_CANDIDATE
+    return EDGE_RESEARCH_ONLY
+
+
+def _model_edge_status_map(root: str | Path) -> dict[str, str]:
+    models, final_map = _model_maps(root)
+    return {
+        model_id: edge_status_for_model(model, final_map.get(model_id))
+        for model_id, model in models.items()
+    }
+
+
+def _next_model_blocker(
+    model: RegisteredModel | None, final_holdout: dict[str, object] | None
+) -> str:
+    if model is None:
+        return "Model is not registered in local development state."
+    eligibility = promotion_eligibility(model.gate_results)
+    if eligibility.eligible and not final_holdout:
+        return "Development-qualified. Needs prospective final-holdout evidence."
+    failed = [
+        gate.reason or gate.gate_name
+        for gate in model.gate_results
+        if gate.mandatory and gate.status != "PASS"
+    ]
+    if failed:
+        return str(failed[0])
+    if final_holdout:
+        status = str(final_holdout.get("status") or "")
+        return f"Prospective final-holdout status: {status}."
+    return "No current blocker recorded."
+
+
+def model_edge_status_frame(root: str | Path) -> pd.DataFrame:
+    models, final_map = _model_maps(root)
+    columns = [
+        "model_id",
+        "generation",
+        "scope",
+        "direction",
+        "family",
+        "edge_status",
+        "selected_rows",
+        "selected_rate",
+        "portfolio_return",
+        "max_drawdown",
+        "brier_skill",
+        "tbs_brier_skill",
+        "expected_return_evidence",
+        "mfe_status",
+        "mae_status",
+        "ood_status",
+        "failed_development_gates",
+        "failed_final_holdout_gates",
+        "final_holdout_enrolled",
+        "promotion_eligible",
+        "next_blocker",
+    ]
+    rows: list[dict[str, object]] = []
+    for model in models.values():
+        eligibility = promotion_eligibility(model.gate_results)
+        failed_development = [
+            gate.gate_id
+            for gate in model.gate_results
+            if gate.mandatory and gate.status != "PASS" and "final_holdout" not in gate.gate_id
+        ]
+        failed_final = [
+            gate.gate_id
+            for gate in model.gate_results
+            if gate.mandatory and gate.status != "PASS" and "final_holdout" in gate.gate_id
+        ]
+        final_holdout = final_map.get(model.model_id)
+        edge_status = edge_status_for_model(model, final_holdout)
+        rows.append(
+            {
+                "model_id": model.model_id,
+                "generation": model.created_at_utc,
+                "scope": _model_scope(model),
+                "direction": model.direction,
+                "family": model.family,
+                "edge_status": edge_status,
+                "selected_rows": _safe_metric(
+                    model, "selected_holdout_samples", "selected_samples"
+                ),
+                "selected_rate": _safe_metric(model, "selected_observation_rate"),
+                "portfolio_return": _safe_metric(model, "portfolio_total_return"),
+                "max_drawdown": _safe_metric(model, "portfolio_max_drawdown"),
+                "brier_skill": _safe_metric(model, "brier_skill_score"),
+                "tbs_brier_skill": _safe_metric(
+                    model,
+                    "target_before_stop_brier_skill_score",
+                    "target_before_stop_development_holdout_brier_skill_score",
+                ),
+                "expected_return_evidence": _safe_metric(
+                    model, "holdout_mean_return_lcb_90", "mean_selected_return"
+                ),
+                "mfe_status": _safe_metric(
+                    model,
+                    "mfe_path_head_capability_state",
+                    "mfe_holdout_ood_status",
+                    "mfe_ood_status",
+                ),
+                "mae_status": _safe_metric(
+                    model,
+                    "mae_path_head_capability_state",
+                    "mae_holdout_ood_status",
+                    "mae_ood_status",
+                ),
+                "ood_status": _safe_metric(model, "prediction_ood_status", "ood_status"),
+                "failed_development_gates": "; ".join(failed_development[:8]),
+                "failed_final_holdout_gates": "; ".join(failed_final[:8]),
+                "final_holdout_enrolled": "yes" if final_holdout else "no",
+                "promotion_eligible": eligibility.eligible,
+                "next_blocker": _next_model_blocker(model, final_holdout),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _signal_event_keys(events: pd.DataFrame) -> dict[str, dict[str, pd.Series]]:
+    signal_events = {
+        "pending": events.loc[
+            events["event_type"].isin(["ENTRY_PENDING", "FINAL_HOLDOUT_ENTRY_PENDING"])
+        ]
+        if not events.empty
+        else events,
+        "filled": events.loc[
+            events["event_type"].isin(["ENTRY_FILLED", "FINAL_HOLDOUT_ENTRY_FILLED"])
+        ]
+        if not events.empty
+        else events,
+        "closed": events.loc[
+            events["event_type"].isin(
+                [
+                    "EXIT_FILLED",
+                    "POSITION_EXPIRED",
+                    "POSITION_CANCELED",
+                    "FINAL_HOLDOUT_EXIT_FILLED",
+                    "FINAL_HOLDOUT_POSITION_EXPIRED",
+                ]
+            )
+        ]
+        if not events.empty
+        else events,
+    }
+    maps: dict[str, dict[str, pd.Series]] = {"pending": {}, "filled": {}, "closed": {}}
+    for group, frame in signal_events.items():
+        for _, event in frame.iterrows():
+            key = _event_match_key(event)
+            maps[group][key] = event
+    return maps
+
+
+def _event_match_key(event: pd.Series) -> str:
+    return "|".join(
+        [
+            str(event.get("scanner_snapshot_id", "")),
+            str(event.get("market_as_of_date", "")),
+            str(event.get("ticker", "")),
+            str(event.get("direction", "")),
+            str(event.get("model_id", "")),
+        ]
+    )
+
+
+def _row_match_key(row: pd.Series) -> str:
+    return "|".join(
+        [
+            str(row.get("scan_id", row.get("scanner_snapshot_id", ""))),
+            str(row.get("as_of_date", row.get("market_as_of_date", ""))),
+            str(row.get("ticker", "")),
+            str(row.get("direction", "")),
+            str(row.get("model_id", "")),
+        ]
+    )
+
+
+def _scanner_rows_from_signal_events(events: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    if events.empty:
+        return pd.DataFrame()
+    signal_events = events.loc[
+        events["event_type"].isin(
+            [
+                "SIGNAL_CREATED",
+                "SIGNAL_REJECTED",
+                "FINAL_HOLDOUT_SIGNAL_CREATED",
+                "FINAL_HOLDOUT_SIGNAL_REJECTED",
+            ]
+        )
+    ]
+    for _, event in signal_events.iterrows():
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        scanner_row = payload.get("scanner_row")
+        base = scanner_row if isinstance(scanner_row, dict) else {}
+        row = dict(base)
+        row.setdefault("scan_id", event.get("scanner_snapshot_id", ""))
+        row.setdefault("as_of_date", event.get("market_as_of_date", ""))
+        row.setdefault("ticker", event.get("ticker", ""))
+        row.setdefault("direction", event.get("direction", ""))
+        row.setdefault("model_id", event.get("model_id", ""))
+        row.setdefault("feature_snapshot_hash", event.get("feature_snapshot_hash", ""))
+        row["event_type"] = event.get("event_type", "")
+        row["event_time_utc"] = event.get("event_time_utc", "")
+        row["run_id"] = payload.get("run_id", "")
+        row["mode"] = payload.get("mode", "")
+        row["not_live_trade_recommendation"] = payload.get("not_live_trade_recommendation", "")
+        row["exclusion_reason"] = payload.get("exclusion_reason") or row.get("exclusion_reason", "")
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _scanner_rows_with_events(root: str | Path) -> pd.DataFrame:
+    events = forward_events_frame(root, final_holdout_only=None)
+    event_rows = _scanner_rows_from_signal_events(events)
+    scanner_rows = scanner_rows_frame(root)
+    if event_rows.empty:
+        return scanner_rows
+    if scanner_rows.empty:
+        return event_rows
+    combined = pd.concat([event_rows, scanner_rows], ignore_index=True, sort=False)
+    keys = combined.apply(_row_match_key, axis=1)
+    return combined.loc[~keys.duplicated()].reset_index(drop=True)
+
+
+def _candidate_classification(
+    *,
+    row: pd.Series,
+    edge_status: str,
+    gate_eligible: bool,
+    shadow_context: bool,
+    lifecycle_status: str,
+) -> tuple[str, str]:
+    candidate_status = _clean_text(row.get("candidate_status")).upper()
+    rejection_reason = _clean_text(row.get("exclusion_reason"))
+    if lifecycle_status in {PENDING_ENTRY, OPEN_SHADOW_POSITION, CLOSED}:
+        return lifecycle_status, SHADOW_ONLY
+    if candidate_status == "REJECTED" or rejection_reason:
+        return REJECTED, REJECTED
+    if (
+        candidate_status == "ACTIONABLE_PAPER_CANDIDATE"
+        and edge_status == EDGE_PROMOTED
+        and gate_eligible
+    ):
+        return LIVE_ACTIONABLE, LIVE_ACTIONABLE
+    if shadow_context or edge_status in {EDGE_SHADOW_VALIDATION, EDGE_FINAL_HOLDOUT_QUALIFIED}:
+        return SHADOW_ONLY, SHADOW_ONLY
+    return RESEARCH_ONLY, RESEARCH_ONLY
+
+
+def _lifecycle_status(row: pd.Series, event_maps: dict[str, dict[str, pd.Series]]) -> str:
+    key = _row_match_key(row)
+    if key in event_maps["closed"]:
+        return CLOSED
+    if key in event_maps["filled"]:
+        return OPEN_SHADOW_POSITION
+    if key in event_maps["pending"]:
+        return PENDING_ENTRY
+    return ""
+
+
+def _event_payload_value(event: pd.Series | None, *names: str) -> object:
+    if event is None:
+        return NOT_AVAILABLE
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    for name in names:
+        if name in payload:
+            return payload[name]
+    return NOT_AVAILABLE
+
+
+def _signal_next_required_event(
+    classification: str,
+    lifecycle_status: str,
+    rejection_reason: object,
+) -> str:
+    if lifecycle_status == PENDING_ENTRY:
+        return "Pending entry waits for next session open."
+    if lifecycle_status == OPEN_SHADOW_POSITION:
+        return "Open position waits for target, stop, or time exit."
+    if lifecycle_status == CLOSED:
+        return "Outcome matured; review forward evidence."
+    if classification == LIVE_ACTIONABLE:
+        return "Review/export. No brokerage order is placed by this dashboard."
+    if classification == SHADOW_ONLY:
+        return "Collect prospective shadow evidence; not a live recommendation."
+    if classification == REJECTED:
+        reason = _clean_text(rejection_reason)
+        return f"Rejected: {reason}" if reason else "Rejected; no entry."
+    return "Development research review only; not eligible for live action."
+
+
+def scanner_results_frame(root: str | Path) -> pd.DataFrame:
+    models, final_map = _model_maps(root)
+    edge_map = {
+        model_id: edge_status_for_model(model, final_map.get(model_id))
+        for model_id, model in models.items()
+    }
+    rows = _scanner_rows_with_events(root)
+    if rows.empty:
+        return pd.DataFrame(
+            columns=[
+                "scan_id",
+                "as_of_date",
+                "ticker",
+                "direction",
+                "scope",
+                "model",
+                "status",
+                "candidate_classification",
+                "probability",
+                "expected_return",
+                "expected_mfe",
+                "expected_mae",
+                "target_before_stop_probability",
+                "top_attribution_category",
+                "ood_warning",
+                "rejection_reason",
+            ]
+        )
+    events = forward_events_frame(root, final_holdout_only=None)
+    event_maps = _signal_event_keys(events)
+    records: list[dict[str, object]] = []
+    for _, row in rows.iterrows():
+        model_id = _clean_text(row.get("model_id"))
+        model = models.get(model_id)
+        edge_status = edge_map.get(model_id, RESEARCH_ONLY)
+        shadow_context = _clean_text(row.get("mode")).upper() == "SHADOW_FINAL_HOLDOUT" or bool(
+            final_map.get(model_id)
+        )
+        lifecycle = _lifecycle_status(row, event_maps)
+        gate_eligible = _as_bool(
+            _first_available(row.get("model_quality_gate_eligible"), False)
+        ) or bool(model and promotion_eligibility(model.gate_results).eligible)
+        status, classification = _candidate_classification(
+            row=row,
+            edge_status=edge_status,
+            gate_eligible=gate_eligible,
+            shadow_context=shadow_context,
+            lifecycle_status=lifecycle,
+        )
+        records.append(
+            {
+                "scan_id": _display_value(row.get("scan_id")),
+                "as_of_date": _display_value(row.get("as_of_date")),
+                "ticker": _display_value(row.get("ticker")),
+                "direction": _display_value(row.get("direction")),
+                "scope": _display_value(row.get("product_class_scope")),
+                "model": model_id,
+                "model_id": model_id,
+                "family": "" if model is None else model.family,
+                "generation": "" if model is None else model.created_at_utc,
+                "edge_status": edge_status,
+                "status": status,
+                "candidate_classification": classification,
+                "probability": _display_value(row.get("calibrated_probability")),
+                "expected_return": _display_value(row.get("expected_return")),
+                "expected_mfe": _display_value(row.get("expected_mfe")),
+                "expected_mae": _display_value(row.get("expected_mae")),
+                "target_before_stop_probability": _display_value(
+                    row.get("target_before_stop_probability")
+                ),
+                "top_attribution_category": _display_value(row.get("top_attribution_categories")),
+                "supporting_evidence": _display_value(row.get("supporting_evidence")),
+                "historical_analogs": _display_value(row.get("historical_analogs")),
+                "top_divergences": _display_value(row.get("top_divergences")),
+                "ood_warning": _display_value(row.get("ood_warning")),
+                "ood_warning_details": _display_value(row.get("ood_warning_details")),
+                "rejection_reason": _display_value(row.get("exclusion_reason")),
+                "candidate_status": _display_value(row.get("candidate_status")),
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def signal_board_frame(root: str | Path) -> pd.DataFrame:
+    models, final_map = _model_maps(root)
+    rows = _scanner_rows_with_events(root)
+    events = forward_events_frame(root, final_holdout_only=None)
+    event_maps = _signal_event_keys(events)
+    records: list[dict[str, object]] = []
+    for _, row in rows.iterrows():
+        model_id = _clean_text(row.get("model_id"))
+        model = models.get(model_id)
+        edge_status = edge_status_for_model(model, final_map.get(model_id))
+        shadow_context = _clean_text(row.get("mode")).upper() == "SHADOW_FINAL_HOLDOUT" or bool(
+            final_map.get(model_id)
+        )
+        lifecycle = _lifecycle_status(row, event_maps)
+        gate_eligible = _as_bool(
+            _first_available(row.get("model_quality_gate_eligible"), False)
+        ) or bool(model and promotion_eligibility(model.gate_results).eligible)
+        signal_status, classification = _candidate_classification(
+            row=row,
+            edge_status=edge_status,
+            gate_eligible=gate_eligible,
+            shadow_context=shadow_context,
+            lifecycle_status=lifecycle,
+        )
+        key = _row_match_key(row)
+        pending = event_maps["pending"].get(key)
+        filled = event_maps["filled"].get(key)
+        records.append(
+            {
+                "ticker": _display_value(row.get("ticker")),
+                "direction": _display_value(row.get("direction")),
+                "signal_status": signal_status,
+                "live_shadow_rejected_classification": classification,
+                "edge_status": edge_status,
+                "model_id": model_id,
+                "scope": _display_value(row.get("product_class_scope") or _model_scope(model)),
+                "family": "" if model is None else model.family,
+                "generation": _display_value(
+                    row.get("generation_id") or ("" if model is None else model.created_at_utc)
+                ),
+                "as_of_date": _display_value(row.get("as_of_date")),
+                "entry_rule": _display_value(
+                    _event_payload_value(pending, "entry_rule", "paper_entry_rule")
+                ),
+                "pending_entry_date": _display_value(
+                    _event_payload_value(
+                        pending,
+                        "pending_entry_date",
+                        "planned_entry_date",
+                        "entry_date",
+                    )
+                ),
+                "entry_price_if_filled": _display_value(
+                    _event_payload_value(filled, "entry_price", "fill_price", "entry_open")
+                ),
+                "expected_return": _display_value(row.get("expected_return")),
+                "expected_mfe": _display_value(row.get("expected_mfe")),
+                "expected_mae": _display_value(row.get("expected_mae")),
+                "target_before_stop_probability": _display_value(
+                    row.get("target_before_stop_probability")
+                ),
+                "ood_warning": _display_value(row.get("ood_warning")),
+                "gate_status": "PASS" if gate_eligible else "BLOCKED",
+                "rejection_reason": _display_value(row.get("exclusion_reason")),
+                "next_required_event": _signal_next_required_event(
+                    classification, lifecycle, row.get("exclusion_reason")
+                ),
+                "export": False,
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def signal_board_metrics(root: str | Path) -> dict[str, object]:
+    board = signal_board_frame(root)
+    models = registered_models_readonly(root)
+    final_runs = final_holdout_runs_frame(root)
+    operational = operational_status_frame()
+    latest_generation = latest_generation_id(models)
+    status = (
+        "unavailable"
+        if operational.empty or "current_status" not in operational.columns
+        else str(operational.iloc[0]["current_status"])
+    )
+    return {
+        "live_actionable_signals": int(
+            (
+                board.get("live_shadow_rejected_classification", pd.Series(dtype=str))
+                == LIVE_ACTIONABLE
+            ).sum()
+        )
+        if not board.empty
+        else 0,
+        "shadow_paper_signals": int(
+            (
+                board.get("live_shadow_rejected_classification", pd.Series(dtype=str))
+                == SHADOW_ONLY
+            ).sum()
+        )
+        if not board.empty
+        else 0,
+        "pending_entries": int(
+            (board.get("signal_status", pd.Series(dtype=str)) == PENDING_ENTRY).sum()
+        )
+        if not board.empty
+        else 0,
+        "open_shadow_positions": int(
+            (board.get("signal_status", pd.Series(dtype=str)) == OPEN_SHADOW_POSITION).sum()
+        )
+        if not board.empty
+        else 0,
+        "closed_shadow_positions": int(
+            (board.get("signal_status", pd.Series(dtype=str)) == CLOSED).sum()
+        )
+        if not board.empty
+        else 0,
+        "matured_outcomes": int(
+            final_runs.get("matured_outcomes", pd.Series(dtype=int)).map(_safe_int).sum()
+        )
+        if not final_runs.empty
+        else 0,
+        "promoted_models": sum(1 for model in models if model.promoted_at_utc),
+        "models_collecting_final_holdout_evidence": int(
+            final_runs.get("status", pd.Series(dtype=str))
+            .astype(str)
+            .isin(["CREATED", "COLLECTING", "EARLY_DIAGNOSTIC_AVAILABLE", "READY_FOR_EVALUATION"])
+            .sum()
+        )
+        if not final_runs.empty
+        else 0,
+        "latest_market_date": latest_market_date(root) or NOT_AVAILABLE,
+        "development_generation": latest_generation or NOT_AVAILABLE,
+        "operational_run_status": status,
+    }
 
 
 def model_generations_frame(root: str | Path) -> pd.DataFrame:
@@ -796,6 +1451,104 @@ def product_class_comparison_frame(root: str | Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def product_class_research_frame(root: str | Path) -> pd.DataFrame:
+    summary = product_class_summary_frame(root)
+    comparisons = product_class_comparison_frame(root)
+    edge = model_edge_status_frame(root)
+    rows: list[dict[str, object]] = []
+    for scope in PRODUCT_CLASS_SCOPES:
+        scoped_models = (
+            edge.loc[edge["scope"].astype(str) == scope].copy() if not edge.empty else edge
+        )
+        candidate_models = (
+            scoped_models.loc[
+                scoped_models["edge_status"]
+                .astype(str)
+                .isin([EDGE_DEVELOPMENT_CANDIDATE, EDGE_SHADOW_VALIDATION])
+            ]
+            if not scoped_models.empty
+            else scoped_models
+        )
+        best = candidate_models.sort_values(
+            by=["edge_status", "selected_rows"], ascending=[False, False]
+        ).head(1)
+        failed_gates = (
+            scoped_models.get("failed_development_gates", pd.Series(dtype=str))
+            .astype(str)
+            .replace("", pd.NA)
+            .dropna()
+            .head(5)
+            .tolist()
+            if not scoped_models.empty
+            else []
+        )
+        summary_row = (
+            summary.loc[summary["scope"].astype(str) == scope].iloc[0].to_dict()
+            if not summary.empty and scope in set(summary["scope"].astype(str))
+            else {}
+        )
+        if not comparisons.empty and "comparison" in comparisons.columns:
+            comparison_mask = comparisons["comparison"].astype(str).str.endswith(scope)
+            comparison_row = comparisons.loc[comparison_mask].head(1).to_dict("records")
+        else:
+            comparison_row = []
+        rows.append(
+            {
+                "scope": scope,
+                "symbols": summary_row.get("symbol_count", 0),
+                "row_count": _safe_int(summary_row.get("development_holdout_rows", 0))
+                + _safe_int(summary_row.get("training_rows", 0))
+                + _safe_int(summary_row.get("calibration_rows", 0)),
+                "models": len(scoped_models),
+                "best_current_candidate": "" if best.empty else str(best.iloc[0]["model_id"]),
+                "weakest_blockers": "; ".join(failed_gates) or NOT_AVAILABLE,
+                "comparison_versus_pooled": json.dumps(
+                    comparison_row[0] if comparison_row else {}, sort_keys=True
+                ),
+                "selected_rows": int(
+                    scoped_models.get("selected_rows", pd.Series(dtype=int)).map(_safe_int).sum()
+                )
+                if not scoped_models.empty
+                else 0,
+                "failed_gates": "; ".join(failed_gates) or NOT_AVAILABLE,
+                "ood_status": _display_value(
+                    ", ".join(
+                        sorted(
+                            {
+                                str(value)
+                                for value in scoped_models.get(
+                                    "ood_status", pd.Series(dtype=object)
+                                ).tolist()
+                                if _display_value(value) != NOT_AVAILABLE
+                            }
+                        )
+                    )
+                    if not scoped_models.empty
+                    else ""
+                ),
+                "concentration_status": _display_value(
+                    "; ".join(gate for gate in failed_gates if "concentration" in gate.lower())
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def product_class_conclusion(root: str | Path) -> str:
+    research = product_class_research_frame(root)
+    if research.empty:
+        return "Product-class research evidence is not available yet."
+    non_empty = research.loc[research["best_current_candidate"].astype(str) != ""]
+    if non_empty.empty:
+        return "No product-class specialist currently stands out as promotion-ready."
+    top = non_empty.iloc[0]
+    return (
+        f"{top['scope']} model {top['best_current_candidate']} is the strongest current "
+        "development challenger by available dashboard evidence, but it still requires "
+        "prospective shadow evidence before any promotion."
+    )
+
+
 def _mean_metric(models: list[RegisteredModel], metric: str) -> float | None:
     values: list[float] = []
     for model in models:
@@ -951,6 +1704,159 @@ def final_holdout_runs_frame(root: str | Path) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def shadow_forward_status_frame(root: str | Path) -> pd.DataFrame:
+    frame = final_holdout_runs_frame(root)
+    if frame.empty:
+        return frame
+    output = frame.copy()
+    output["final_holdout_sample_progress"] = output.apply(
+        lambda row: (
+            f"{_safe_int(row.get('matured_outcomes'))}/100 matured, "
+            f"{_safe_int(row.get('distinct_signal_dates'))}/60 signal dates, "
+            f"{_safe_int(row.get('observation_sessions'))}/126 sessions, "
+            f"{_safe_int(row.get('calendar_months'))}/4 months, "
+            f"{_safe_int(row.get('positive_outcomes'))}/20 positive, "
+            f"{_safe_int(row.get('negative_outcomes'))}/20 negative"
+        ),
+        axis=1,
+    )
+    return output
+
+
+def shadow_forward_events_frame(root: str | Path) -> pd.DataFrame:
+    events = forward_events_frame(root, final_holdout_only=True)
+    if events.empty:
+        return pd.DataFrame(
+            columns=[
+                "event_type",
+                "event_time",
+                "market_date",
+                "ticker",
+                "direction",
+                "model",
+                "entry",
+                "stop",
+                "target",
+                "exit",
+                "realized_return",
+                "mfe",
+                "mae",
+                "status",
+            ]
+        )
+    rows: list[dict[str, object]] = []
+    for _, event in events.iterrows():
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        scanner_row = payload.get("scanner_row")
+        scanner_row = scanner_row if isinstance(scanner_row, dict) else {}
+        rows.append(
+            {
+                "event_type": event.get("event_type"),
+                "event_time": event.get("event_time_utc"),
+                "market_date": event.get("market_as_of_date"),
+                "ticker": event.get("ticker"),
+                "direction": event.get("direction"),
+                "model": event.get("model_id"),
+                "entry": _display_value(
+                    _first_available(
+                        payload.get("entry_price"),
+                        payload.get("fill_price"),
+                        payload.get("entry_open"),
+                    )
+                ),
+                "stop": _display_value(
+                    _first_available(payload.get("stop_price"), payload.get("frozen_stop_price"))
+                ),
+                "target": _display_value(
+                    _first_available(
+                        payload.get("target_price"), payload.get("frozen_target_price")
+                    )
+                ),
+                "exit": _display_value(
+                    _first_available(payload.get("exit_price"), payload.get("exit_close"))
+                ),
+                "realized_return": _display_value(
+                    _first_available(
+                        payload.get("realized_return"),
+                        payload.get("net_return"),
+                        payload.get("gross_return"),
+                    )
+                ),
+                "mfe": _display_value(
+                    _first_available(payload.get("mfe"), scanner_row.get("expected_mfe"))
+                ),
+                "mae": _display_value(
+                    _first_available(payload.get("mae"), scanner_row.get("expected_mae"))
+                ),
+                "status": _display_value(
+                    _first_available(payload.get("status"), payload.get("exclusion_reason"))
+                ),
+                "run_id": _display_value(payload.get("run_id")),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def shadow_position_frames(root: str | Path) -> dict[str, pd.DataFrame]:
+    events = forward_events_frame(root, final_holdout_only=True)
+    if events.empty:
+        empty = pd.DataFrame()
+        return {"pending": empty, "open": empty, "closed": empty}
+    pending = events.loc[events["event_type"] == "FINAL_HOLDOUT_ENTRY_PENDING"].copy()
+    filled = events.loc[events["event_type"] == "FINAL_HOLDOUT_ENTRY_FILLED"].copy()
+    closed = events.loc[
+        events["event_type"].isin(["FINAL_HOLDOUT_EXIT_FILLED", "FINAL_HOLDOUT_POSITION_EXPIRED"])
+    ].copy()
+    filled_sources = set(
+        filled.get("source_pending_event_id", pd.Series(dtype=object)).astype(str).tolist()
+    )
+    closed_sources = set(
+        closed.get("source_pending_event_id", pd.Series(dtype=object)).astype(str).tolist()
+    )
+    pending_open = pending.loc[~pending["event_id"].astype(str).isin(filled_sources)]
+    open_positions = filled.loc[~filled["source_pending_event_id"].astype(str).isin(closed_sources)]
+    return {
+        "pending": pending_open.drop(columns=["payload"], errors="ignore"),
+        "open": open_positions.drop(columns=["payload"], errors="ignore"),
+        "closed": closed.drop(columns=["payload"], errors="ignore"),
+    }
+
+
+def shadow_next_steps_frame(root: str | Path) -> pd.DataFrame:
+    status = shadow_forward_status_frame(root)
+    if status.empty:
+        return pd.DataFrame(
+            [
+                {
+                    "what_happens_next": "No development shadow final-holdout run is available.",
+                    "reason": "Enrollments are created outside the dashboard.",
+                }
+            ]
+        )
+    rows: list[dict[str, object]] = []
+    for _, run in status.iterrows():
+        if _safe_int(run.get("pending_entries")) > 0:
+            message = "Pending entry waits for next session open."
+        elif _safe_int(run.get("open_positions")) > 0:
+            message = "Open position waits for target, stop, or time exit."
+        elif _safe_int(run.get("matured_outcomes")) < 100:
+            message = "Run needs more matured outcomes."
+        elif not bool(run.get("promotion_eligible")):
+            message = "Not eligible for promotion yet."
+        else:
+            message = "Ready for manual governance review."
+        rows.append(
+            {
+                "run_id": run.get("run_id"),
+                "model_id": run.get("model_id"),
+                "what_happens_next": message,
+                "sample_progress": run.get("final_holdout_sample_progress"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _processed_session_count(run: sqlite3.Row, events: pd.DataFrame) -> int:
     metadata = cast(dict[str, object], _json_loads(run["metadata_json"], {}))
     processed = metadata.get("processed_sessions")
@@ -1083,6 +1989,59 @@ def overview_sections(root: str | Path) -> dict[str, pd.DataFrame]:
     }
 
 
+def live_signal_blockers_frame(root: str | Path) -> pd.DataFrame:
+    gates = gate_audit_frame(root)
+    models = registered_models_readonly(root)
+    board = signal_board_frame(root)
+    rows: list[dict[str, object]] = []
+    if not any(model.promoted_at_utc for model in models):
+        rows.append(
+            {
+                "blocker": "no promoted model",
+                "count": 1,
+                "plain_english": "No promoted live scanner model exists yet.",
+            }
+        )
+    final_missing = (
+        gates.loc[
+            gates["gate_id"].astype(str).str.contains("final_holdout", na=False)
+            & (gates["status"].astype(str) != "PASS")
+        ]
+        if not gates.empty
+        else gates
+    )
+    if not final_missing.empty:
+        rows.append(
+            {
+                "blocker": "final-holdout evidence missing",
+                "count": len(final_missing),
+                "plain_english": "Prospective final-holdout evidence has not passed required gates.",
+            }
+        )
+    if not board.empty:
+        rejected = board.loc[board["live_shadow_rejected_classification"].astype(str) == REJECTED]
+        if not rejected.empty:
+            reasons = rejected["rejection_reason"].astype(str)
+            for token in (
+                "model_not_promoted",
+                "selected-sample scarcity",
+                "OOD",
+                "concentration",
+                "temporal stability",
+                "gate failure",
+            ):
+                count = int(reasons.str.contains(token, case=False, regex=False).sum())
+                if count:
+                    rows.append(
+                        {
+                            "blocker": token,
+                            "count": count,
+                            "plain_english": f"{count} scanner candidate rows cite {token}.",
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
 def reports_inventory_frame(root: str | Path) -> pd.DataFrame:
     base = Path(root)
     patterns = [
@@ -1112,6 +2071,51 @@ def reports_inventory_frame(root: str | Path) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]:
+    scanner = scanner_results_frame(root)
+    return {
+        "signal_board": signal_board_frame(root),
+        "shadow_forward_status": shadow_forward_status_frame(root),
+        "model_edge_status": model_edge_status_frame(root),
+        "scanner_results": scanner,
+        "gate_audit": gate_audit_frame(root),
+        "product_class_research": product_class_research_frame(root),
+        "candidate_attribution": scanner[
+            [
+                column
+                for column in (
+                    "scan_id",
+                    "ticker",
+                    "direction",
+                    "model_id",
+                    "edge_status",
+                    "status",
+                    "top_attribution_category",
+                    "supporting_evidence",
+                    "historical_analogs",
+                    "top_divergences",
+                )
+                if column in scanner.columns
+            ]
+        ]
+        if not scanner.empty
+        else pd.DataFrame(),
+        "data_universe": universe_health_frame(root),
+        "reports_index": reports_inventory_frame(root),
+    }
+
+
+def save_complete_engine_snapshot(root: str | Path) -> Path:
+    from swing_rsi.application.dashboard_exports import save_xlsx_report
+
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return save_xlsx_report(
+        root,
+        f"complete_engine_snapshot_{timestamp}.xlsx",
+        complete_engine_snapshot_frames(root),
+    )
 
 
 def operational_status_frame() -> pd.DataFrame:

@@ -14,20 +14,38 @@ class DashboardSection:
     renderer: Callable[[], None]
 
 
-def _overview() -> None:
-    from dashboard.sections.overview import render_page
+def _signal_board() -> None:
+    from dashboard.sections.signal_board import render_page
 
     render_page()
 
 
-def _data_audit() -> None:
-    from dashboard.sections.data_universe import render_page
+def _shadow_forward_test() -> None:
+    from dashboard.sections.shadow_forward_test import render_page
 
     render_page()
 
 
-def _model_registry() -> None:
-    from dashboard.sections.model_registry import render_page
+def _model_edge_status() -> None:
+    from dashboard.sections.model_edge_status import render_page
+
+    render_page()
+
+
+def _scanner_results() -> None:
+    from dashboard.sections.scanner_results import render_page
+
+    render_page()
+
+
+def _candidate_detail() -> None:
+    from dashboard.sections.candidate_detail import render_page
+
+    render_page()
+
+
+def _product_class_research() -> None:
+    from dashboard.sections.product_class_research import render_page
 
     render_page()
 
@@ -38,32 +56,8 @@ def _gate_audit() -> None:
     render_page()
 
 
-def _product_class_specialists() -> None:
-    from dashboard.sections.product_class_specialists import render_page
-
-    render_page()
-
-
-def _scanner_snapshots() -> None:
-    from dashboard.sections.scanner_snapshots import render_page
-
-    render_page()
-
-
-def _candidate_attribution() -> None:
-    from dashboard.sections.candidate_attribution import render_page
-
-    render_page()
-
-
-def _shadow_final_holdout() -> None:
-    from dashboard.sections.shadow_final_holdout import render_page
-
-    render_page()
-
-
-def _paper_forward_test() -> None:
-    from dashboard.sections.paper_forward_test import render_page
+def _data_universe() -> None:
+    from dashboard.sections.data_universe import render_page
 
     render_page()
 
@@ -80,25 +74,54 @@ def _engine_commands() -> None:
     render_page()
 
 
-def _baselines_legacy() -> None:
+def _legacy_baselines() -> None:
     from dashboard.sections.baselines_legacy import render_page
 
     render_page()
 
 
+def _developer_diagnostics() -> None:
+    from dashboard.sections.developer_diagnostics import render_page
+
+    render_page()
+
+
 USER_FACING_SECTIONS: tuple[DashboardSection, ...] = (
-    DashboardSection("Overview", Path("dashboard/sections/overview.py"), "overview", _overview),
     DashboardSection(
-        "Data and Universe",
-        Path("dashboard/sections/data_universe.py"),
-        "data-universe",
-        _data_audit,
+        "Signal Board",
+        Path("dashboard/sections/signal_board.py"),
+        "signal-board",
+        _signal_board,
     ),
     DashboardSection(
-        "Model Registry",
-        Path("dashboard/sections/model_registry.py"),
-        "model-registry",
-        _model_registry,
+        "Shadow Forward Test",
+        Path("dashboard/sections/shadow_forward_test.py"),
+        "shadow-forward-test",
+        _shadow_forward_test,
+    ),
+    DashboardSection(
+        "Model Edge Status",
+        Path("dashboard/sections/model_edge_status.py"),
+        "model-edge-status",
+        _model_edge_status,
+    ),
+    DashboardSection(
+        "Scanner Results",
+        Path("dashboard/sections/scanner_results.py"),
+        "scanner-results",
+        _scanner_results,
+    ),
+    DashboardSection(
+        "Candidate Detail",
+        Path("dashboard/sections/candidate_detail.py"),
+        "candidate-detail",
+        _candidate_detail,
+    ),
+    DashboardSection(
+        "Product-Class Research",
+        Path("dashboard/sections/product_class_research.py"),
+        "product-class-research",
+        _product_class_research,
     ),
     DashboardSection(
         "Gate Audit",
@@ -107,34 +130,10 @@ USER_FACING_SECTIONS: tuple[DashboardSection, ...] = (
         _gate_audit,
     ),
     DashboardSection(
-        "Product-Class Specialists",
-        Path("dashboard/sections/product_class_specialists.py"),
-        "product-class-specialists",
-        _product_class_specialists,
-    ),
-    DashboardSection(
-        "Scanner Snapshots",
-        Path("dashboard/sections/scanner_snapshots.py"),
-        "scanner-snapshots",
-        _scanner_snapshots,
-    ),
-    DashboardSection(
-        "Candidate Attribution",
-        Path("dashboard/sections/candidate_attribution.py"),
-        "candidate-attribution",
-        _candidate_attribution,
-    ),
-    DashboardSection(
-        "Shadow Final Holdout",
-        Path("dashboard/sections/shadow_final_holdout.py"),
-        "shadow-final-holdout",
-        _shadow_final_holdout,
-    ),
-    DashboardSection(
-        "Paper Forward Test",
-        Path("dashboard/sections/paper_forward_test.py"),
-        "paper-forward-test",
-        _paper_forward_test,
+        "Data and Universe",
+        Path("dashboard/sections/data_universe.py"),
+        "data-universe",
+        _data_universe,
     ),
     DashboardSection(
         "Reports and Exports",
@@ -152,7 +151,13 @@ USER_FACING_SECTIONS: tuple[DashboardSection, ...] = (
         "Legacy Baselines",
         Path("dashboard/sections/baselines_legacy.py"),
         "legacy-baselines",
-        _baselines_legacy,
+        _legacy_baselines,
+    ),
+    DashboardSection(
+        "Developer Diagnostics",
+        Path("dashboard/sections/developer_diagnostics.py"),
+        "developer-diagnostics",
+        _developer_diagnostics,
     ),
 )
 

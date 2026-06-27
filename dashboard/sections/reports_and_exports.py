@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dashboard.ui.components import render_page_header, repository_root, st
+from dashboard.ui.components import render_page_guidance, render_page_header, repository_root, st
 from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_exports import save_xlsx_report
@@ -13,6 +13,7 @@ from swing_rsi.application.dashboard_service import (
     product_class_comparison_frame,
     registered_models_readonly,
     reports_inventory_frame,
+    save_complete_engine_snapshot,
     scanner_rows_frame,
     scanner_snapshot_list_frame,
 )
@@ -34,6 +35,16 @@ def render_page() -> None:
         "Reports and Exports",
         "Local generated reports, audit files, scanner exports, and dashboard Excel workbooks.",
     )
+    render_page_guidance(
+        tells_you=(
+            "Which local reports are available and which CSV/XLSX workbooks can be generated for "
+            "offline review."
+        ),
+        next_action=(
+            "Download existing artifacts or explicitly create a workbook. Workbook creation writes "
+            "only under reports/dashboard_exports/."
+        ),
+    )
     inventory = reports_inventory_frame(root)
     streamlit.subheader("Available Reports")
     streamlit.dataframe(display_frame(inventory), width="stretch", hide_index=True)
@@ -52,6 +63,9 @@ def render_page() -> None:
             )
 
     streamlit.subheader("Create Excel Workbook")
+    if streamlit.button("Export Complete Engine Snapshot"):
+        output = save_complete_engine_snapshot(root)
+        streamlit.success(f"Saved {output.relative_to(root)}")
     if streamlit.button("Create latest generation summary workbook"):
         output = save_xlsx_report(
             root,

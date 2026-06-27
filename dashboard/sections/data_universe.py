@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dashboard.ui.components import render_page_header, repository_root, st
+from dashboard.ui.components import render_page_guidance, render_page_header, repository_root, st
 from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_service import (
@@ -48,6 +48,16 @@ def render_page() -> None:
     render_page_header(
         "Data and Universe",
         "Configured symbols, local OHLCV coverage, manifest health, and explicit data updates.",
+    )
+    render_page_guidance(
+        tells_you=(
+            "Whether the local universe is enabled, fresh, manifest-backed, and ready for research "
+            "review."
+        ),
+        next_action=(
+            "Use read-only refresh for local status. Only run FMP update after confirmation when "
+            "development raw data should be mutated."
+        ),
     )
     universe = load_dashboard_universe(root)
     streamlit.caption(f"Universe snapshot: `{universe.snapshot_id}`")

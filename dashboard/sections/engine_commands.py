@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dashboard.ui.components import render_page_header, repository_root, st
+from dashboard.ui.components import render_page_guidance, render_page_header, repository_root, st
 from swing_rsi.application.dashboard_service import (
     command_specs,
     fmp_key_configured,
@@ -15,8 +15,18 @@ def render_page() -> None:
         "Engine Commands",
         "Confirmed local development commands with captured output and dashboard command logs.",
     )
+    render_page_guidance(
+        tells_you=(
+            "Which development-only engine commands may be launched manually from the dashboard."
+        ),
+        next_action=(
+            "Check the exact command preview, confirm the checkbox, and review the captured log "
+            "after completion."
+        ),
+    )
     streamlit.warning(
-        "Commands run from the development worktree only. Secrets are redacted from captured output."
+        "Commands run from the development worktree only. Mutating commands require confirmation. "
+        "Secrets are redacted from captured output."
     )
     configured = fmp_key_configured(root)
     specs = command_specs(fmp_configured=configured)
@@ -43,16 +53,17 @@ def render_page() -> None:
             streamlit.code(result.stderr or "", language="text")
 
     streamlit.subheader("Disabled Commands")
-    streamlit.button(
+    disabled_reason = (
+        "Disabled from dashboard V1 to prevent accidental model mutation or promotion."
+    )
+    for label in (
         "discover-models disabled",
-        disabled=True,
-        help="Dashboard V1 must not run discovery.",
-    )
-    streamlit.button(
         "promote-model disabled",
-        disabled=True,
-        help="Dashboard V1 must not promote models.",
-    )
+        "final-holdout-init disabled",
+        "forward-update disabled",
+    ):
+        streamlit.button(label, disabled=True, help=disabled_reason)
+    streamlit.caption(disabled_reason)
     if not configured:
         streamlit.info("FMP key configured: no. The universe-update command is disabled.")
 

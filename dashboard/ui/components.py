@@ -23,6 +23,19 @@ DEVELOPMENT_REPOSITORY_LABEL = "/Users/billyribeiro/Trading-Projects/swing-rsi-s
 DATA_WARNING = (
     "FMP corporate-action and historical-universe semantics have not yet been fully audited."
 )
+BADGE_COLORS: dict[str, str] = {
+    "LIVE ACTIONABLE": "#0f7b45",
+    "SHADOW ONLY": "#6b5b00",
+    "REJECTED": "#9f2f2f",
+    "PENDING ENTRY": "#6b5b00",
+    "OPEN SHADOW POSITION": "#1f5f8b",
+    "CLOSED": "#4b5563",
+    "RESEARCH ONLY": "#52525b",
+    "DEVELOPMENT CANDIDATE": "#1d4ed8",
+    "SHADOW VALIDATION": "#7c3aed",
+    "FINAL-HOLDOUT QUALIFIED": "#047857",
+    "PROMOTED": "#047857",
+}
 
 
 def st() -> Any:
@@ -57,6 +70,35 @@ def render_page_header(title: str, caption: str | None = None) -> None:
     elif title != COMMAND_CENTER_TITLE:
         streamlit.header(title)
     render_integrity_banner()
+
+
+def render_page_guidance(*, tells_you: str, next_action: str) -> None:
+    streamlit = st()
+    columns = streamlit.columns(2)
+    with columns[0]:
+        streamlit.subheader("What this page tells you")
+        streamlit.info(tells_you)
+    with columns[1]:
+        streamlit.subheader("What to do next")
+        streamlit.info(next_action)
+
+
+def status_badge(label: object) -> str:
+    text = str(label or "").strip() or "Not available"
+    color = BADGE_COLORS.get(text.upper(), "#4b5563")
+    return (
+        f'<span style="background:{color};color:white;border-radius:4px;'
+        f'padding:0.15rem 0.4rem;font-size:0.78rem;font-weight:700;">{text}</span>'
+    )
+
+
+def render_status_cards(cards: dict[str, object], *, columns: int = 4) -> None:
+    streamlit = st()
+    if not cards:
+        return
+    layout = streamlit.columns(columns)
+    for index, (label, value) in enumerate(cards.items()):
+        layout[index % columns].metric(label, value)
 
 
 def render_startup_guard() -> bool:

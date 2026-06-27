@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dashboard.ui.components import render_page_header, repository_root, st
+from dashboard.ui.components import render_page_guidance, render_page_header, repository_root, st
 from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 
@@ -10,6 +10,10 @@ from dashboard.ui.formatting import display_frame
 def render_page() -> None:
     streamlit = st()
     render_page_header("Legacy Baselines", "Legacy baselines and controls.")
+    render_page_guidance(
+        tells_you="Legacy RSI and older baseline research outputs separated from autonomous models.",
+        next_action="Use these controls only for baseline comparison, not scanner signal operation.",
+    )
     streamlit.info("RSI and old baseline views are separate from autonomous scanner models.")
     section = streamlit.selectbox(
         "Legacy tool",

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dashboard.ui.components import render_page_header, repository_root, st
+from dashboard.ui.components import render_page_guidance, render_page_header, repository_root, st
 from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_exports import to_csv_bytes, to_xlsx_bytes
-from swing_rsi.application.dashboard_service import gate_audit_frame, gate_contradiction_audit
+from swing_rsi.application.dashboard_service import (
+    gate_audit_frame,
+    gate_contradiction_audit,
+    live_signal_blockers_frame,
+)
 
 
 def _options(frame: pd.DataFrame, column: str) -> list[str]:
@@ -56,6 +60,20 @@ def render_page() -> None:
         "Gate Audit",
         "Canonical gate evidence, failed mandatory blockers, and contradiction checks.",
     )
+    render_page_guidance(
+        tells_you=(
+            "Why candidates fail model-quality, OOD, final-holdout, concentration, or policy gates."
+        ),
+        next_action=(
+            "Start with the top blocker list before using filters to inspect exact gate evidence."
+        ),
+    )
+    blockers = live_signal_blockers_frame(root)
+    streamlit.subheader("Why no live signal?")
+    if blockers.empty:
+        streamlit.success("No top-level live-signal blocker summary is present.")
+    else:
+        streamlit.dataframe(display_frame(blockers), width="stretch", hide_index=True)
     frame = gate_audit_frame(root)
     filtered = _filtered(frame)
     audit = gate_contradiction_audit(frame)
