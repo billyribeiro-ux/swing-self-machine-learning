@@ -80,6 +80,10 @@ Current signals are research/shadow validation only.
 
 Missing MFE/MAE values display as `Not available`, not zero.
 
+Each Signal Board row includes an `Open detail` link that routes to
+Candidate Detail with `scan_id`, `ticker`, `model_id`, and `direction` query
+parameters. Candidate Detail uses those parameters as selectbox defaults.
+
 ## Edge Status
 
 Every model-facing row maps to one edge status:

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlencode
 
 import pandas as pd
 
@@ -353,6 +354,26 @@ def _clean_text(value: object) -> str:
     if _display_value(value) == NOT_AVAILABLE:
         return ""
     return str(value).strip()
+
+
+def candidate_detail_url(
+    *,
+    scan_id: object,
+    ticker: object,
+    model_id: object,
+    direction: object = "",
+) -> str:
+    params = {
+        key: text
+        for key, text in (
+            ("scan_id", _clean_text(scan_id)),
+            ("ticker", _clean_text(ticker)),
+            ("model_id", _clean_text(model_id)),
+            ("direction", _clean_text(direction)),
+        )
+        if text
+    }
+    return f"/candidate-detail?{urlencode(params)}" if params else "/candidate-detail"
 
 
 def _first_available(*values: object) -> object:
@@ -829,6 +850,7 @@ def signal_board_frame(root: str | Path) -> pd.DataFrame:
             {
                 "ticker": _display_value(row.get("ticker")),
                 "direction": _display_value(row.get("direction")),
+                "scan_id": _display_value(row.get("scan_id")),
                 "signal_status": signal_status,
                 "live_shadow_rejected_classification": classification,
                 "edge_status": edge_status,
@@ -864,6 +886,12 @@ def signal_board_frame(root: str | Path) -> pd.DataFrame:
                 "rejection_reason": _display_value(row.get("exclusion_reason")),
                 "next_required_event": _signal_next_required_event(
                     classification, lifecycle, row.get("exclusion_reason")
+                ),
+                "candidate_detail_url": candidate_detail_url(
+                    scan_id=row.get("scan_id"),
+                    ticker=row.get("ticker"),
+                    model_id=model_id,
+                    direction=row.get("direction"),
                 ),
                 "export": False,
             }

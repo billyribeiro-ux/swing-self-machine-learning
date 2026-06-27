@@ -122,7 +122,19 @@ def render_page() -> None:
         streamlit.info("No live actionable scanner rows are present in the current local state.")
 
     streamlit.subheader("Signal Board")
-    streamlit.dataframe(display_frame(filtered), width="stretch", hide_index=True)
+    display = display_frame(filtered).rename(columns={"Candidate Detail Url": "Candidate Detail"})
+    column_config = {}
+    if "Candidate Detail" in display.columns:
+        column_config["Candidate Detail"] = streamlit.column_config.LinkColumn(
+            "Candidate Detail",
+            display_text="Open detail",
+        )
+    streamlit.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        column_config=column_config,
+    )
     render_table_downloads(filtered, basename="signal_board", label="signal_board")
 
 

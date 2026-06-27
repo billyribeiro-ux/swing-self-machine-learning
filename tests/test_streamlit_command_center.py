@@ -16,6 +16,7 @@ from swing_rsi.application.dashboard_exports import (
 )
 from swing_rsi.application.dashboard_service import (
     CommandSpec,
+    candidate_detail_url,
     command_specs,
     complete_engine_snapshot_frames,
     dashboard_startup_state,
@@ -363,6 +364,37 @@ def test_signal_first_tables_label_live_shadow_and_missing_paths(
     assert "Trade signal" not in joined
     rejected = scanner.loc[scanner["candidate_classification"].astype(str) == "REJECTED"]
     assert not rejected.empty
+
+
+def test_signal_board_detail_links_preselect_candidate_detail(
+    command_center_root: Path,
+) -> None:
+    board = signal_board_frame(command_center_root)
+    linked = board.loc[board["ticker"].astype(str) == "DEMO2"].iloc[0]
+
+    assert linked["candidate_detail_url"] == candidate_detail_url(
+        scan_id="scan-demo",
+        ticker="DEMO2",
+        model_id="model-demo",
+        direction="Bullish",
+    )
+    assert linked["candidate_detail_url"].startswith("/candidate-detail?")
+
+    app = AppTest.from_file("dashboard/sections/candidate_detail.py")
+    app.query_params["scan_id"] = "scan-demo"
+    app.query_params["ticker"] = "DEMO2"
+    app.query_params["model_id"] = "model-demo"
+    app.query_params["direction"] = "Bullish"
+    app.run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert app.selectbox[0].label == "Scan ID"
+    assert app.selectbox[0].value == "scan-demo"
+    assert app.selectbox[1].label == "Ticker"
+    assert app.selectbox[1].value == "DEMO2"
+    assert app.selectbox[2].label == "Model ID"
+    assert app.selectbox[2].value == "model-demo"
+    assert any(success.value == "Opened from Signal Board selection." for success in app.success)
 
 
 def test_complete_engine_snapshot_export_contains_required_sheets(

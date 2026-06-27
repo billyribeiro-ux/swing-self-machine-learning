@@ -111,6 +111,19 @@ Disabled from dashboard V1 to prevent accidental model mutation or promotion.
 Command logs are written under ignored `reports/dashboard_command_logs/`. The
 runner refuses the operational repository.
 
+## Candidate Detail Linking
+
+Signal Board rows include an `Open detail` URL in the rendered table. The URL
+uses query parameters:
+
+- `scan_id`
+- `ticker`
+- `model_id`
+- `direction`
+
+Candidate Detail reads those parameters and preselects the matching scan,
+ticker, and model controls while preserving manual selector use.
+
 ## Tests
 
 Added or updated coverage proves:
@@ -126,6 +139,7 @@ Added or updated coverage proves:
 - Rejected scanner rows are not labeled `Trade signal`.
 - Shadow rows are labeled `SHADOW ONLY`.
 - Missing MFE/MAE displays as `Not available`.
+- Signal Board links preselect Candidate Detail through query parameters.
 - Complete engine snapshot XLSX opens with `openpyxl` and contains required sheets.
 - Command buttons require confirmation.
 - Discovery, promotion, final-holdout-init, and forward-update controls are disabled.
@@ -159,5 +173,5 @@ cd /Users/billyribeiro/Trading-Projects/swing-rsi-self-learner-dev
 
 ## Next Smallest Task
 
-Add row-level links from Signal Board directly into Candidate Detail with a
-preselected scan/ticker/model tuple.
+Add browser smoke coverage for clicking an `Open detail` link in the rendered
+Streamlit table, not just AppTest query-param preselection.

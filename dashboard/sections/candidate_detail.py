@@ -25,17 +25,59 @@ def _json_frame(value: object) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def _query_value(params: object, key: str) -> str:
+    if not isinstance(params, dict):
+        return ""
+    value = params.get(key, "")
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value)
+
+
+def _selectbox_index(options: list[str], requested: str) -> int:
+    return options.index(requested) if requested in options else 0
+
+
 def _select_candidate(frame: pd.DataFrame) -> pd.Series | None:
     streamlit = st()
     if frame.empty:
         return None
+    params = dict(streamlit.query_params)
+    requested_scan = _query_value(params, "scan_id")
+    requested_ticker = _query_value(params, "ticker")
+    requested_model = _query_value(params, "model_id") or _query_value(params, "model")
+    requested_direction = _query_value(params, "direction")
     columns = streamlit.columns(3)
     scan_options = sorted(frame.get("scan_id", pd.Series(dtype=str)).dropna().astype(str).unique())
     ticker_options = sorted(frame.get("ticker", pd.Series(dtype=str)).dropna().astype(str).unique())
     model_options = sorted(frame.get("model", pd.Series(dtype=str)).dropna().astype(str).unique())
-    scan_id = columns[0].selectbox("Scan ID", scan_options) if scan_options else ""
-    ticker = columns[1].selectbox("Ticker", ticker_options) if ticker_options else ""
-    model = columns[2].selectbox("Model ID", model_options) if model_options else ""
+    scan_id = (
+        columns[0].selectbox(
+            "Scan ID",
+            scan_options,
+            index=_selectbox_index(scan_options, requested_scan),
+        )
+        if scan_options
+        else ""
+    )
+    ticker = (
+        columns[1].selectbox(
+            "Ticker",
+            ticker_options,
+            index=_selectbox_index(ticker_options, requested_ticker),
+        )
+        if ticker_options
+        else ""
+    )
+    model = (
+        columns[2].selectbox(
+            "Model ID",
+            model_options,
+            index=_selectbox_index(model_options, requested_model),
+        )
+        if model_options
+        else ""
+    )
     filtered = frame.copy()
     if scan_id:
         filtered = filtered.loc[filtered["scan_id"].astype(str) == scan_id]
@@ -43,8 +85,14 @@ def _select_candidate(frame: pd.DataFrame) -> pd.Series | None:
         filtered = filtered.loc[filtered["ticker"].astype(str) == ticker]
     if model:
         filtered = filtered.loc[filtered["model"].astype(str) == model]
+    if requested_direction and "direction" in filtered.columns:
+        direction_filtered = filtered.loc[filtered["direction"].astype(str) == requested_direction]
+        if not direction_filtered.empty:
+            filtered = direction_filtered
     if filtered.empty:
         return None
+    if requested_scan or requested_ticker or requested_model:
+        streamlit.success("Opened from Signal Board selection.")
     index = streamlit.selectbox("Candidate row", filtered.index.astype(int).tolist())
     return filtered.loc[int(index)]
 

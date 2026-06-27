@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added row-level Signal Board links that open Candidate Detail with the matching scan ID, ticker, model ID, and direction preselected through query parameters.
 - Refactored the Streamlit Command Center into a Signal-First Trading Research Dashboard V1 with Signal Board as the home page, explicit live/shadow/rejected/pending/open/closed labels, model edge statuses, scanner-candidate wording, complete engine snapshot export, disabled discovery/promotion/final-holdout-init/forward-update controls, and AppTest coverage for signal-first behavior and page-load safety.
 - Fixed Streamlit Command Center navigation verification by proving the actual `dashboard/app.py` entrypoint registers exactly the 12 Command Center pages, documenting the operational-repository 9-page sidebar as the stale launch-path source, and extending page-load safety checks for no FMP calls and no SQLite/model-artifact mutation.
 - Added Streamlit Command Center Dashboard V1 with 12 explicit pages, read-only startup safety checks, development/operational state separation, password-only FMP key settings, model/gate/product-class/scanner/attribution/final-holdout/paper-forward views, CSV/XLSX exports, confirmed engine command buttons, and dashboard-specific safety/export tests.
