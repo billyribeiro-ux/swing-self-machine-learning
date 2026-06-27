@@ -177,4 +177,16 @@ def display_frame(
     display = display.rename(
         columns={column: humanize_column_name(column) for column in display.columns}
     )
+    for column in display.columns:
+        if display[column].dtype == "object":
+            display[column] = display[column].map(_display_object)
     return display
+
+
+def _display_object(value: object) -> str:
+    try:
+        if bool(pd.isna(value)):  # type: ignore[arg-type]
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value)

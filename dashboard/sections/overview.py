@@ -3,103 +3,76 @@ from __future__ import annotations
 import pandas as pd
 
 from dashboard.ui.components import render_page_header, repository_root, st
-from dashboard.ui.formatting import date_label, whole
-from swing_rsi.application.engine_service import (
-    forward_events,
-    latest_daily_cycle_summary,
-    latest_scanner_snapshot,
-    list_registered_models,
+from dashboard.ui.downloads import render_table_downloads
+from dashboard.ui.formatting import display_frame
+from swing_rsi.application.dashboard_service import (
+    OPERATIONAL_REPOSITORY,
+    operational_status_frame,
+    overview_metrics,
+    overview_sections,
 )
-from swing_rsi.application.project_status import collect_project_status
+
+
+def _metric_grid(values: dict[str, object]) -> None:
+    streamlit = st()
+    items = list(values.items())
+    for offset in range(0, len(items), 4):
+        columns = streamlit.columns(4)
+        for column, (label, value) in zip(columns, items[offset : offset + 4], strict=False):
+            column.metric(label.replace("_", " ").title(), str(value))
+
+
+def _section_table(title: str, frame: pd.DataFrame, basename: str) -> None:
+    streamlit = st()
+    streamlit.subheader(title)
+    if frame.empty:
+        streamlit.info("No local records available.")
+        return
+    streamlit.dataframe(display_frame(frame), width="stretch", hide_index=True)
+    render_table_downloads(frame, basename=basename, label=title.lower().replace(" ", "_"))
 
 
 def render_page() -> None:
     streamlit = st()
     root = repository_root()
-    status = collect_project_status(root)
     render_page_header(
-        "Self-Learning Swing Trading Engine",
-        "Autonomous Market Discovery, Attribution, Scanner, Backtester, and Paper Forward Tester",
+        "Overview",
+        "Development state, frozen operational status, blockers, and next review command.",
     )
+    streamlit.write(f"Development repository: `{root}`")
+    streamlit.write(f"Operational repository: `{OPERATIONAL_REPOSITORY}`")
 
-    valid = [dataset for dataset in status.datasets if dataset.error is None]
-    newest = [pd.Timestamp(dataset.latest_date) for dataset in valid if dataset.latest_date]
-    oldest = [pd.Timestamp(dataset.first_date) for dataset in valid if dataset.first_date]
-    models = list_registered_models(root)
-    champions = [model for model in models if model.state == "CHAMPION"]
-    challengers = [model for model in models if model.state == "CHALLENGER"]
-    scanner = latest_scanner_snapshot(root)
-    events = forward_events(root)
-    daily_cycle = latest_daily_cycle_summary(root)
-    bullish_count = (
-        int((scanner.get("direction", pd.Series(dtype=str)) == "Bullish").sum())
-        if not scanner.empty
-        else 0
-    )
-    bearish_count = (
-        int((scanner.get("direction", pd.Series(dtype=str)) == "Bearish").sum())
-        if not scanner.empty
-        else 0
-    )
+    metrics = overview_metrics(root)
+    operational = operational_status_frame()
+    if not operational.empty:
+        metrics["operational_run_status_read_only"] = operational.iloc[0]["current_status"]
+    _metric_grid(metrics)
 
-    columns = streamlit.columns(4)
-    columns[0].metric("Project version", status.package_version)
-    columns[1].metric("Python", status.python_version)
-    columns[2].metric("FMP configured", "yes" if status.fmp_configured else "no")
-    columns[3].metric("Champion models", whole(len(champions)))
-    columns = streamlit.columns(4)
-    columns[0].metric("Datasets", whole(status.raw_ticker_csv_count))
-    columns[1].metric("Oldest market-data date", date_label(min(oldest)) if oldest else "n/a")
-    columns[2].metric("Newest market-data date", date_label(max(newest)) if newest else "n/a")
-    columns[3].metric("Challengers", whole(len(challengers)))
-    columns = streamlit.columns(4)
-    columns[0].metric("Bullish candidates", whole(bullish_count))
-    columns[1].metric("Bearish candidates", whole(bearish_count))
-    columns[2].metric("Forward events", whole(len(events)))
-    columns[3].metric("Drift alerts", whole(int(daily_cycle.get("drift_alerts") or 0)))
-    columns = streamlit.columns(4)
-    columns[0].metric("Data errors", whole(len(status.datasets) - len(valid)))
-    columns[1].metric("Latest daily cycle", str(daily_cycle.get("market_date", "n/a")))
-    columns[2].metric("Daily cycle status", str(daily_cycle.get("status", "n/a")))
-    columns[3].metric(
-        "Forward events created",
-        whole(int(daily_cycle.get("forward_events_created") or 0)),
-    )
+    streamlit.subheader("Operational Frozen Run Summary")
+    streamlit.dataframe(display_frame(operational), width="stretch", hide_index=True)
 
-    streamlit.write(f"Project: **{status.project_name}**")
-    streamlit.write(f"Project root: `{status.project_root}`")
-    streamlit.write(f"FMP base URL: `{status.fmp_base_url}`")
-    streamlit.caption(
-        "Historical walk-forward validation remains available under Baselines and Legacy RSI. "
-        "Paper forward testing uses frozen model versions and append-only events."
+    sections = overview_sections(root)
+    _section_table(
+        "Newest Generation Summary",
+        sections["newest_generation_summary"],
+        "overview_newest_generation_summary",
     )
-
-    streamlit.subheader("Raw Data Files")
-    if not status.datasets:
-        streamlit.info("No raw ticker CSV files found under data/raw/.")
-        return
-    rows = [
-        {
-            "ticker": dataset.ticker,
-            "row_count": dataset.row_count,
-            "first_date": dataset.first_date,
-            "latest_date": dataset.latest_date,
-            "file_modified_at_utc": dataset.modified_at_utc,
-            "load_status": dataset.error or "ok",
-        }
-        for dataset in status.datasets
-    ]
-    display = pd.DataFrame(rows).rename(
-        columns={
-            "ticker": "Ticker",
-            "row_count": "Row count",
-            "first_date": "First date",
-            "latest_date": "Latest date",
-            "file_modified_at_utc": "File modified time",
-            "load_status": "Load status",
-        }
+    _section_table(
+        "Latest Scanner Snapshot Summary",
+        sections["latest_scanner_snapshot_summary"],
+        "overview_latest_scanner_snapshot",
     )
-    streamlit.dataframe(display, width="stretch", hide_index=True)
+    _section_table(
+        "Latest Final-Holdout Status",
+        sections["latest_final_holdout_status"],
+        "overview_latest_final_holdout",
+    )
+    _section_table("Key Blockers", sections["key_blockers"], "overview_key_blockers")
+    _section_table(
+        "Next Operational Command",
+        sections["next_operational_command"],
+        "overview_next_operational_command",
+    )
 
 
 if __name__ == "__main__":

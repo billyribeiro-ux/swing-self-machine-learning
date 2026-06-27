@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from dashboard.ui.components import render_page_header, st
+import pandas as pd
+
+from dashboard.ui.components import render_page_header, repository_root, st
+from dashboard.ui.downloads import render_table_downloads
+from dashboard.ui.formatting import display_frame
 
 
 def render_page() -> None:
     streamlit = st()
-    render_page_header(
-        "Baselines and Legacy RSI", "RSI controls and the historical V0 research dashboard."
-    )
+    render_page_header("Legacy Baselines", "Legacy baselines and controls.")
+    streamlit.info("RSI and old baseline views are separate from autonomous scanner models.")
     section = streamlit.selectbox(
         "Legacy tool",
         (
@@ -23,6 +26,19 @@ def render_page() -> None:
             "RSI is retained as a baseline feature family and control workflow. "
             "RSI(14)/30 is not treated as a privileged scanner strategy."
         )
+        root = repository_root()
+        reports = [
+            {
+                "path": str(path.relative_to(root)),
+                "size_bytes": path.stat().st_size,
+            }
+            for path in sorted((root / "reports").glob("*rsi*"))
+            if path.is_file()
+        ]
+        frame = pd.DataFrame(reports)
+        streamlit.subheader("RSI Research Runs")
+        streamlit.dataframe(display_frame(frame), width="stretch", hide_index=True)
+        render_table_downloads(frame, basename="legacy_baselines", label="legacy")
         return
     if section == "Data and Audit":
         from dashboard.sections.data_audit import render_page as render_legacy
