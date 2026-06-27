@@ -1,5 +1,21 @@
 # Decision Log
 
+## 2026-06-27 — Dashboard navigation is signal-first
+
+Decision: Refactor the Streamlit Command Center visible navigation into a
+Signal-First Trading Research Dashboard with pages ordered around scanner rows,
+shadow validation, model edge status, candidate detail, product-class research,
+gate audit, data health, exports, safe commands, legacy baselines, and developer
+diagnostics. The Signal Board is the default page and must label rows as live
+actionable, shadow-only, rejected, pending, open, closed, or research-only.
+
+Reason: The previous dashboard surfaced infrastructure before the primary
+research questions: what candidate appeared, whether it is live or shadow-only,
+why it appeared, why it was rejected or actionable, what evidence still blocks
+the model, and what can be exported. Signal-first navigation improves review
+clarity without changing model code, gates, thresholds, promotion policy, or
+prospective final-holdout governance.
+
 ## 2026-06-27 — Dashboard navigation tests target the launched entrypoint
 
 Decision: Command Center navigation regression tests must execute `dashboard/app.py`

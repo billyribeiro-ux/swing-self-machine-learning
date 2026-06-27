@@ -1,5 +1,10 @@
 # Streamlit Command Center Dashboard Handoff
 
+Supersession note: Signal-First Trading Research Dashboard V1 reorganizes the
+visible Streamlit navigation around signals and edge status. See
+`docs/SIGNAL_FIRST_DASHBOARD.md` and
+`docs/SIGNAL_FIRST_DASHBOARD_HANDOFF.md` for the current page list and workflow.
+
 ## Architecture
 
 The dashboard is a local Streamlit presentation layer over the existing Python engine and application services. New read-only dashboard helpers live in `src/swing_rsi/application/dashboard_service.py`; export helpers live in `src/swing_rsi/application/dashboard_exports.py`.

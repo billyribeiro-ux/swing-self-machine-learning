@@ -95,20 +95,20 @@ Model drift checks are review signals only. They do not mutate, replace, or prom
 
 The Streamlit dashboard is a local-only presentation layer. It calls reusable Python services under `src/swing_rsi/application/` and does not duplicate market-data, RSI, signal, backtest, research, or walk-forward logic inside dashboard pages.
 
-Dashboard navigation is explicit. `dashboard/app.py` registers the primary Self-Learning Swing Trading Engine sections with `st.navigation` / `st.Page`:
+Dashboard navigation is explicit. `dashboard/app.py` registers the primary Signal-First Trading Research Dashboard sections with `st.navigation` / `st.Page`:
 
-1. Overview
-2. Data and Universe
-3. Model Registry
-4. Gate Audit
-5. Product-Class Specialists
-6. Scanner Snapshots
-7. Candidate Attribution
-8. Shadow Final Holdout
-9. Paper Forward Test
-10. Reports and Exports
-11. Engine Commands
-12. Legacy Baselines
+1. Signal Board
+2. Shadow Forward Test
+3. Model Edge Status
+4. Scanner Results
+5. Candidate Detail
+6. Product-Class Research
+7. Gate Audit
+8. Data and Universe
+9. Reports and Exports
+10. Engine Commands
+11. Legacy Baselines
+12. Developer Diagnostics
 
 Streamlit auto-discovered `dashboard/pages/*.py` page files are not used, because filename-derived labels caused confusing navigation.
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Streamlit Command Center is the local development console for the Self-Learning Swing Trading Engine. It is a research and operations dashboard for inspecting development-engine state, not a trading application.
+The Streamlit Command Center is now organized as the Signal-First Trading Research Dashboard V1 for the Self-Learning Swing Trading Engine. It is a research and operations dashboard for inspecting development-engine state, not a trading application.
 
 The dashboard title is:
 
@@ -33,27 +33,26 @@ cd /Users/billyribeiro/Trading-Projects/swing-rsi-self-learner-dev
 ```
 
 If the sidebar shows `Discovery Lab`, `Live Scanner`, `Portfolio Backtests`, or
-`Baselines and Legacy RSI`, the running process is not the Command Center V1
-entrypoint from this development worktree. That old 9-page navigation still
-exists in the frozen operational repository for historical context and must not
-be used for development Command Center checks.
+`Baselines and Legacy RSI`, the running process is not the Signal-First
+development entrypoint from this worktree. Those old labels remain only in
+legacy modules or historical operational context.
 
 ## Pages
 
 The dashboard uses explicit `st.navigation` page registration in this order:
 
-1. Overview
-2. Data and Universe
-3. Model Registry
-4. Gate Audit
-5. Product-Class Specialists
-6. Scanner Snapshots
-7. Candidate Attribution
-8. Shadow Final Holdout
-9. Paper Forward Test
-10. Reports and Exports
-11. Engine Commands
-12. Legacy Baselines
+1. Signal Board
+2. Shadow Forward Test
+3. Model Edge Status
+4. Scanner Results
+5. Candidate Detail
+6. Product-Class Research
+7. Gate Audit
+8. Data and Universe
+9. Reports and Exports
+10. Engine Commands
+11. Legacy Baselines
+12. Developer Diagnostics
 
 Streamlit filename-derived pages are not used.
 There is no tracked `dashboard/pages/` source directory in the Command Center
@@ -107,13 +106,36 @@ reports/dashboard_command_logs/
 
 Both directories are ignored by Git.
 
+## Signal and Edge Status
+
+The first screen answers whether any rows are live actionable, shadow-only,
+rejected, pending, open, closed, or research-only.
+
+If no promoted model exists, the dashboard displays:
+
+```text
+No promoted live scanner model exists yet.
+Current signals are research/shadow validation only.
+```
+
+Every model and signal is classified using:
+
+- `RESEARCH ONLY`
+- `DEVELOPMENT CANDIDATE`
+- `SHADOW VALIDATION`
+- `FINAL-HOLDOUT QUALIFIED`
+- `PROMOTED`
+
+The dashboard does not call a row live unless the model is promoted and all
+gates allow it.
+
 ## Supported Commands
 
 The Engine Commands page can run only these confirmed development commands:
 
 - `build-features`
 - `universe-update`
-- `scan --include-challengers`
+- `scanner review run` (`scan --include-challengers`)
 - `final-holdout-status`
 - `final-holdout-update`
 - `model-audit --generation latest`
@@ -126,6 +148,8 @@ Dashboard V1 does not run:
 
 - `discover-models`
 - `promote-model`
+- `final-holdout-init`
+- `forward-update`
 
 Promotion remains outside the dashboard.
 
