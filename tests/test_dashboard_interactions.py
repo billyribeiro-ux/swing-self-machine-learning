@@ -239,13 +239,19 @@ def test_every_dashboard_section_renders_without_streamlit_exceptions(
     for path in (
         "dashboard/sections/overview.py",
         "dashboard/sections/data_universe.py",
+        "dashboard/sections/model_registry.py",
+        "dashboard/sections/gate_audit.py",
+        "dashboard/sections/product_class_specialists.py",
+        "dashboard/sections/scanner_snapshots.py",
+        "dashboard/sections/candidate_attribution.py",
+        "dashboard/sections/shadow_final_holdout.py",
+        "dashboard/sections/paper_forward_test.py",
+        "dashboard/sections/reports_and_exports.py",
+        "dashboard/sections/engine_commands.py",
+        "dashboard/sections/baselines_legacy.py",
         "dashboard/sections/discovery_lab.py",
         "dashboard/sections/live_scanner.py",
-        "dashboard/sections/candidate_attribution.py",
         "dashboard/sections/portfolio_backtests.py",
-        "dashboard/sections/paper_forward_test.py",
-        "dashboard/sections/model_registry.py",
-        "dashboard/sections/baselines_legacy.py",
         "dashboard/sections/data_audit.py",
         "dashboard/sections/rsi_explorer.py",
         "dashboard/sections/research_backtest.py",
@@ -264,10 +270,10 @@ def test_candidate_attribution_renders_scanner_evidence(
 
     _assert_no_streamlit_exceptions(app)
     subheaders = {subheader.value for subheader in app.subheader}
-    assert "Recent Price Context" in subheaders
+    assert "Candidate Summary" in subheaders
+    assert "Model Prediction Values" in subheaders
     assert "Historical Analogs" in subheaders
-    assert "Model And Snapshot Details" in subheaders
-    assert app.selectbox[0].value == "DEMO Bullish h10 model-demo"
+    assert app.selectbox[0].label == "Scan ID"
     assert len(app.dataframe) >= 2
 
 
@@ -301,7 +307,5 @@ def test_model_registry_renders_compact_table_with_registered_models(
     app = AppTest.from_file("dashboard/sections/model_registry.py").run(timeout=30)
 
     _assert_no_streamlit_exceptions(app)
-    assert any("Compact default view" in caption.value for caption in app.caption)
-    assert app.selectbox[0].label == "Selected model details"
-    assert app.selectbox[1].label == "Model to promote"
+    assert app.selectbox[0].label == "Model drilldown"
     assert len(app.dataframe) >= 1
