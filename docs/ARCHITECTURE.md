@@ -99,15 +99,20 @@ Dashboard navigation is explicit. `dashboard/app.py` registers the primary Self-
 
 1. Overview
 2. Data and Universe
-3. Discovery Lab
-4. Live Scanner
-5. Candidate Attribution
-6. Portfolio Backtests
-7. Paper Forward Test
-8. Model Registry
-9. Baselines and Legacy RSI
+3. Model Registry
+4. Gate Audit
+5. Product-Class Specialists
+6. Scanner Snapshots
+7. Candidate Attribution
+8. Shadow Final Holdout
+9. Paper Forward Test
+10. Reports and Exports
+11. Engine Commands
+12. Legacy Baselines
 
 Streamlit auto-discovered `dashboard/pages/*.py` page files are not used, because filename-derived labels caused confusing navigation.
+
+The command-center dashboard reads development SQLite, artifacts, reports, raw data, feature data, manifests, and universe configuration through read-only application services for page loads. Mutating actions are restricted to explicit confirmed buttons and command wrappers. The dashboard refuses command execution from the operational worktree, displays the frozen operational run as read-only status, and keeps generated dashboard workbooks and command logs under ignored `reports/dashboard_exports/` and `reports/dashboard_command_logs/`.
 
 The Data and Audit page uses `swing_rsi.application.datasets.structural_audit_frame` for both selected-window and full-raw-file audits. Selected-window metrics and tables are calculated only from the sliced dataframe; raw-file metrics and tables remain visibly separate.
 

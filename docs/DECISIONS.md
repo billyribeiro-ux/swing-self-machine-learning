@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-06-27 — Streamlit Command Center V1 is the local development operations console
+
+Decision: Replace the V0 autonomous dashboard navigation with a local-only Streamlit Command Center V1 registered through explicit `st.navigation` pages: Overview, Data and Universe, Model Registry, Gate Audit, Product-Class Specialists, Scanner Snapshots, Candidate Attribution, Shadow Final Holdout, Paper Forward Test, Reports and Exports, Engine Commands, and Legacy Baselines. Page loads use read-only local state readers for SQLite, artifacts, reports, manifests, raw data, feature data, and universe configuration. Mutating actions require explicit confirmation and remain limited to development commands; discovery and promotion are disabled in the dashboard. FMP key entry is password-only, writes only to the development `.env` after confirmation, and never displays or logs the key.
+
+Reason: The development engine now has enough model, scanner, gate, final-holdout, and paper-forward state that a consolidated local operations console is needed, but the model/governance loop is not stable enough for a deployed app, auth layer, or promotion UI. Keeping Streamlit local and explicit preserves the current research boundary while improving inspection, exports, and safe manual operation.
+
 ## 2026-06-27 — POOLED bull HistGradientBoosting MAE uses a scoped robust target transform
 
 Decision: Add `robust_path_target_transform_v1` only for the `POOLED` bull `hist_gradient_boosting` MAE head at the 10-session horizon. This head trains its HistGradientBoostingRegressor on `log1p` of the nonnegative internal adverse MAE magnitude target fitted from training rows only. Runtime prediction inverse-maps with `expm1`, then applies the existing canonical MAE sign contract and unchanged OOD Governance V2 bounds in canonical internal magnitude units. All other scopes, directions, families, and heads persist `path_target_transform = none`.
