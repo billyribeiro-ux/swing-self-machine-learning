@@ -219,6 +219,11 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "mfe_magnitude_estimator_loss": metrics.get("mfe_magnitude_estimator_loss"),
             "mfe_magnitude_estimator_hash": metrics.get("mfe_magnitude_estimator_hash"),
             "mfe_prediction_mapping_version": metrics.get("mfe_prediction_mapping_version"),
+            "mfe_path_target_transform_schema_version": metrics.get(
+                "mfe_path_target_transform_schema_version"
+            ),
+            "mfe_path_target_transform": metrics.get("mfe_path_target_transform"),
+            "mfe_path_target_transform_hash": metrics.get("mfe_path_target_transform_hash"),
             "mfe_magnitude_training_target_min": metrics.get("mfe_magnitude_training_target_min"),
             "mfe_magnitude_training_target_max": metrics.get("mfe_magnitude_training_target_max"),
             "mfe_holdout_internal_magnitude_prediction_min": metrics.get(
@@ -265,6 +270,26 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "mae_magnitude_estimator_loss": metrics.get("mae_magnitude_estimator_loss"),
             "mae_magnitude_estimator_hash": metrics.get("mae_magnitude_estimator_hash"),
             "mae_prediction_mapping_version": metrics.get("mae_prediction_mapping_version"),
+            "mae_path_target_transform_schema_version": metrics.get(
+                "mae_path_target_transform_schema_version"
+            ),
+            "mae_path_target_transform": metrics.get("mae_path_target_transform"),
+            "mae_path_target_transform_hash": metrics.get("mae_path_target_transform_hash"),
+            "mae_training_target_pre_transform_distribution": metrics.get(
+                "mae_training_target_pre_transform_distribution_json"
+            ),
+            "mae_training_target_post_transform_distribution": metrics.get(
+                "mae_training_target_post_transform_distribution_json"
+            ),
+            "mae_holdout_transformed_prediction_distribution": metrics.get(
+                "mae_holdout_transformed_prediction_distribution_json"
+            ),
+            "mae_holdout_inverse_transformed_magnitude_distribution": metrics.get(
+                "mae_holdout_inverse_transformed_magnitude_distribution_json"
+            ),
+            "mae_holdout_canonical_signed_distribution": metrics.get(
+                "mae_holdout_canonical_signed_distribution_json"
+            ),
             "mae_magnitude_training_target_min": metrics.get("mae_magnitude_training_target_min"),
             "mae_magnitude_training_target_max": metrics.get("mae_magnitude_training_target_max"),
             "mae_holdout_internal_magnitude_prediction_min": metrics.get(

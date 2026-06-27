@@ -21,6 +21,8 @@ from swing_rsi.engine.models import (
     PATH_METRIC_HEADS,
     PATH_TARGET_ATR_FEATURE,
     PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+    PATH_TARGET_TRANSFORM_NONE,
+    ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     ModelBundle,
     bundle_feature_hygiene_metadata,
@@ -29,6 +31,7 @@ from swing_rsi.engine.models import (
     bundle_path_domain_metadata,
     bundle_product_class_metadata,
     bundle_tbs_calibration_metadata,
+    path_target_transform_metadata_hash,
     predict_bundle,
 )
 from swing_rsi.engine.ood import (
@@ -60,8 +63,8 @@ from swing_rsi.engine.selection import (
 from swing_rsi.engine.storage import dumps, engine_connection, loads
 from swing_rsi.engine.universe import UniverseConfig
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 11
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v11-nonfinite-hygiene"
+SCANNER_IDENTITY_SCHEMA_VERSION = 12
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v12-path-target-transform"
 
 
 @dataclass(frozen=True)
@@ -270,6 +273,11 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
             continue
         if bool(item.get(f"{head_name}_domain_metadata_missing", False)):
             rejection_reasons.append(metadata_reason)
+        if bool(
+            item.get(f"{head_name}_path_target_transform_metadata_missing", False)
+            or item.get(f"{output_column}_path_target_transform_metadata_missing", False)
+        ):
+            rejection_reasons.append("path_target_transform_metadata_missing")
         if bool(item.get(f"{output_column}_magnitude_prediction_invalid", False)):
             rejection_reasons.append(magnitude_reason)
         if bool(item.get(f"{output_column}_signed_prediction_invalid", False)):
@@ -829,6 +837,10 @@ def run_scanner(
         domain_payload: dict[str, object] = {}
         for head in PATH_MAGNITUDE_HEADS:
             metadata = bundle_path_domain_metadata(bundle, head)
+            raw_transform_metadata = metadata.get("path_target_transform_metadata")
+            transform_metadata = (
+                raw_transform_metadata if isinstance(raw_transform_metadata, dict) else {}
+            )
             domain_payload[head] = {
                 "domain_schema_version": metadata.get(
                     "domain_schema_version", "legacy_unconstrained_path_metric_model"
@@ -855,6 +867,25 @@ def run_scanner(
                 "path_head_retirement_reason": metadata.get("path_head_retirement_reason", ""),
                 "selected_feature_manifest_hash": metadata.get(
                     "selected_feature_manifest_hash", ""
+                ),
+                "path_target_transform_schema_version": metadata.get(
+                    "path_target_transform_schema_version",
+                    ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+                ),
+                "path_target_transform": metadata.get(
+                    "path_target_transform", PATH_TARGET_TRANSFORM_NONE
+                ),
+                "path_target_transform_name": metadata.get(
+                    "path_target_transform_name", PATH_TARGET_TRANSFORM_NONE
+                ),
+                "path_target_transform_status": metadata.get("path_target_transform_status", ""),
+                "path_target_transform_fit_split": metadata.get(
+                    "path_target_transform_fit_split", ""
+                ),
+                "path_target_transform_hash": metadata.get("path_target_transform_hash", ""),
+                "path_target_inverse_transform": metadata.get("path_target_inverse_transform", ""),
+                "path_target_transform_metadata_hash": path_target_transform_metadata_hash(
+                    transform_metadata
                 ),
             }
         normalized_path_domain_metadata[model_id] = domain_payload
@@ -1205,6 +1236,15 @@ def run_scanner(
                 "mfe_magnitude_estimator_loss": item.get("mfe_magnitude_estimator_loss", ""),
                 "mfe_magnitude_estimator_hash": item.get("mfe_magnitude_estimator_hash", ""),
                 "mfe_prediction_mapping_version": item.get("mfe_prediction_mapping_version", ""),
+                "mfe_path_target_transform_schema_version": item.get(
+                    "mfe_path_target_transform_schema_version", ""
+                ),
+                "mfe_path_target_transform": item.get("mfe_path_target_transform", ""),
+                "mfe_path_target_transform_name": item.get("mfe_path_target_transform_name", ""),
+                "mfe_path_target_transform_hash": item.get("mfe_path_target_transform_hash", ""),
+                "mfe_path_target_transform_metadata_missing": bool(
+                    item.get("mfe_path_target_transform_metadata_missing", False)
+                ),
                 "mfe_domain_metadata_hash": (
                     _stable_hash(path_domain_metadata[MFE_HEAD])
                     if path_domain_metadata[MFE_HEAD]
@@ -1220,6 +1260,21 @@ def run_scanner(
                 ),
                 "expected_mae_internal_magnitude_atr_units": item.get(
                     "expected_mae_internal_magnitude_atr_units"
+                ),
+                "expected_mae_inverse_transformed_internal_magnitude": item.get(
+                    "expected_mae_inverse_transformed_internal_magnitude"
+                ),
+                "expected_mae_path_target_transform_schema_version": item.get(
+                    "expected_mae_path_target_transform_schema_version", ""
+                ),
+                "expected_mae_path_target_transform": item.get(
+                    "expected_mae_path_target_transform", ""
+                ),
+                "expected_mae_path_target_transform_hash": item.get(
+                    "expected_mae_path_target_transform_hash", ""
+                ),
+                "expected_mae_path_target_transform_metadata_missing": bool(
+                    item.get("expected_mae_path_target_transform_metadata_missing", False)
                 ),
                 "mae_target_normalization_schema_version": item.get(
                     "mae_target_normalization_schema_version", ""
@@ -1280,6 +1335,15 @@ def run_scanner(
                 "mae_magnitude_estimator_loss": item.get("mae_magnitude_estimator_loss", ""),
                 "mae_magnitude_estimator_hash": item.get("mae_magnitude_estimator_hash", ""),
                 "mae_prediction_mapping_version": item.get("mae_prediction_mapping_version", ""),
+                "mae_path_target_transform_schema_version": item.get(
+                    "mae_path_target_transform_schema_version", ""
+                ),
+                "mae_path_target_transform": item.get("mae_path_target_transform", ""),
+                "mae_path_target_transform_name": item.get("mae_path_target_transform_name", ""),
+                "mae_path_target_transform_hash": item.get("mae_path_target_transform_hash", ""),
+                "mae_path_target_transform_metadata_missing": bool(
+                    item.get("mae_path_target_transform_metadata_missing", False)
+                ),
                 "mae_domain_metadata_hash": (
                     _stable_hash(path_domain_metadata[MAE_HEAD])
                     if path_domain_metadata[MAE_HEAD]
