@@ -52,18 +52,26 @@ from swing_rsi.engine.models import (
     PATH_TARGET_ATR_FEATURE,
     PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
     PATH_TARGET_PREDICTION_MAPPING_VERSION,
+    PATH_TARGET_TRANSFORM_LOG1P,
+    PATH_TARGET_TRANSFORM_NONE,
+    ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     BaseRateClassifier,
     DiscoveryConfig,
     ModelBundle,
     RetiredPathHeadModel,
+    _apply_path_target_transform,
+    _inverse_path_target_transform_prediction,
     _path_atr_training_target,
     _path_magnitude_prediction,
     _path_target_prediction,
+    _path_target_transform_metadata,
     build_path_magnitude_estimator,
+    bundle_path_domain_metadata,
     discover_models,
     load_model_bundle,
     model_plugins,
+    path_target_transform_applies,
     predict_bundle,
 )
 from swing_rsi.engine.ood import PREDICTION_OOD_GOVERNANCE_VERSION
@@ -471,6 +479,162 @@ def test_discovery_persists_independent_product_class_specialist_artifacts(
     assert ordinary.metrics["product_class_development_evidence_label"] == (
         "DEVELOPMENT_HOLDOUT_DIAGNOSTIC"
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "product_scope",
+        "direction",
+        "family",
+        "head_name",
+        "horizon",
+        "expected",
+    ),
+    [
+        (
+            PRODUCT_CLASS_SCOPE_POOLED,
+            "bull",
+            "hist_gradient_boosting",
+            MAE_HEAD,
+            10,
+            True,
+        ),
+        (
+            PRODUCT_CLASS_SCOPE_ORDINARY,
+            "bull",
+            "hist_gradient_boosting",
+            MAE_HEAD,
+            10,
+            False,
+        ),
+        (
+            PRODUCT_CLASS_SCOPE_LEVERAGED_LONG,
+            "bull",
+            "hist_gradient_boosting",
+            MAE_HEAD,
+            10,
+            False,
+        ),
+        (
+            PRODUCT_CLASS_SCOPE_POOLED,
+            "bear",
+            "hist_gradient_boosting",
+            MAE_HEAD,
+            10,
+            False,
+        ),
+        (PRODUCT_CLASS_SCOPE_POOLED, "bull", "extra_trees", MAE_HEAD, 10, False),
+        (PRODUCT_CLASS_SCOPE_POOLED, "bull", "hist_gradient_boosting", MFE_HEAD, 10, False),
+        (
+            PRODUCT_CLASS_SCOPE_POOLED,
+            "bull",
+            "hist_gradient_boosting",
+            EXPECTED_RETURN_HEAD,
+            10,
+            False,
+        ),
+        (
+            PRODUCT_CLASS_SCOPE_POOLED,
+            "bull",
+            "hist_gradient_boosting",
+            TARGET_BEFORE_STOP_HEAD,
+            10,
+            False,
+        ),
+    ],
+)
+def test_robust_mae_transform_scope_is_exact(
+    product_scope: str,
+    direction: str,
+    family: str,
+    head_name: str,
+    horizon: int,
+    expected: bool,
+) -> None:
+    assert (
+        path_target_transform_applies(
+            product_scope=product_scope,
+            direction=direction,
+            family=family,
+            head_name=head_name,
+            horizon=horizon,
+        )
+        is expected
+    )
+
+
+def test_robust_mae_log1p_transform_round_trip_and_preserves_labels() -> None:
+    label = pd.Series([-0.01, -0.03, -0.08], name="label_bull_mae_10")
+    magnitude = -label
+    metadata = _path_target_transform_metadata(
+        product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+        direction="bull",
+        family="hist_gradient_boosting",
+        head_name=MAE_HEAD,
+        horizon=10,
+        estimator_loss="poisson",
+    )
+
+    transformed = _apply_path_target_transform(magnitude, metadata)
+    restored = _inverse_path_target_transform_prediction(transformed, metadata)
+
+    assert metadata["schema_version"] == ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+    assert metadata["path_target_transform"] == PATH_TARGET_TRANSFORM_LOG1P
+    assert transformed.tolist() == pytest.approx(np.log1p(magnitude.to_numpy(dtype=float)))
+    assert restored.tolist() == pytest.approx(magnitude.tolist())
+    assert (restored >= 0.0).all()
+    assert label.tolist() == [-0.01, -0.03, -0.08]
+
+
+def test_pooled_bull_hgb_mae_transform_is_persisted_by_discovery(tmp_path: Path) -> None:
+    frame = _scope_modeling_frame()
+    family_map = {
+        column: "market_relative"
+        for column in frame.columns
+        if not str(column).startswith("label_")
+    }
+
+    result = discover_models(
+        frame,
+        db_path=tmp_path / "engine.sqlite3",
+        artifact_dir=tmp_path / "models",
+        universe_snapshot_id="u",
+        feature_manifest_hash="features",
+        feature_family_by_column=family_map,
+        config=DiscoveryConfig(
+            horizons=(10,),
+            directions=("bull",),
+            minimum_training_samples=20,
+            minimum_holdout_samples=10,
+            max_features=8,
+            mutual_information_top_k=4,
+            research_start=None,
+            random_seed=7,
+            product_class_scopes=(PRODUCT_CLASS_SCOPE_POOLED,),
+            model_families=("hist_gradient_boosting",),
+            include_naive_controls=False,
+        ),
+        code_root=tmp_path,
+        universe=_product_scope_universe(),
+    )
+
+    assert len(result.registered_models) == 1
+    model = result.registered_models[0]
+    bundle = load_model_bundle(model.artifact_path)
+    mae_metadata = bundle_path_domain_metadata(bundle, MAE_HEAD)
+    mfe_metadata = bundle_path_domain_metadata(bundle, MFE_HEAD)
+
+    assert bundle.product_class_scope == PRODUCT_CLASS_SCOPE_POOLED
+    assert bundle.direction == "bull"
+    assert bundle.family == "hist_gradient_boosting"
+    assert mae_metadata["path_target_transform"] == PATH_TARGET_TRANSFORM_LOG1P
+    assert mae_metadata["path_target_transform_fit_split"] == "training"
+    assert mae_metadata["path_target_transform_hash"]
+    assert mae_metadata["training_target_pre_transform_distribution"]
+    assert mae_metadata["training_target_post_transform_distribution"]
+    assert mae_metadata["holdout_transformed_prediction_distribution"]
+    assert mfe_metadata["path_target_transform"] == PATH_TARGET_TRANSFORM_NONE
+    assert (bundle.training_labels["label_bull_mae_10"] <= 0.0).all()
 
 
 def _frames(rows: int = 520) -> dict[str, pd.DataFrame]:
@@ -1115,6 +1279,14 @@ def _path_domain_metrics() -> dict[str, object]:
         ),
     ):
         normalization = target_normalization_payloads[head]
+        transform = _path_target_transform_metadata(
+            product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+            direction="bull",
+            family="test",
+            head_name=head,
+            horizon=10,
+            estimator_loss="test_constant_magnitude",
+        )
         payload.update(
             {
                 f"{head}_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
@@ -1128,6 +1300,15 @@ def _path_domain_metrics() -> dict[str, object]:
                 f"{head}_magnitude_estimator_loss": "test_constant_magnitude",
                 f"{head}_magnitude_estimator_hash": f"{head}-estimator-hash",
                 f"{head}_prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                f"{head}_path_target_transform_schema_version": (
+                    ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+                ),
+                f"{head}_path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+                f"{head}_path_target_transform_name": PATH_TARGET_TRANSFORM_NONE,
+                f"{head}_path_target_transform_status": "none",
+                f"{head}_path_target_transform_fit_split": "",
+                f"{head}_path_target_transform_hash": transform["path_target_transform_hash"],
+                f"{head}_path_target_inverse_transform": "",
                 f"{head}_target_normalization_schema_version": (
                     normalization["target_normalization_schema_version"]
                 ),
@@ -1247,6 +1428,17 @@ def _bundle(
     mfe_feature_columns = mfe_feature_columns or ("f1", "dollar_volume")
     mae_feature_columns = mae_feature_columns or ("f1", "dollar_volume")
     target_normalization_payloads = _path_target_normalization_payloads()
+    path_transform_payloads = {
+        head: _path_target_transform_metadata(
+            product_scope=product_class_scope,
+            direction="bull",
+            family="test",
+            head_name=head,
+            horizon=10,
+            estimator_loss="test_constant_magnitude",
+        )
+        for head in (MFE_HEAD, MAE_HEAD)
+    }
     if product_class_scope == PRODUCT_CLASS_SCOPE_ORDINARY:
         product_roles = ("broad_market_etf", "ordinary_etf", "sector_etf", "stock")
         product_symbols = ("AAPL", "MSFT")
@@ -1436,6 +1628,20 @@ def _bundle(
                     ],
                     "internal_target_unit": "atr_units",
                     "canonical_external_unit": "decimal_return",
+                    "path_target_transform_schema_version": (
+                        ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+                    ),
+                    "path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+                    "path_target_transform_name": PATH_TARGET_TRANSFORM_NONE,
+                    "path_target_transform_status": "none",
+                    "path_target_transform_parameters": {},
+                    "path_target_transform_fit_split": "",
+                    "path_target_inverse_transform": "",
+                    "path_target_inverse_transform_mapping": "",
+                    "path_target_transform_hash": path_transform_payloads[MFE_HEAD][
+                        "path_target_transform_hash"
+                    ],
+                    "path_target_transform_metadata": path_transform_payloads[MFE_HEAD],
                 },
                 MAE_HEAD: {
                     "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
@@ -1467,6 +1673,20 @@ def _bundle(
                     ],
                     "internal_target_unit": "atr_units",
                     "canonical_external_unit": "decimal_return",
+                    "path_target_transform_schema_version": (
+                        ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+                    ),
+                    "path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+                    "path_target_transform_name": PATH_TARGET_TRANSFORM_NONE,
+                    "path_target_transform_status": "none",
+                    "path_target_transform_parameters": {},
+                    "path_target_transform_fit_split": "",
+                    "path_target_inverse_transform": "",
+                    "path_target_inverse_transform_mapping": "",
+                    "path_target_transform_hash": path_transform_payloads[MAE_HEAD][
+                        "path_target_transform_hash"
+                    ],
+                    "path_target_transform_metadata": path_transform_payloads[MAE_HEAD],
                 },
             }
             if include_path_domain_metadata
@@ -1604,7 +1824,7 @@ def test_scanner_identity_includes_product_class_scope_metadata(tmp_path: Path) 
         ).fetchone()
     metadata = json.loads(row["metadata_json"])
     identity = metadata["canonical_scan_execution_identity"]
-    assert metadata["scanner_identity_schema_version"] == 11
+    assert metadata["scanner_identity_schema_version"] == 12
     assert metadata["product_class_scope_metadata_hash"]
     assert metadata["model_feature_nonfinite_hygiene_metadata_hash"]
     assert identity["product_class_schema_version"] == PRODUCT_CLASS_SCHEMA_VERSION
@@ -1857,6 +2077,58 @@ def test_predict_bundle_maps_atr_unit_path_predictions_to_canonical_returns() ->
     assert prediction["expected_mae_internal_magnitude_atr_units"] == pytest.approx(1.25)
     assert prediction["expected_mae"] == pytest.approx(-0.05)
     assert bool(prediction["expected_mfe_signed_prediction_invalid"]) is False
+    assert bool(prediction["expected_mae_signed_prediction_invalid"]) is False
+
+
+def test_predict_bundle_uses_frozen_mae_transform_before_canonical_ood() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [1.0],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    transform_metadata = _path_target_transform_metadata(
+        product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+        direction="bull",
+        family="hist_gradient_boosting",
+        head_name=MAE_HEAD,
+        horizon=10,
+        estimator_loss="poisson",
+    )
+    bundle = _bundle(mae_model=ConstantRegressor(float(np.log1p(0.027))))
+    metadata = {head: dict(value) for head, value in bundle.path_domain_metadata.items()}
+    metadata[MAE_HEAD].update(
+        {
+            "path_target_transform_schema_version": ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+            "path_target_transform": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_name": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_status": "active",
+            "path_target_transform_fit_split": "training",
+            "path_target_inverse_transform": "expm1",
+            "path_target_inverse_transform_mapping": (
+                "nonnegative_magnitude = expm1(transformed_prediction)"
+            ),
+            "path_target_transform_hash": transform_metadata["path_target_transform_hash"],
+            "path_target_transform_metadata": transform_metadata,
+        }
+    )
+    transformed_bundle = replace(
+        bundle,
+        family="hist_gradient_boosting",
+        path_domain_metadata=metadata,
+    )
+
+    prediction = predict_bundle(transformed_bundle, frame).iloc[0]
+
+    assert prediction["mae_path_target_transform"] == PATH_TARGET_TRANSFORM_LOG1P
+    assert prediction["expected_mae_transformed"] == pytest.approx(np.log1p(0.027))
+    assert prediction["expected_mae_internal_magnitude"] == pytest.approx(0.027)
+    assert prediction["expected_mae_inverse_transformed_internal_magnitude"] == pytest.approx(0.027)
+    assert prediction["expected_mae"] == pytest.approx(-0.027)
+    assert bool(prediction["expected_mae_out_of_distribution"]) is False
     assert bool(prediction["expected_mae_signed_prediction_invalid"]) is False
 
 
@@ -2211,6 +2483,46 @@ def test_scanner_rejects_missing_path_domain_metadata_explicitly(tmp_path: Path)
     assert "mae_domain_metadata_missing" in row["exclusion_reason"]
     assert bool(row["mfe_domain_metadata_missing"]) is True
     assert bool(row["mae_domain_metadata_missing"]) is True
+
+
+def test_scanner_rejects_transformed_path_head_with_missing_transform_metadata(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(mae_model=ConstantRegressor(float(np.log1p(0.015))))
+    metadata = {head: dict(value) for head, value in bundle.path_domain_metadata.items()}
+    metadata[MAE_HEAD].update(
+        {
+            "path_target_transform_schema_version": ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+            "path_target_transform": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_name": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_status": "active",
+            "path_target_transform_fit_split": "training",
+            "path_target_inverse_transform": "expm1",
+            "path_target_inverse_transform_mapping": (
+                "nonnegative_magnitude = expm1(transformed_prediction)"
+            ),
+            "path_target_transform_hash": "transform-hash-without-metadata",
+        }
+    )
+    metadata[MAE_HEAD].pop("path_target_transform_metadata", None)
+    bundle = replace(bundle, family="hist_gradient_boosting", path_domain_metadata=metadata)
+
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(bundle,),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "path_target_transform_metadata_missing" in row["exclusion_reason"]
+    assert bool(row["mae_path_target_transform_metadata_missing"]) is True
+    assert bool(row["expected_mae_path_target_transform_metadata_missing"]) is True
 
 
 def test_scanner_rejects_retired_logistic_path_heads_explicitly(tmp_path: Path) -> None:
@@ -2906,6 +3218,43 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    transform_bundle = _bundle(policy=SelectionPolicy(per_date_limit=2))
+    transform_metadata = {
+        key: dict(value) for key, value in transform_bundle.path_domain_metadata.items()
+    }
+    active_transform = _path_target_transform_metadata(
+        product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+        direction="bull",
+        family="hist_gradient_boosting",
+        head_name=MAE_HEAD,
+        horizon=10,
+        estimator_loss="poisson",
+    )
+    transform_metadata[MAE_HEAD].update(
+        {
+            "path_target_transform_schema_version": ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+            "path_target_transform": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_name": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_status": "active",
+            "path_target_transform_fit_split": "training",
+            "path_target_inverse_transform": "expm1",
+            "path_target_transform_hash": active_transform["path_target_transform_hash"],
+            "path_target_transform_metadata": active_transform,
+        }
+    )
+    path_target_transform = run_scanner(
+        **base_kwargs,
+        bundles=(
+            replace(
+                transform_bundle,
+                family="hist_gradient_boosting",
+                path_domain_metadata=transform_metadata,
+            ),
+        ),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -2923,9 +3272,10 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 path_domain.scan_id,
                 target_normalization.scan_id,
                 feature_hygiene.scan_id,
+                path_target_transform.scan_id,
             }
         )
-        == 13
+        == 14
     )
 
 
@@ -3169,7 +3519,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 11
+    assert metadata["scanner_identity_schema_version"] == 12
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
@@ -3235,6 +3585,19 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
         identity["path_metric_domain_metadata"]["model-a"]["mae"]["target_normalization_hash"]
         == _path_target_normalization_payloads()[MAE_HEAD]["target_normalization_hash"]
     )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"][
+            "path_target_transform_schema_version"
+        ]
+        == ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"]["path_target_transform"]
+        == PATH_TARGET_TRANSFORM_NONE
+    )
+    assert identity["path_metric_domain_metadata"]["model-a"]["mae"][
+        "path_target_transform_metadata_hash"
+    ]
     assert (
         identity["path_metric_domain_metadata"]["model-a"]["mfe"]["path_head_capability_state"]
         == PATH_HEAD_CAPABILITY_ACTIVE
