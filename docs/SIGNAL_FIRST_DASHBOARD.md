@@ -98,11 +98,11 @@ Detail with `run_id`, `event_id`, `scan_id`, `ticker`, `model_id`, `direction`,
 and `status` where available. Candidate Detail uses those parameters as
 selectbox defaults.
 
-## Overview Regime Cache Status
+## Signal Board Regime Cache Status
 
-Overview shows compact Regime KMeans Cache cards so development users can see
-whether the most recent `build-features` run used the fast exact cache path.
-The cards show:
+Signal Board shows compact Regime KMeans Cache cards near the top status-card
+area so development users can see whether the most recent `build-features` run
+used the fast exact cache path. The cards show:
 
 - regime cache status;
 - last cached date;
@@ -111,8 +111,8 @@ The cards show:
 - cache validity reason.
 
 The panel reads local cache metadata only and does not run `build-features` on
-page load. If metadata is missing, it displays `Regime cache: Not found` and
-directs the user to run `build-features` once to create the cache.
+page load. If metadata is missing, Signal Board displays `Regime cache status:
+Not found` and shows the other cache-card fields as `Not available`.
 
 ## Edge Status
 

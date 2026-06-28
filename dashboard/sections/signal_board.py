@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from dashboard.ui.components import (
@@ -19,6 +21,7 @@ from swing_rsi.application.dashboard_service import (
     REJECTED,
     RESEARCH_ONLY,
     SHADOW_ONLY,
+    regime_cache_status_frame,
     signal_board_frame,
     signal_board_metrics,
 )
@@ -131,6 +134,63 @@ def _render_section(title: str, frame: pd.DataFrame, *, empty_message: str) -> N
     )
 
 
+def _display_count(value: object) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "Not available"
+
+
+def _display_seconds(value: object) -> str:
+    try:
+        return f"{float(value):.2f} seconds"
+    except (TypeError, ValueError):
+        return "Not available"
+
+
+def _cache_status_label(value: object) -> str:
+    status = str(value or "").strip()
+    return "Not found" if status == "NOT_FOUND" else status or "UNKNOWN"
+
+
+def _render_regime_cache_cards(root: str | Path) -> None:
+    streamlit = st()
+    frame = regime_cache_status_frame(root)
+    if frame.empty:
+        status = "Not found"
+        last_cached_date = "Not available"
+        fits_avoided = "Not available"
+        runtime = "Not available"
+        reason = "Not available"
+    else:
+        row = frame.iloc[0]
+        status = _cache_status_label(row.get("status"))
+        if status == "Not found":
+            last_cached_date = "Not available"
+            fits_avoided = "Not available"
+            runtime = "Not available"
+            reason = "Not available"
+        else:
+            last_cached_date = str(row.get("last_cached_date", "Not available"))
+            fits_avoided = _display_count(row.get("kmeans_fits_avoided"))
+            runtime = _display_seconds(row.get("regime_runtime_seconds"))
+            reason = str(row.get("validity_reason", "Not available"))
+    render_status_cards(
+        {
+            "Regime cache status": status,
+            "Last cached date": last_cached_date,
+            "KMeans fits avoided": fits_avoided,
+            "Regime runtime": runtime,
+            "Cache validity reason": reason,
+        },
+        columns=5,
+    )
+    streamlit.caption(
+        "Regime cache preserves exact feature semantics while avoiding expensive historical "
+        "KMeans recomputation."
+    )
+
+
 def render_page() -> None:
     streamlit = st()
     root = repository_root()
@@ -168,6 +228,7 @@ def render_page() -> None:
         },
         columns=4,
     )
+    _render_regime_cache_cards(root)
     if int(metrics["promoted_models"]) == 0:
         streamlit.warning(
             "No promoted live scanner model exists yet.\n\n"

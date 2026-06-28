@@ -107,7 +107,7 @@ Forced rebuild is not the default.
 
 The same latest-run cache telemetry is displayed in the Streamlit dashboard:
 
-- Overview shows compact status cards.
+- Signal Board shows compact status cards.
 - Developer Diagnostics shows detailed metadata, input columns, KMeans config,
   and CSV/XLSX exports.
 

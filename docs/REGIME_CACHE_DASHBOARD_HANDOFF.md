@@ -21,7 +21,7 @@ The operational repository was checked read-only and was not modified.
 
 ## Dashboard Fields Added
 
-Overview now shows compact Regime KMeans Cache status cards:
+Signal Board now shows compact Regime KMeans Cache status cards:
 
 - regime cache status;
 - last cached date;
@@ -44,6 +44,14 @@ Both pages display this text:
 ```text
 The regime cache preserves exact current feature semantics. It only avoids recomputing historical expanding KMeans labels when inputs and configuration are unchanged.
 ```
+
+## Visibility Correction
+
+The first dashboard diagnostics implementation added compact cache cards to
+`dashboard/sections/overview.py`. After the Signal-First refactor, Overview is
+not registered in `dashboard/ui/navigation.py`; `Signal Board` is the first and
+default user-facing page. The compact cards therefore belong on Signal Board,
+while Developer Diagnostics remains the detailed metadata location.
 
 ## Metadata Source
 
@@ -102,7 +110,7 @@ No pandas `PerformanceWarning` appeared in the build output.
 
 Added dashboard tests proving:
 
-- Overview displays Regime cache status;
+- Signal Board displays Regime cache status;
 - Developer Diagnostics displays the Regime KMeans Cache section;
 - missing cache metadata displays `NOT_FOUND` / not found without error;
 - existing cache metadata displays `HIT` and `cache_valid`;
@@ -165,7 +173,7 @@ Success: no issues found in 61 source files
 
 Streamlit AppTest coverage:
 
-- Overview page exercised by `tests/test_streamlit_command_center.py`;
+- Signal Board page exercised by `tests/test_streamlit_command_center.py`;
 - Developer Diagnostics page exercised by `tests/test_streamlit_command_center.py`.
 
 Local HTTP smoke test:
@@ -216,5 +224,5 @@ cd /Users/billyribeiro/Trading-Projects/swing-rsi-self-learner-dev
 
 ## Next Smallest Task
 
-Open the dashboard in a browser and visually confirm the Overview and Developer
+Open the dashboard in a browser and visually confirm the Signal Board and Developer
 Diagnostics Regime KMeans Cache panels in the normal user session.

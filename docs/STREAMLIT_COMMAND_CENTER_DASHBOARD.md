@@ -87,7 +87,7 @@ FMP is not contacted on page load. If no key is configured, the dashboard shows 
 
 ## Regime Cache Diagnostics
 
-Overview includes compact Regime KMeans Cache cards:
+Signal Board includes compact Regime KMeans Cache cards:
 
 - regime cache status;
 - last cached date;

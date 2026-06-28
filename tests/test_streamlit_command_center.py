@@ -465,19 +465,21 @@ def test_pages_load_without_fmp_key_or_mutation(
     assert artifact.read_bytes() == before_artifact
 
 
-def test_overview_displays_regime_cache_status(command_center_root: Path) -> None:
+def test_signal_board_displays_regime_cache_status(command_center_root: Path) -> None:
     _write_regime_cache_metadata(command_center_root)
 
-    app = AppTest.from_file("dashboard/sections/overview.py").run(timeout=30)
+    app = AppTest.from_file("dashboard/sections/signal_board.py").run(timeout=30)
 
     _assert_no_streamlit_exceptions(app)
-    assert "Regime KMeans Cache" in {subheader.value for subheader in app.subheader}
     metrics = {metric.label: metric.value for metric in app.metric}
     assert metrics["Regime cache status"] == "HIT"
     assert metrics["Last cached date"] == "2026-06-26"
     assert metrics["KMeans fits avoided"] == "2,518"
     assert metrics["Regime runtime"] == "2.50 seconds"
     assert metrics["Cache validity reason"] == "cache_valid"
+    assert any(
+        "Regime cache preserves exact feature semantics" in caption.value for caption in app.caption
+    )
 
 
 def test_developer_diagnostics_displays_regime_cache_section(
@@ -506,9 +508,14 @@ def test_missing_regime_cache_metadata_displays_not_found(
     assert summary["status"] == "NOT_FOUND"
     assert summary["validity_reason"] == "cache_missing"
 
-    app = AppTest.from_file("dashboard/sections/overview.py").run(timeout=30)
+    app = AppTest.from_file("dashboard/sections/signal_board.py").run(timeout=30)
     _assert_no_streamlit_exceptions(app)
-    assert any("Regime cache: Not found" in info.value for info in app.info)
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["Regime cache status"] == "Not found"
+    assert metrics["Last cached date"] == "Not available"
+    assert metrics["KMeans fits avoided"] == "Not available"
+    assert metrics["Regime runtime"] == "Not available"
+    assert metrics["Cache validity reason"] == "Not available"
 
 
 def test_regime_cache_missing_fields_display_not_available(command_center_root: Path) -> None:
