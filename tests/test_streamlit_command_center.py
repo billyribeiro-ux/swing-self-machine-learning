@@ -26,6 +26,7 @@ from swing_rsi.application.dashboard_service import (
     gate_audit_frame,
     model_edge_status_frame,
     model_registry_frame,
+    regime_cache_detail_frames,
     run_dashboard_command,
     save_development_fmp_settings,
     scanner_results_frame,
@@ -328,6 +329,83 @@ relationships: []
     return tmp_path
 
 
+def _write_regime_cache_metadata(
+    root: Path,
+    *,
+    include_latest_run_fields: bool = True,
+    reason: str = "cache_valid",
+) -> tuple[Path, Path]:
+    cache_dir = root / "data" / "cache" / "regime"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "universe-cache_expanding_kmeans_regime_cache_v1.json"
+    status_path = cache_dir / "universe-cache_expanding_kmeans_regime_cache_status_v1.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "expanding_kmeans_regime_cache_v1",
+                "universe_snapshot_id": "universe-cache",
+                "feature_manifest_hash": (
+                    "3007abe80b54d40c87566bc9185a3086098c91b95d156c664ced290242090ae5"
+                ),
+                "regime_input_columns": [
+                    "market_regime_trend_score",
+                    "market_regime_volatility_score",
+                    "breadth_advance_pct",
+                    "breadth_dispersion_20",
+                ],
+                "kmeans_parameters": {
+                    "n_clusters": 3,
+                    "n_init": 10,
+                    "random_state": 42,
+                },
+                "random_seed": 42,
+                "scaler_preprocessing_configuration": {"scaler": "none"},
+                "minimum_sample_requirement": 126,
+                "input_prefix_hash": "input-prefix-hash",
+                "full_input_hash": "full-input-hash",
+                "output_dataframe_hash": "output-dataframe-hash",
+                "dates_covered": ["2026-06-24", "2026-06-25", "2026-06-26"],
+                "last_cached_date": "2026-06-26",
+                "row_count": 5005,
+                "symbols_covered": ["AAPL", "SPY"],
+                "output_column_names": ["Date", "market_regime_cluster_expanding"],
+                "creation_timestamp_utc": "2026-06-28T00:00:00+00:00",
+                "update_timestamp_utc": "2026-06-28T00:01:00+00:00",
+                "cache_validity_status": "VALID",
+                "records": [],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    status_payload: dict[str, object] = {
+        "schema_version": "expanding_kmeans_regime_cache_status_v1",
+        "cache_schema_version": "expanding_kmeans_regime_cache_v1",
+        "universe_snapshot_id": "universe-cache",
+        "feature_manifest_hash": "3007abe80b54d40c87566bc9185a3086098c91b95d156c664ced290242090ae5",
+        "feature_builder_version": "features.py:_expanding_kmeans_regime:v1",
+        "status": "HIT",
+        "reason": reason,
+        "cache_validity_status": "VALID",
+        "cache_path": str(cache_path),
+        "last_cached_date": "2026-06-26",
+        "row_count": 5005,
+        "update_timestamp_utc": "2026-06-28T00:02:00+00:00",
+    }
+    if include_latest_run_fields:
+        status_payload.update(
+            {
+                "cached_dates_reused": 5005,
+                "new_dates_computed": 0,
+                "kmeans_fits_avoided": 2518,
+                "kmeans_fits_performed": 0,
+                "regime_runtime_seconds": 2.5,
+            }
+        )
+    status_path.write_text(json.dumps(status_payload, sort_keys=True), encoding="utf-8")
+    return cache_path, status_path
+
+
 def test_dashboard_blocks_startup_from_operational_repo(monkeypatch: pytest.MonkeyPatch) -> None:
     from swing_rsi.application import dashboard_service as service
 
@@ -348,14 +426,25 @@ def test_dashboard_identifies_development_repo(monkeypatch: pytest.MonkeyPatch) 
     assert state.requires_confirmation is False
 
 
-def test_pages_load_without_fmp_key_or_mutation(command_center_root: Path) -> None:
+def test_pages_load_without_fmp_key_or_mutation(
+    command_center_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db = command_center_root / "state" / "engine.sqlite3"
     scanner = command_center_root / "artifacts" / "scanner" / "scan-demo_scanner.csv"
     artifact = command_center_root / "artifacts" / "models" / "model.joblib"
     before_db = db.read_bytes()
     before_scanner = scanner.read_bytes()
     before_artifact = artifact.read_bytes()
+
+    def fail_build_features(*_: object, **__: object) -> None:
+        raise AssertionError("Dashboard page load attempted to run build-features")
+
+    monkeypatch.setattr(
+        "swing_rsi.application.engine_service.build_autonomous_features",
+        fail_build_features,
+    )
     for page in (
+        "dashboard/sections/overview.py",
         "dashboard/sections/signal_board.py",
         "dashboard/sections/shadow_forward_test.py",
         "dashboard/sections/model_edge_status.py",
@@ -374,6 +463,83 @@ def test_pages_load_without_fmp_key_or_mutation(command_center_root: Path) -> No
     assert db.read_bytes() == before_db
     assert scanner.read_bytes() == before_scanner
     assert artifact.read_bytes() == before_artifact
+
+
+def test_overview_displays_regime_cache_status(command_center_root: Path) -> None:
+    _write_regime_cache_metadata(command_center_root)
+
+    app = AppTest.from_file("dashboard/sections/overview.py").run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert "Regime KMeans Cache" in {subheader.value for subheader in app.subheader}
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["Regime cache status"] == "HIT"
+    assert metrics["Last cached date"] == "2026-06-26"
+    assert metrics["KMeans fits avoided"] == "2,518"
+    assert metrics["Regime runtime"] == "2.50 seconds"
+    assert metrics["Cache validity reason"] == "cache_valid"
+
+
+def test_developer_diagnostics_displays_regime_cache_section(
+    command_center_root: Path,
+) -> None:
+    _write_regime_cache_metadata(command_center_root)
+
+    app = AppTest.from_file("dashboard/sections/developer_diagnostics.py").run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert "Regime KMeans Cache" in {subheader.value for subheader in app.subheader}
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["Regime cache status"] == "HIT"
+    assert metrics["KMeans fits avoided"] == "2,518"
+    assert metrics["KMeans fits performed"] == "0"
+    assert metrics["Regime runtime"] == "2.50 seconds"
+    assert any("Nothing required. build-features is using" in info.value for info in app.info)
+
+
+def test_missing_regime_cache_metadata_displays_not_found(
+    command_center_root: Path,
+) -> None:
+    frames = regime_cache_detail_frames(command_center_root)
+    summary = frames["summary"].iloc[0]
+
+    assert summary["status"] == "NOT_FOUND"
+    assert summary["validity_reason"] == "cache_missing"
+
+    app = AppTest.from_file("dashboard/sections/overview.py").run(timeout=30)
+    _assert_no_streamlit_exceptions(app)
+    assert any("Regime cache: Not found" in info.value for info in app.info)
+
+
+def test_regime_cache_missing_fields_display_not_available(command_center_root: Path) -> None:
+    _write_regime_cache_metadata(command_center_root, include_latest_run_fields=False)
+
+    summary = regime_cache_detail_frames(command_center_root)["summary"].iloc[0]
+
+    assert summary["status"] == "HIT"
+    assert summary["validity_reason"] == "cache_valid"
+    assert summary["kmeans_fits_avoided"] == "Not available"
+    assert summary["kmeans_fits_performed"] == "Not available"
+    assert summary["regime_runtime_seconds"] == "Not available"
+
+
+def test_regime_cache_exports_csv_and_xlsx_without_secrets(command_center_root: Path) -> None:
+    _write_regime_cache_metadata(
+        command_center_root,
+        reason="cache_valid; apikey=secret-token; FMP_API_KEY=secret-token",
+    )
+    frames = regime_cache_detail_frames(command_center_root)
+
+    csv_bytes = to_csv_bytes(frames["metadata"])
+    xlsx_bytes = to_xlsx_bytes(frames)
+    workbook = openpyxl.load_workbook(BytesIO(xlsx_bytes))
+
+    assert csv_bytes.startswith(b"field,value")
+    assert set(workbook.sheetnames) == {"summary", "metadata", "input_columns", "kmeans_config"}
+    assert b"secret-token" not in csv_bytes
+    assert b"secret-token" not in xlsx_bytes
+    assert b"FMP_API_KEY" not in csv_bytes
+    assert b"apikey=secret-token" not in csv_bytes
 
 
 def test_app_shell_exposes_password_only_fmp_settings(command_center_root: Path) -> None:

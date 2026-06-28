@@ -79,10 +79,31 @@ The dashboard reads local development state:
 - `data/raw/`
 - `data/features/`
 - `data/manifests/`
+- `data/cache/regime/`
 - `configs/universe/core.yaml`
 - model audit exports where available
 
 FMP is not contacted on page load. If no key is configured, the dashboard shows `FMP key configured: no` and disables FMP update commands.
+
+## Regime Cache Diagnostics
+
+Overview includes compact Regime KMeans Cache cards:
+
+- regime cache status;
+- last cached date;
+- KMeans fits avoided;
+- regime runtime;
+- cache validity reason.
+
+Developer Diagnostics includes a full `Regime KMeans Cache` section with summary
+metadata, raw cache metadata, input columns, and KMeans configuration. The panel
+reads only local metadata under `data/cache/regime/`; it does not run
+`build-features`, recompute regime features, contact FMP, mutate SQLite, or
+modify model artifacts on page load.
+
+The diagnostics explain that the regime cache preserves exact current feature
+semantics and only avoids recomputing historical expanding KMeans labels when
+inputs and configuration are unchanged.
 
 ## Exports
 
@@ -114,6 +135,10 @@ reports/dashboard_command_logs/
 ```
 
 Both directories are ignored by Git.
+
+Developer Diagnostics also provides Regime KMeans Cache downloads. The XLSX
+workbook contains `summary`, `metadata`, `input_columns`, and `kmeans_config`
+sheets.
 
 ## Signal and Edge Status
 

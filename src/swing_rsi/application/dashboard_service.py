@@ -68,6 +68,32 @@ SIGNAL_FIRST_PAGE_TITLES: tuple[str, ...] = (
     "Legacy Baselines",
     "Developer Diagnostics",
 )
+REGIME_KMEANS_CACHE_SCHEMA_VERSION = "expanding_kmeans_regime_cache_v1"
+REGIME_KMEANS_CACHE_STATUS_SCHEMA_VERSION = "expanding_kmeans_regime_cache_status_v1"
+REGIME_CACHE_ALLOWED_STATUSES = {"HIT", "MISS", "PARTIAL_APPEND", "INVALIDATED"}
+REGIME_CACHE_SUMMARY_COLUMNS = [
+    "status",
+    "cache_validity_status",
+    "validity_reason",
+    "cache_schema_version",
+    "universe_snapshot_id",
+    "feature_manifest_hash",
+    "first_cached_date",
+    "last_cached_date",
+    "dates_covered",
+    "rows_covered",
+    "cached_dates_reused",
+    "new_dates_computed",
+    "kmeans_fits_avoided",
+    "kmeans_fits_performed",
+    "regime_runtime_seconds",
+    "cache_age",
+    "updated_at_utc",
+    "cache_file",
+    "status_file",
+    "next_action",
+    "forced_rebuild_method",
+]
 
 
 @dataclass(frozen=True)
@@ -2156,6 +2182,317 @@ def reports_inventory_frame(root: str | Path) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _relative_display_path(root: Path, value: object) -> str:
+    if value in {"", None}:
+        return ""
+    path = Path(str(value))
+    try:
+        return str(path.resolve().relative_to(root.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _read_json_dict(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _not_available(value: object) -> object:
+    if value in {"", None}:
+        return NOT_AVAILABLE
+    try:
+        if bool(pd.isna(cast(Any, value))):
+            return NOT_AVAILABLE
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _date_count(payload: dict[str, object] | None) -> object:
+    dates = payload.get("dates_covered") if payload else None
+    if isinstance(dates, list):
+        return len(dates)
+    return _not_available(None)
+
+
+def _first_cached_date(payload: dict[str, object] | None) -> object:
+    dates = payload.get("dates_covered") if payload else None
+    if isinstance(dates, list) and dates:
+        return dates[0]
+    return _not_available(None)
+
+
+def _cache_metadata_sort_key(item: tuple[Path, dict[str, object]]) -> tuple[str, str, str, str]:
+    _, payload = item
+    return (
+        str(payload.get("update_timestamp_utc") or ""),
+        str(payload.get("last_cached_date") or ""),
+        str(payload.get("feature_manifest_hash") or ""),
+        str(payload.get("schema_version") or ""),
+    )
+
+
+def _latest_payload(
+    cache_dir: Path,
+    pattern: str,
+    *,
+    schema_version: str,
+) -> tuple[Path, dict[str, object]] | None:
+    candidates: list[tuple[Path, dict[str, object]]] = []
+    for path in sorted(cache_dir.glob(pattern)):
+        payload = _read_json_dict(path)
+        if payload is None or payload.get("schema_version") != schema_version:
+            continue
+        candidates.append((path, payload))
+    if not candidates:
+        return None
+    return max(candidates, key=_cache_metadata_sort_key)
+
+
+def _cache_age_label(updated_at: object) -> object:
+    if _not_available(updated_at) == NOT_AVAILABLE:
+        return NOT_AVAILABLE
+    try:
+        timestamp = pd.Timestamp(str(updated_at))
+    except ValueError:
+        return NOT_AVAILABLE
+    if pd.isna(timestamp):
+        return NOT_AVAILABLE
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(UTC)
+    seconds = max(0.0, (datetime.now(UTC) - timestamp.to_pydatetime()).total_seconds())
+    if seconds < 120:
+        return f"{seconds:.0f} seconds"
+    minutes = seconds / 60.0
+    if minutes < 120:
+        return f"{minutes:.1f} minutes"
+    hours = minutes / 60.0
+    if hours < 72:
+        return f"{hours:.1f} hours"
+    return f"{hours / 24.0:.1f} days"
+
+
+def _regime_next_action(status: str) -> str:
+    if status == "HIT":
+        return "Nothing required. build-features is using the exact regime cache."
+    if status == "NOT_FOUND":
+        return "Run build-features to create the regime cache."
+    if status == "INVALIDATED":
+        return "Run build-features. The engine will recompute and write a fresh cache."
+    if status == "PARTIAL_APPEND":
+        return "No action required after this run. New dates were appended to the exact cache."
+    if status == "MISS":
+        return "No action required after this run. The cache was created from a full recompute."
+    return "Review cache metadata, then run build-features if the cache should be refreshed."
+
+
+def _status_label(value: object) -> str:
+    text = str(value or "").strip().upper()
+    return text if text in REGIME_CACHE_ALLOWED_STATUSES else "UNKNOWN"
+
+
+def _regime_cache_summary_row(
+    root: Path,
+    *,
+    cache_path: Path | None,
+    cache_payload: dict[str, object] | None,
+    status_path: Path | None,
+    status_payload: dict[str, object] | None,
+    status_override: str | None = None,
+    validity_reason_override: str | None = None,
+) -> dict[str, object]:
+    if status_override is not None:
+        status = status_override
+    elif status_payload is not None:
+        status = _status_label(status_payload.get("status"))
+    elif cache_payload is not None:
+        status = "UNKNOWN"
+    else:
+        status = "NOT_FOUND"
+    validity_reason = (
+        validity_reason_override
+        or (status_payload or {}).get("reason")
+        or ("latest_build_run_status_unavailable" if cache_payload is not None else "cache_missing")
+    )
+    updated_at = (status_payload or {}).get("update_timestamp_utc") or (cache_payload or {}).get(
+        "update_timestamp_utc"
+    )
+    feature_manifest_hash = (status_payload or {}).get("feature_manifest_hash") or (
+        cache_payload or {}
+    ).get("feature_manifest_hash")
+    return {
+        "status": status,
+        "cache_validity_status": _not_available(
+            (status_payload or {}).get("cache_validity_status")
+            or (cache_payload or {}).get("cache_validity_status")
+        ),
+        "validity_reason": _not_available(validity_reason),
+        "cache_schema_version": _not_available(
+            (cache_payload or {}).get("schema_version")
+            or (status_payload or {}).get("cache_schema_version")
+        ),
+        "universe_snapshot_id": _not_available(
+            (cache_payload or {}).get("universe_snapshot_id")
+            or (status_payload or {}).get("universe_snapshot_id")
+        ),
+        "feature_manifest_hash": _not_available(feature_manifest_hash),
+        "first_cached_date": _not_available(_first_cached_date(cache_payload)),
+        "last_cached_date": _not_available(
+            (cache_payload or {}).get("last_cached_date")
+            or (status_payload or {}).get("last_cached_date")
+        ),
+        "dates_covered": _not_available(_date_count(cache_payload)),
+        "rows_covered": _not_available((cache_payload or {}).get("row_count")),
+        "cached_dates_reused": _not_available((status_payload or {}).get("cached_dates_reused")),
+        "new_dates_computed": _not_available((status_payload or {}).get("new_dates_computed")),
+        "kmeans_fits_avoided": _not_available((status_payload or {}).get("kmeans_fits_avoided")),
+        "kmeans_fits_performed": _not_available(
+            (status_payload or {}).get("kmeans_fits_performed")
+        ),
+        "regime_runtime_seconds": _not_available(
+            (status_payload or {}).get("regime_runtime_seconds")
+        ),
+        "cache_age": _cache_age_label(updated_at),
+        "updated_at_utc": _not_available(updated_at),
+        "cache_file": _relative_display_path(root, cache_path or ""),
+        "status_file": _relative_display_path(root, status_path or ""),
+        "next_action": _regime_next_action(status),
+        "forced_rebuild_method": (
+            "SWING_RSI_REBUILD_REGIME_CACHE=1 .venv/bin/python -m swing_rsi.cli build-features"
+        ),
+    }
+
+
+def _flatten_metadata(
+    root: Path,
+    *,
+    cache_path: Path | None,
+    cache_payload: dict[str, object] | None,
+    status_path: Path | None,
+    status_payload: dict[str, object] | None,
+) -> pd.DataFrame:
+    summary = _regime_cache_summary_row(
+        root,
+        cache_path=cache_path,
+        cache_payload=cache_payload,
+        status_path=status_path,
+        status_payload=status_payload,
+    )
+    rows: list[dict[str, object]] = [
+        {"field": field, "value": value} for field, value in summary.items()
+    ]
+    for prefix, payload in (("cache", cache_payload), ("latest_run", status_payload)):
+        if payload is None:
+            continue
+        for key, value in sorted(payload.items()):
+            if key == "records":
+                value = f"{len(value):,} cached label records" if isinstance(value, list) else value
+            rows.append(
+                {
+                    "field": f"{prefix}.{key}",
+                    "value": _not_available(_stringify_export_safe(value)),
+                }
+            )
+    return pd.DataFrame(rows, columns=["field", "value"])
+
+
+def _stringify_export_safe(value: object) -> object:
+    if isinstance(value, dict | list | tuple):
+        return json.dumps(value, sort_keys=True, default=str)
+    return value
+
+
+def _input_columns_frame(cache_payload: dict[str, object] | None) -> pd.DataFrame:
+    columns = (cache_payload or {}).get("regime_input_columns")
+    rows = (
+        [{"position": index + 1, "column": column} for index, column in enumerate(columns)]
+        if isinstance(columns, list)
+        else [{"position": NOT_AVAILABLE, "column": NOT_AVAILABLE}]
+    )
+    return pd.DataFrame(rows, columns=["position", "column"])
+
+
+def _kmeans_config_frame(cache_payload: dict[str, object] | None) -> pd.DataFrame:
+    payload = cache_payload or {}
+    parameters = payload.get("kmeans_parameters")
+    rows: list[dict[str, object]] = []
+    if isinstance(parameters, dict):
+        rows.extend({"field": key, "value": value} for key, value in sorted(parameters.items()))
+    rows.extend(
+        [
+            {"field": "random_seed", "value": _not_available(payload.get("random_seed"))},
+            {
+                "field": "minimum_sample_requirement",
+                "value": _not_available(payload.get("minimum_sample_requirement")),
+            },
+            {
+                "field": "scaler_preprocessing_configuration",
+                "value": _not_available(
+                    _stringify_export_safe(payload.get("scaler_preprocessing_configuration"))
+                ),
+            },
+        ]
+    )
+    return pd.DataFrame(rows, columns=["field", "value"])
+
+
+def regime_cache_detail_frames(root: str | Path) -> dict[str, pd.DataFrame]:
+    project_root = Path(root)
+    cache_dir = ProjectPaths(project_root).regime_cache
+    latest_cache = _latest_payload(
+        cache_dir,
+        f"*_{REGIME_KMEANS_CACHE_SCHEMA_VERSION}.json",
+        schema_version=REGIME_KMEANS_CACHE_SCHEMA_VERSION,
+    )
+    latest_status = _latest_payload(
+        cache_dir,
+        f"*_{REGIME_KMEANS_CACHE_STATUS_SCHEMA_VERSION}.json",
+        schema_version=REGIME_KMEANS_CACHE_STATUS_SCHEMA_VERSION,
+    )
+    cache_path, cache_payload = latest_cache if latest_cache is not None else (None, None)
+    status_path, status_payload = latest_status if latest_status is not None else (None, None)
+    if cache_path is None and status_path is not None and status_payload is not None:
+        referenced_cache = status_payload.get("cache_path")
+        if referenced_cache:
+            candidate = Path(str(referenced_cache))
+            payload = _read_json_dict(candidate)
+            if payload and payload.get("schema_version") == REGIME_KMEANS_CACHE_SCHEMA_VERSION:
+                cache_path, cache_payload = candidate, payload
+    status_override = "NOT_FOUND" if cache_payload is None and status_payload is None else None
+    summary = pd.DataFrame(
+        [
+            _regime_cache_summary_row(
+                project_root,
+                cache_path=cache_path,
+                cache_payload=cache_payload,
+                status_path=status_path,
+                status_payload=status_payload,
+                status_override=status_override,
+            )
+        ],
+        columns=REGIME_CACHE_SUMMARY_COLUMNS,
+    )
+    return {
+        "summary": summary,
+        "metadata": _flatten_metadata(
+            project_root,
+            cache_path=cache_path,
+            cache_payload=cache_payload,
+            status_path=status_path,
+            status_payload=status_payload,
+        ),
+        "input_columns": _input_columns_frame(cache_payload),
+        "kmeans_config": _kmeans_config_frame(cache_payload),
+    }
+
+
+def regime_cache_status_frame(root: str | Path) -> pd.DataFrame:
+    return regime_cache_detail_frames(root)["summary"]
 
 
 def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]:

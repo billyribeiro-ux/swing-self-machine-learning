@@ -6,6 +6,7 @@ import math
 import os
 import re
 import time
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,6 +76,7 @@ REGIME_KMEANS_N_CLUSTERS = 3
 REGIME_KMEANS_RANDOM_STATE = 42
 REGIME_KMEANS_N_INIT = 10
 REGIME_KMEANS_CACHE_SCHEMA_VERSION = "expanding_kmeans_regime_cache_v1"
+REGIME_KMEANS_CACHE_STATUS_SCHEMA_VERSION = "expanding_kmeans_regime_cache_status_v1"
 REGIME_KMEANS_FEATURE_BUILDER_VERSION = "features.py:_expanding_kmeans_regime:v1"
 REGIME_KMEANS_DATE_ORDERING = "market_daily_rows_as_received_after_groupby_date_reset_index"
 REGIME_KMEANS_PREPROCESSING_CONFIG = {
@@ -321,6 +323,11 @@ def _regime_cache_path(config: RegimeKMeansCacheConfig) -> Path:
     return config.cache_dir / f"{safe_snapshot}_{REGIME_KMEANS_CACHE_SCHEMA_VERSION}.json"
 
 
+def _regime_cache_status_path(config: RegimeKMeansCacheConfig) -> Path:
+    safe_snapshot = re.sub(r"[^A-Za-z0-9_.-]+", "_", config.universe_snapshot_id)
+    return config.cache_dir / f"{safe_snapshot}_{REGIME_KMEANS_CACHE_STATUS_SCHEMA_VERSION}.json"
+
+
 def _jsonable_cache_value(value: object) -> object:
     if isinstance(value, pd.Timestamp):
         return value.date().isoformat()
@@ -443,6 +450,82 @@ def _regime_cache_payload(
         "cache_validity_status": "VALID",
         "records": records,
     }
+
+
+def _regime_cache_status_payload(
+    *,
+    config: RegimeKMeansCacheConfig,
+    market_frame: pd.DataFrame,
+    report: RegimeKMeansCacheReport,
+    symbols_covered: tuple[str, ...],
+    feature_manifest_hash: str | None = None,
+) -> dict[str, object]:
+    dates = _market_dates(market_frame)
+    timestamp = datetime.now(UTC).isoformat()
+    return {
+        "schema_version": REGIME_KMEANS_CACHE_STATUS_SCHEMA_VERSION,
+        "cache_schema_version": REGIME_KMEANS_CACHE_SCHEMA_VERSION,
+        "universe_snapshot_id": config.universe_snapshot_id,
+        "feature_manifest_hash": feature_manifest_hash,
+        "feature_builder_version": config.feature_builder_version,
+        "status": report.status,
+        "reason": report.reason,
+        "cache_validity_status": "VALID" if report.cache_write_succeeded else "WRITE_FAILED",
+        "cache_path": str(report.cache_path) if report.cache_path is not None else "",
+        "last_cached_date": dates[-1] if dates else None,
+        "dates_covered_count": len(dates),
+        "row_count": len(market_frame),
+        "symbols_covered": list(symbols_covered),
+        "cached_dates_reused": report.cached_dates_reused,
+        "new_dates_computed": report.new_dates_computed,
+        "kmeans_fits_avoided": report.kmeans_fits_avoided,
+        "kmeans_fits_performed": report.kmeans_fits_performed,
+        "regime_runtime_seconds": report.regime_runtime_seconds,
+        "estimated_speedup": report.estimated_speedup,
+        "cache_write_succeeded": report.cache_write_succeeded,
+        "cache_write_error": report.cache_write_error,
+        "update_timestamp_utc": timestamp,
+    }
+
+
+def _write_regime_cache_status(
+    *,
+    config: RegimeKMeansCacheConfig,
+    market_frame: pd.DataFrame,
+    report: RegimeKMeansCacheReport,
+    symbols_covered: tuple[str, ...],
+    feature_manifest_hash: str | None = None,
+) -> None:
+    payload = _regime_cache_status_payload(
+        config=config,
+        market_frame=market_frame,
+        report=report,
+        symbols_covered=symbols_covered,
+        feature_manifest_hash=feature_manifest_hash,
+    )
+    _write_regime_cache_atomic(_regime_cache_status_path(config), payload)
+
+
+def annotate_regime_kmeans_cache_status(
+    config: RegimeKMeansCacheConfig,
+    *,
+    feature_manifest_hash: str,
+) -> None:
+    status_path = _regime_cache_status_path(config)
+    if not status_path.exists():
+        return
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    payload["feature_manifest_hash"] = feature_manifest_hash
+    payload["update_timestamp_utc"] = datetime.now(UTC).isoformat()
+    try:
+        _write_regime_cache_atomic(status_path, payload)
+    except OSError:
+        return
 
 
 def _load_regime_cache(
@@ -651,6 +734,13 @@ def _expanding_kmeans_regime_with_cache(
         cache_write_succeeded=write_succeeded,
         cache_write_error=write_error,
     )
+    with suppress(OSError):
+        _write_regime_cache_status(
+            config=cache_config,
+            market_frame=market_frame,
+            report=report,
+            symbols_covered=symbols_covered,
+        )
     return labels, report
 
 

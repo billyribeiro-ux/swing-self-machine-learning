@@ -28,6 +28,23 @@ data/cache/regime/
 
 The path is Git-ignored.
 
+The exact-label cache artifact uses schema:
+
+```text
+expanding_kmeans_regime_cache_v1
+```
+
+`build-features` also writes a latest-run status sidecar with schema:
+
+```text
+expanding_kmeans_regime_cache_status_v1
+```
+
+The sidecar records dashboard telemetry such as latest cache status, validity
+reason, cached dates reused, new dates computed, KMeans fits avoided/performed,
+runtime, and feature manifest hash. It is display metadata only; feature output
+does not depend on it.
+
 ## Validity Contract
 
 The cache is reused only when all frozen inputs match:
@@ -87,6 +104,15 @@ Forced rebuild is not the default.
 - KMeans fits performed;
 - regime runtime;
 - estimated speedup.
+
+The same latest-run cache telemetry is displayed in the Streamlit dashboard:
+
+- Overview shows compact status cards.
+- Developer Diagnostics shows detailed metadata, input columns, KMeans config,
+  and CSV/XLSX exports.
+
+The dashboard reads local cache metadata only. It does not run `build-features`
+or recompute regime features on page load.
 
 ## Atomic Writes
 

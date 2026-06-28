@@ -98,6 +98,22 @@ Detail with `run_id`, `event_id`, `scan_id`, `ticker`, `model_id`, `direction`,
 and `status` where available. Candidate Detail uses those parameters as
 selectbox defaults.
 
+## Overview Regime Cache Status
+
+Overview shows compact Regime KMeans Cache cards so development users can see
+whether the most recent `build-features` run used the fast exact cache path.
+The cards show:
+
+- regime cache status;
+- last cached date;
+- KMeans fits avoided;
+- regime runtime;
+- cache validity reason.
+
+The panel reads local cache metadata only and does not run `build-features` on
+page load. If metadata is missing, it displays `Regime cache: Not found` and
+directs the user to run `build-features` once to create the cache.
+
 ## Edge Status
 
 Every model-facing row maps to one edge status:
@@ -154,6 +170,10 @@ Workbook sheets:
 
 The export helpers redact API-key-like content and do not include `.env`
 contents or authenticated URLs.
+
+Developer Diagnostics adds Regime KMeans Cache CSV and XLSX exports. The XLSX
+workbook contains `summary`, `metadata`, `input_columns`, and `kmeans_config`
+sheets.
 
 ## Command Behavior
 

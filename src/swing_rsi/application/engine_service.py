@@ -15,6 +15,7 @@ from swing_rsi.engine.drift import DriftReport, build_drift_report
 from swing_rsi.engine.features import (
     FeatureBuildResult,
     RegimeKMeansCacheConfig,
+    annotate_regime_kmeans_cache_status,
     build_feature_panel,
     feature_family_map_for_columns,
     numeric_feature_columns,
@@ -212,14 +213,19 @@ def build_autonomous_features(
     if not frames:
         raise ValueError("No raw OHLCV files are available for the enabled universe")
     force_rebuild = rebuild_regime_cache or os.getenv("SWING_RSI_REBUILD_REGIME_CACHE") == "1"
+    regime_cache_config = RegimeKMeansCacheConfig(
+        cache_dir=paths.regime_cache,
+        universe_snapshot_id=universe.snapshot_id,
+        force_rebuild=force_rebuild,
+    )
     features = build_feature_panel(
         frames,
         universe,
-        regime_cache_config=RegimeKMeansCacheConfig(
-            cache_dir=paths.regime_cache,
-            universe_snapshot_id=universe.snapshot_id,
-            force_rebuild=force_rebuild,
-        ),
+        regime_cache_config=regime_cache_config,
+    )
+    annotate_regime_kmeans_cache_status(
+        regime_cache_config,
+        feature_manifest_hash=features.manifest_hash,
     )
     labels = build_label_panel(frames, LabelConfig())
     modeling = merge_features_and_labels(features.frame, labels)
