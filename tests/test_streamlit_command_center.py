@@ -10,6 +10,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 import pytest
+from dashboard.sections.candidate_detail import _identifier_copy_text, _raw_identifier_frame
 from dashboard.sections.signal_board import _display_section as signal_board_display_section
 
 from swing_rsi.application.dashboard_exports import (
@@ -704,6 +705,46 @@ def test_signal_board_detail_links_preselect_candidate_detail(
     assert app.selectbox[2].label == "Model ID"
     assert app.selectbox[2].value == "model-demo"
     assert any(success.value == "Opened from Signal Board selection." for success in app.success)
+    assert any(subheader.value == "Full Raw Identifiers" for subheader in app.subheader)
+
+
+def test_candidate_detail_raw_identifier_copy_block_and_exports(
+    command_center_root: Path,
+) -> None:
+    scanner = scanner_results_frame(command_center_root)
+    candidate = scanner.loc[scanner["ticker"].astype(str) == "DEMO2"].iloc[0]
+    params = {
+        "scan_id": "scan-demo",
+        "ticker": "DEMO2",
+        "model_id": "model-demo",
+        "direction": "Bullish",
+        "run_id": "run-demo",
+        "event_id": "pending-demo2-event",
+        "status": "PENDING ENTRY",
+    }
+
+    identifiers = _raw_identifier_frame(candidate, params)
+    values = dict(zip(identifiers["field"], identifiers["value"], strict=True))
+    copy_text = _identifier_copy_text(identifiers)
+    xlsx_bytes = to_xlsx_bytes({"raw_identifiers": identifiers})
+    workbook = openpyxl.load_workbook(BytesIO(xlsx_bytes))
+
+    assert values["scan_id"] == "scan-demo"
+    assert values["ticker"] == "DEMO2"
+    assert values["model_id"] == "model-demo"
+    assert values["run_id"] == "run-demo"
+    assert values["event_id"] == "pending-demo2-event"
+    assert values["status"] == "PENDING ENTRY"
+    assert values["feature_snapshot_hash"] == "featurehash"
+    assert "run_id=run-demo" in copy_text
+    assert "event_id=pending-demo2-event" in copy_text
+    assert "model_id=model-demo" in copy_text
+    assert workbook["raw_identifiers"]["A1"].value == "field"
+    workbook_values = [
+        workbook["raw_identifiers"].cell(row=row, column=3).value
+        for row in range(2, workbook["raw_identifiers"].max_row + 1)
+    ]
+    assert "pending-demo2-event" in workbook_values
 
 
 def test_complete_engine_snapshot_export_contains_required_sheets(

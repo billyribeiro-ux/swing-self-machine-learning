@@ -34,6 +34,66 @@ def _query_value(params: object, key: str) -> str:
     return str(value)
 
 
+def _clean_identifier_value(value: object) -> str:
+    try:
+        if bool(pd.isna(value)):  # type: ignore[arg-type]
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if text in {"", "Not available", "None", "NaT", "nan"}:
+        return ""
+    return text
+
+
+def _first_identifier_value(candidate: pd.Series, params: object, *keys: str) -> str:
+    for key in keys:
+        value = _clean_identifier_value(_query_value(params, key))
+        if value:
+            return value
+    for key in keys:
+        value = _clean_identifier_value(candidate.get(key, ""))
+        if value:
+            return value
+    return "Not available"
+
+
+def _raw_identifier_frame(candidate: pd.Series, params: object) -> pd.DataFrame:
+    fields = (
+        ("scan_id", "Scan ID", ("scan_id",)),
+        ("ticker", "Ticker", ("ticker",)),
+        ("direction", "Direction", ("direction",)),
+        ("model_id", "Model ID", ("model_id", "model")),
+        ("generation", "Generation", ("generation",)),
+        ("run_id", "Run ID", ("run_id",)),
+        ("event_id", "Event ID", ("event_id",)),
+        ("event_type", "Event Type", ("event_type",)),
+        ("status", "Status", ("status", "candidate_classification")),
+        ("feature_snapshot_hash", "Feature Snapshot Hash", ("feature_snapshot_hash",)),
+    )
+    return pd.DataFrame(
+        [
+            {
+                "field": field,
+                "label": label,
+                "value": _first_identifier_value(candidate, params, *keys),
+            }
+            for field, label, keys in fields
+        ]
+    )
+
+
+def _identifier_copy_text(identifiers: pd.DataFrame) -> str:
+    if identifiers.empty:
+        return ""
+    lines = []
+    for _, row in identifiers.iterrows():
+        value = _clean_identifier_value(row.get("value", ""))
+        if value:
+            lines.append(f"{row.get('field', '')}={value}")
+    return "\n".join(lines)
+
+
 def _selectbox_index(options: list[str], requested: str) -> int:
     return options.index(requested) if requested in options else 0
 
@@ -214,12 +274,18 @@ def render_page() -> None:
 
     streamlit.info(_plain_english(candidate))
 
+    identifiers = _raw_identifier_frame(candidate, dict(streamlit.query_params))
     summary = _summary_frame(candidate)
     checks = _checks_frame(candidate)
     attribution = _attribution_frame(candidate)
     analogs = _json_frame(candidate.get("historical_analogs", ""))
     feature_snapshot = pd.DataFrame([candidate.to_dict()])
     risk = _risk_frame(candidate)
+
+    streamlit.subheader("Full Raw Identifiers")
+    with streamlit.expander("Full Raw Identifier Copy Block", expanded=False):
+        streamlit.dataframe(display_frame(identifiers), width="stretch", hide_index=True)
+        streamlit.code(_identifier_copy_text(identifiers), language="text")
 
     streamlit.subheader("Signal Summary")
     streamlit.dataframe(display_frame(summary), width="stretch", hide_index=True)
@@ -248,10 +314,16 @@ def render_page() -> None:
         basename="candidate_detail_feature_snapshot",
         label="feature_snapshot",
     )
+    render_table_downloads(
+        identifiers,
+        basename="candidate_detail_raw_identifiers",
+        label="raw_identifiers",
+    )
     streamlit.download_button(
         "Download candidate detail workbook XLSX",
         data=to_xlsx_bytes(
             {
+                "raw_identifiers": identifiers,
                 "attribution": attribution,
                 "analogs": analogs,
                 "feature_snapshot": feature_snapshot,

@@ -5,7 +5,9 @@ Date: 2026-06-28
 ## Summary
 
 Signal Board now shows friendly display identifiers for model, generation, run,
-and event columns while preserving full raw IDs for audit paths.
+and event columns while preserving full raw IDs for audit paths. Candidate
+Detail now adds a compact `Full Raw Identifiers` copy block and workbook sheet
+for the selected row.
 
 Visible examples from the current development Signal Board:
 
@@ -21,6 +23,7 @@ pooled product-class model. Ordinary product-class models display as `ORD`.
 
 - `src/swing_rsi/application/dashboard_service.py`
 - `dashboard/sections/signal_board.py`
+- `dashboard/sections/candidate_detail.py`
 - `tests/test_streamlit_command_center.py`
 - `docs/SIGNAL_FIRST_DASHBOARD.md`
 - `docs/CHANGELOG.md`
@@ -55,6 +58,19 @@ identifiers. Candidate Detail query parameters continue to receive full
 Missing MFE/MAE display behavior is unchanged: missing values render as
 `Not available`, not zero.
 
+Candidate Detail now renders `Full Raw Identifiers` with:
+
+- a compact table of full raw scan, ticker, direction, model, generation, run,
+  event, status, and feature-snapshot identifiers;
+- a single copyable text block containing `field=value` lines;
+- a CSV export for `raw_identifiers`;
+- a `raw_identifiers` sheet in the Candidate Detail workbook.
+
+When Candidate Detail is opened from Signal Board, query-string `run_id`,
+`event_id`, and `status` values are used for the identifier panel so the opened
+event remains auditable even when the selected scanner row originated from a
+related signal event.
+
 ## Tests Added Or Updated
 
 - Extended `test_signal_first_tables_label_live_shadow_and_missing_paths` to
@@ -69,13 +85,15 @@ Missing MFE/MAE display behavior is unchanged: missing values render as
   FMP download, and no SQLite/model-artifact mutation during dashboard page load.
 - Existing Candidate Detail link test still verifies full raw identifiers are
   passed through the `Open detail` URL.
+- Added raw-identifier coverage for Candidate Detail copy text and the
+  `raw_identifiers` XLSX sheet.
 
 ## Verification Results
 
 Final verification on the formatted tree:
 
 - `.venv/bin/pytest`
-  - Result: `346 passed, 11576 warnings in 138.19s`
+  - Result: `347 passed, 11576 warnings in 119.15s`
   - Warnings were existing pandas constant-input and joblib NumPy deprecation
     warnings.
 - `.venv/bin/ruff check .`
@@ -88,7 +106,7 @@ Final verification on the formatted tree:
 Focused dashboard verification before the full run:
 
 - `.venv/bin/pytest tests/test_streamlit_command_center.py -q`
-  - Result: `25 passed in 3.48s`
+  - Result: `26 passed in 3.21s`
 
 Read-only development Signal Board sample confirmed:
 
@@ -137,8 +155,8 @@ data path.
   abbreviation.
 - Rows without run or event identifiers display `Not available` for the
   corresponding friendly label.
-- This does not add a hover/copy control for full IDs in the compact Signal
-  Board table; full IDs remain available through Candidate Detail and exports.
+- The compact Signal Board table still does not show full raw IDs inline; full
+  IDs are intentionally concentrated in Candidate Detail and exports.
 
 ## Launch Command
 
@@ -153,4 +171,5 @@ None. This is dashboard visibility and export-preservation work only.
 
 ## Next Smallest Task
 
-Add a compact copy-to-clipboard affordance for full raw IDs in Candidate Detail.
+Add a small Candidate Detail deep-link copy block that includes the full
+`/candidate-detail?...` URL for the selected row.

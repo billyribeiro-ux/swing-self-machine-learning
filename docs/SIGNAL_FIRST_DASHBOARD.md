@@ -110,6 +110,11 @@ in Candidate Detail routing and CSV/XLSX exports. The friendly labels are
 display-only and do not alter scanner identity, event identity, model identity,
 or export audit fields.
 
+Candidate Detail includes a compact `Full Raw Identifiers` section. It displays
+the selected candidate's raw scan, model, generation, run, event, status, and
+feature-snapshot identifiers in both a table and a copyable text block. The
+Candidate Detail workbook includes the same fields on a `raw_identifiers` sheet.
+
 ## Signal Board Regime Cache Status
 
 Signal Board shows compact Regime KMeans Cache cards near the top status-card
