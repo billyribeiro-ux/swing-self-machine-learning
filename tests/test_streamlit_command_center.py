@@ -39,6 +39,7 @@ from swing_rsi.application.dashboard_service import (
     scanner_results_frame,
     signal_board_frame,
     signal_board_metrics,
+    signal_discovery_generation_frames,
 )
 from swing_rsi.application.footprint_attribution import (
     EVIDENCE_UNAVAILABLE,
@@ -418,6 +419,227 @@ def _write_regime_cache_metadata(
     return cache_path, status_path
 
 
+def _write_signal_discovery_generation(root: Path) -> str:
+    generation_id = "signal_discovery_20260627T140500Z_fixture"
+    signal_id = "signal-fixture-1"
+    generation_dir = root / "artifacts" / "signal_discovery" / generation_id
+    generation_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "schema_version": "multi_angle_signal_discovery_v1",
+        "generation_type": "signal_discovery_generation",
+        "generation_id": generation_id,
+        "created_at_utc": "2026-06-27T14:05:00+00:00",
+        "feature_manifest_hash": "featurehash",
+        "hypotheses_evaluated": 2,
+    }
+    candidate = {
+        "signal_id": signal_id,
+        "generation_id": generation_id,
+        "scan_id": generation_id,
+        "as_of_date": "2026-05-26",
+        "ticker": "DEMO3",
+        "symbol": "DEMO3",
+        "direction": "Bullish",
+        "action": "BUY",
+        "decision": "BUY_CANDIDATE",
+        "candidate_status": "SHADOW_ONLY",
+        "candidate_classification": "SHADOW_ONLY",
+        "edge_status": "SHADOW VALIDATION",
+        "archetype": "Reversal / Exhaustion",
+        "archetype_id": "reversal_exhaustion",
+        "hypothesis_id": "reversal_buy_5d",
+        "model_id": "reversal_buy_5d:extra_trees",
+        "model_family": "extra_trees",
+        "family": "extra_trees",
+        "horizon": 5,
+        "scope": "POOLED",
+        "product_class_scope": "POOLED",
+        "row_product_class_role": "stock",
+        "generation": generation_id,
+        "feature_snapshot_hash": "featurehash",
+        "calibrated_probability": 0.68,
+        "probability": 0.68,
+        "target_before_stop_probability": 0.61,
+        "expected_return": 0.024,
+        "expected_mfe": 0.052,
+        "expected_mae": -0.018,
+        "signal_score": 0.72,
+        "composite_signal_score": 0.72,
+        "risk_adjusted_utility": 0.030,
+        "ood_feature_rate": 0.0,
+        "liquidity_score": 0.74,
+        "footprint_support_score": 0.69,
+        "historical_analog_support_score": "explanatory_only",
+        "conflict_penalty": 0.0,
+        "concentration_penalty": 0.0,
+        "top_support": "volatility_range: atr_pct_14=0.0275",
+        "top_conflict": "candle_geometry: weak local movement",
+        "historical_analog_support": "Computed after selection; explanatory only.",
+        "footprint_summary": "BUY reversal exhaustion footprint",
+        "supporting_evidence": "volatility_range: atr_pct_14=0.0275",
+        "top_divergences": "candle_geometry: weak local movement",
+        "rejection_reason": "",
+        "no_signal_reason": "",
+        "next_required_event": "Collect prospective evidence; not live actionable without promotion.",
+        "not_live_actionable_reason": "No promoted multi-angle signal model exists.",
+    }
+    no_signal = {
+        **candidate,
+        "signal_id": "signal-fixture-2",
+        "ticker": "DEMO4",
+        "decision": "NO_SIGNAL",
+        "action": "NO SIGNAL",
+        "candidate_status": "RESEARCH_ONLY",
+        "candidate_classification": "RESEARCH_ONLY",
+        "no_signal_reason": "probability_below_threshold",
+        "footprint_summary": "reversal_buy_5d footprint incomplete or below policy threshold",
+    }
+    hypothesis = {
+        "generation_id": generation_id,
+        "schema_version": "multi_angle_signal_discovery_v1",
+        "hypothesis_id": "reversal_buy_5d",
+        "archetype": "Reversal / Exhaustion",
+        "direction": "BUY",
+        "horizon": 5,
+        "family": "extra_trees",
+        "status": "CANDIDATE",
+        "selected_features": json.dumps(["atr_pct_14", "close_position"]),
+        "train_rows": 100,
+        "calibration_rows": 30,
+        "holdout_rows": 30,
+    }
+    evidence = pd.DataFrame(
+        [
+            {
+                "signal_id": signal_id,
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "Category": "Top support",
+                "Claim": "Signal footprint support is measured.",
+                "Evidence": "atr_pct_14",
+                "Value": "0.0275",
+                "Window": "5 sessions",
+                "Percentile/Rank": "Not available",
+                "Comparison Instrument": "Not available",
+                "Feature": "atr_pct_14",
+                "Evidence Type": "supportive",
+                "Strength": "moderate",
+                "Missing Data Status": "available",
+            },
+            {
+                "signal_id": signal_id,
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "Category": "Top conflict",
+                "Claim": "Conflicting evidence is retained.",
+                "Evidence": "weak local movement",
+                "Value": "weak local movement",
+                "Window": "5 sessions",
+                "Percentile/Rank": "Not available",
+                "Comparison Instrument": "Not available",
+                "Feature": "conflict_stack",
+                "Evidence Type": "conflicting",
+                "Strength": "moderate",
+                "Missing Data Status": "available",
+            },
+            {
+                "signal_id": signal_id,
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "Category": "Residual / unexplained",
+                "Claim": "Residual explanation is retained.",
+                "Evidence": "unexplained component",
+                "Value": "10.00%",
+                "Window": "current signal",
+                "Percentile/Rank": "Not available",
+                "Comparison Instrument": "Not available",
+                "Feature": "residual_unexplained",
+                "Evidence Type": "neutral",
+                "Strength": "moderate",
+                "Missing Data Status": "available",
+            },
+        ]
+    )
+    analogs = pd.DataFrame(
+        [
+            {
+                "signal_id": signal_id,
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "analog_rank": 1,
+                "analog_date": "2026-04-15",
+                "symbol": "AAA",
+                "scope": "POOLED",
+                "regime": "1",
+                "similarity": 0.42,
+                "forward_return": 0.031,
+                "MFE": 0.060,
+                "MAE": -0.015,
+                "target_before_stop_result": "target before stop",
+                "outcome_labels_used_for_explanation_only": True,
+            }
+        ]
+    )
+    frames = {
+        "summary": pd.DataFrame(
+            [
+                {
+                    "generation_id": generation_id,
+                    "created_at_utc": "2026-06-27T14:05:00+00:00",
+                    "hypotheses_evaluated": 2,
+                    "buy_candidates": 1,
+                    "sell_candidates": 0,
+                    "no_signal_rows": 1,
+                    "rejected_rows": 0,
+                    "top_archetypes": '{"Reversal / Exhaustion": 1}',
+                }
+            ]
+        ),
+        "hypotheses": pd.DataFrame([hypothesis]),
+        "candidates": pd.DataFrame([candidate, no_signal]),
+        "selected_candidates": pd.DataFrame([candidate]),
+        "no_signal": pd.DataFrame([no_signal]),
+        "rejected": pd.DataFrame(),
+        "footprint_evidence": evidence,
+        "historical_analogs": analogs,
+        "score_components": pd.DataFrame(
+            [
+                {
+                    "signal_id": signal_id,
+                    "generation_id": generation_id,
+                    "hypothesis_id": "reversal_buy_5d",
+                    "component": "signal_score",
+                    "value": 0.72,
+                    "used_in_score": True,
+                }
+            ]
+        ),
+        "gate_results": pd.DataFrame(
+            [
+                {
+                    "generation_id": generation_id,
+                    "hypothesis_id": "reversal_buy_5d",
+                    "gate_id": "minimum_training_samples",
+                    "actual": 100,
+                    "threshold": 20,
+                    "status": "PASS",
+                    "mandatory": True,
+                    "evidence_source": "chronological_split",
+                }
+            ]
+        ),
+    }
+    for name, frame in frames.items():
+        frame.to_csv(generation_dir / f"{name}.csv", index=False)
+    (generation_dir / "metadata.json").write_text(
+        json.dumps(metadata, sort_keys=True), encoding="utf-8"
+    )
+    (generation_dir.parent / "latest.json").write_text(
+        json.dumps({"generation_id": generation_id}, sort_keys=True), encoding="utf-8"
+    )
+    return generation_id
+
+
 def test_dashboard_blocks_startup_from_operational_repo(monkeypatch: pytest.MonkeyPatch) -> None:
     from swing_rsi.application import dashboard_service as service
 
@@ -652,6 +874,26 @@ def test_signal_board_visible_table_uses_friendly_ids_but_exports_raw_ids(
     assert "event_id" in headers
 
 
+def test_signal_board_displays_multi_angle_action_and_archetype(
+    command_center_root: Path,
+) -> None:
+    generation_id = _write_signal_discovery_generation(command_center_root)
+
+    board = signal_board_frame(command_center_root)
+    visible = signal_board_display_section(board)
+    discovery = visible.loc[visible["Ticker"].astype(str) == "DEMO3"].iloc[0]
+
+    assert discovery["Action"] == "BUY"
+    assert discovery["Archetype"] == "Reversal / Exhaustion"
+    assert str(discovery["Signal Score"]) == "0.72"
+    assert discovery["Footprint Summary"] == "BUY reversal exhaustion footprint"
+    assert discovery["Top Support"] == "volatility_range: atr_pct_14=0.0275"
+    assert discovery["Top Conflict"] == "candle_geometry: weak local movement"
+    assert str(discovery["Open"]).startswith("/candidate-detail?")
+    assert f"scan_id={generation_id}" in str(discovery["Open"])
+    assert "model_id=reversal_buy_5d%3Aextra_trees" in str(discovery["Open"])
+
+
 def test_signal_board_default_sections_keep_shadow_and_pending_visible(
     command_center_root: Path,
 ) -> None:
@@ -730,6 +972,36 @@ def test_signal_board_detail_links_preselect_candidate_detail(
     assert "Missing evidence rows" in metrics
     assert "Categories affected" in metrics
     assert "Top missing category" in metrics
+
+
+def test_candidate_detail_displays_signal_discovery_score_breakdown(
+    command_center_root: Path,
+) -> None:
+    generation_id = _write_signal_discovery_generation(command_center_root)
+    db = command_center_root / "state" / "engine.sqlite3"
+    artifact = command_center_root / "artifacts" / "models" / "model.joblib"
+    before_db = db.read_bytes()
+    before_artifact = artifact.read_bytes()
+
+    app = AppTest.from_file("dashboard/sections/candidate_detail.py")
+    app.query_params["scan_id"] = generation_id
+    app.query_params["ticker"] = "DEMO3"
+    app.query_params["model_id"] = "reversal_buy_5d:extra_trees"
+    app.query_params["direction"] = "Bullish"
+    app.run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert db.read_bytes() == before_db
+    assert artifact.read_bytes() == before_artifact
+    subheaders = {subheader.value for subheader in app.subheader}
+    assert "Signal Score Breakdown" in subheaders
+    assert "Footprint Evidence Table" in subheaders
+    assert "Conflicting Evidence" in subheaders
+    assert "Residual / Unexplained" in subheaders
+    assert "Historical Analogs" in subheaders
+    assert app.selectbox[0].value == generation_id
+    assert app.selectbox[1].value == "DEMO3"
+    assert app.selectbox[2].value == "reversal_buy_5d:extra_trees"
 
 
 def test_candidate_detail_raw_identifier_copy_block_and_exports(
@@ -1030,6 +1302,51 @@ def test_complete_engine_snapshot_export_contains_required_sheets(
     }
     assert workbook["signal_board"]["A1"].value == "ticker"
     assert "secret" not in workbook_path.read_bytes().decode("latin1", errors="ignore")
+
+
+def test_reports_and_exports_displays_signal_discovery_generation(
+    command_center_root: Path,
+) -> None:
+    _write_signal_discovery_generation(command_center_root)
+
+    frames = signal_discovery_generation_frames(command_center_root)
+    app = AppTest.from_file("dashboard/sections/reports_and_exports.py").run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert "Signal Discovery Generation" in {subheader.value for subheader in app.subheader}
+    assert not frames["candidates"].empty
+    workbook = openpyxl.load_workbook(
+        BytesIO(
+            to_xlsx_bytes(
+                {
+                    "summary": frames["summary"],
+                    "metadata": frames["metadata"],
+                    "hypotheses": frames["hypotheses"],
+                    "candidates": frames["candidates"],
+                    "selected_candidates": frames["selected_candidates"],
+                    "no_signal": frames["no_signal"],
+                    "rejected": frames["rejected"],
+                    "footprint_evidence": frames["footprint_evidence"],
+                    "historical_analogs": frames["historical_analogs"],
+                    "score_components": frames["score_components"],
+                    "gate_results": frames["gate_results"],
+                }
+            )
+        )
+    )
+    assert {
+        "summary",
+        "metadata",
+        "hypotheses",
+        "candidates",
+        "selected_candidates",
+        "no_signal",
+        "rejected",
+        "footprint_evidence",
+        "historical_analogs",
+        "score_components",
+        "gate_results",
+    }.issubset(set(workbook.sheetnames))
 
 
 def test_exports_create_csv_and_xlsx_without_secrets(tmp_path: Path) -> None:
