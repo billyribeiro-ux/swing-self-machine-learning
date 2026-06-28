@@ -818,6 +818,7 @@ def _signal_discovery_blocker_rows(frames: dict[str, pd.DataFrame]) -> pd.DataFr
         rows.append(
             {
                 "generation_id": row.get("generation_id", ""),
+                "signal_id": row.get("signal_id", ""),
                 "as_of_date": row.get("as_of_date", ""),
                 "ticker": row.get("ticker", row.get("symbol", "")),
                 "action": row.get("action", ""),
@@ -825,6 +826,7 @@ def _signal_discovery_blocker_rows(frames: dict[str, pd.DataFrame]) -> pd.DataFr
                 "archetype": row.get("archetype", ""),
                 "archetype_id": row.get("archetype_id", ""),
                 "hypothesis_id": row.get("hypothesis_id", ""),
+                "model_id": row.get("model_id", ""),
                 "model_family": row.get("model_family", row.get("family", "")),
                 "product_class_scope": row.get("product_class_scope", row.get("scope", "")),
                 "decision": decision,
@@ -852,6 +854,7 @@ def _signal_discovery_blocker_rows(frames: dict[str, pd.DataFrame]) -> pd.DataFr
 def _blocker_columns() -> list[str]:
     return [
         "generation_id",
+        "signal_id",
         "as_of_date",
         "ticker",
         "action",
@@ -859,6 +862,7 @@ def _blocker_columns() -> list[str]:
         "archetype",
         "archetype_id",
         "hypothesis_id",
+        "model_id",
         "model_family",
         "product_class_scope",
         "decision",

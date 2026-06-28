@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Candidate Detail links to highest-scoring Signal Discovery blocker rows by carrying raw signal/model identifiers through the blocker report and using the existing Candidate Detail URL contract.
 - Added a Reports and Exports Signal Discovery blocker review panel with read-only summary cards, grouped drilldowns, highest-scoring blocked rows, and AppTest coverage while preserving existing CSV/XLSX blocker exports.
 - Added a read-only Signal Discovery blocker review documenting the latest generation's blocker distribution by reason, product scope, archetype, highest-scoring blocked rows, and TZA-specific evidence without changing gates, thresholds, labels, features, scanner state, or operational state.
 - Added a read-only Signal Discovery blocker report that summarizes latest NO_SIGNAL and rejected rows by blocker reason, hypothesis, archetype, ticker, and product scope, with CLI CSV/JSON export and Reports and Exports workbook support.

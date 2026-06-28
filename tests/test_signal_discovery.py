@@ -345,6 +345,9 @@ def test_signal_discovery_blocker_report_summarizes_reasons_and_groups(
     assert "archetype" in report["by_archetype"].columns
     assert "ticker" in report["by_ticker"].columns
     assert "product_class_scope" in report["by_scope"].columns
+    assert "signal_id" in report["blocker_rows"].columns
+    assert "model_id" in report["blocker_rows"].columns
+    assert report["blocker_rows"]["model_id"].astype(str).str.len().gt(0).all()
     assert report["summary"]["blocker_rows"].iloc[0] == len(report["blocker_rows"])
 
     output_dir = tmp_path / "blocker_export"

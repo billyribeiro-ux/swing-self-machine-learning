@@ -9,6 +9,7 @@ from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_exports import save_xlsx_report
 from swing_rsi.application.dashboard_service import (
+    candidate_detail_url,
     final_holdout_runs_frame,
     gate_audit_frame,
     model_registry_frame,
@@ -29,6 +30,7 @@ BLOCKER_TOP_ROW_COLUMNS: tuple[str, ...] = (
     "action",
     "candidate_status",
     "blocker_reason",
+    "model_id",
     "hypothesis_id",
     "archetype",
     "signal_score",
@@ -39,6 +41,7 @@ BLOCKER_TOP_ROW_COLUMNS: tuple[str, ...] = (
     "expected_mae",
     "ood_feature_rate",
     "next_required_event",
+    "open_url",
 )
 
 
@@ -83,10 +86,25 @@ def _top_blocker_rows(blockers: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
     if blockers.empty:
         return blockers.copy()
     frame = blockers.copy()
+    frame["open_url"] = [
+        candidate_detail_url(
+            scan_id=row.get("generation_id", ""),
+            ticker=row.get("ticker", ""),
+            model_id=row.get("model_id", ""),
+            direction=row.get("direction", ""),
+            status=row.get("candidate_status", ""),
+        )
+        for _, row in frame.iterrows()
+    ]
     if "signal_score" in frame.columns:
         frame = frame.sort_values("signal_score", ascending=False, na_position="last")
     columns = [column for column in BLOCKER_TOP_ROW_COLUMNS if column in frame.columns]
     return frame[columns].head(limit).reset_index(drop=True)
+
+
+def _display_top_blocker_rows(blockers: pd.DataFrame) -> pd.DataFrame:
+    display = display_frame(_top_blocker_rows(blockers)).rename(columns={"Open Url": "Open"})
+    return display
 
 
 def _render_signal_discovery_blockers(root: Path) -> None:
@@ -144,10 +162,18 @@ def _render_signal_discovery_blockers(root: Path) -> None:
             else:
                 streamlit.dataframe(display_frame(frame.head(50)), width="stretch", hide_index=True)
     with tabs[5]:
+        top_blockers = _display_top_blocker_rows(blockers)
+        column_config = {}
+        if "Open" in top_blockers.columns:
+            column_config["Open"] = streamlit.column_config.LinkColumn(
+                "Open",
+                display_text="Open detail",
+            )
         streamlit.dataframe(
-            display_frame(_top_blocker_rows(blockers)),
+            top_blockers,
             width="stretch",
             hide_index=True,
+            column_config=column_config,
         )
 
     if streamlit.button("Create signal discovery blocker workbook"):

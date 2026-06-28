@@ -16,6 +16,7 @@ from dashboard.sections.candidate_detail import (
     _identifier_copy_text,
     _raw_identifier_frame,
 )
+from dashboard.sections.reports_and_exports import _top_blocker_rows
 from dashboard.sections.signal_board import _display_section as signal_board_display_section
 
 from swing_rsi.application.dashboard_exports import (
@@ -1330,6 +1331,13 @@ def test_reports_and_exports_displays_signal_discovery_generation(
     assert not frames["candidates"].empty
     assert not blocker_frames["blocker_rows"].empty
     assert not blocker_frames["by_reason"].empty
+    top_blockers = _top_blocker_rows(blocker_frames["blocker_rows"])
+    assert "open_url" in top_blockers.columns
+    assert "/candidate-detail?" in str(top_blockers.iloc[0]["open_url"])
+    assert f"scan_id={generation_id}" in str(top_blockers.iloc[0]["open_url"])
+    assert "ticker=DEMO4" in str(top_blockers.iloc[0]["open_url"])
+    assert "model_id=reversal_buy_5d%3Aextra_trees" in str(top_blockers.iloc[0]["open_url"])
+    assert "direction=Bullish" in str(top_blockers.iloc[0]["open_url"])
     workbook = openpyxl.load_workbook(
         BytesIO(
             to_xlsx_bytes(

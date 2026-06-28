@@ -227,9 +227,11 @@ Reports and Exports can also create a Signal Discovery Blockers workbook with:
 
 The same Reports and Exports page also renders a read-only blocker review panel
 with summary cards, by-reason/by-hypothesis/by-archetype/by-ticker/by-scope
-drilldowns, and the highest-scoring blocked rows. The panel reads local signal
-discovery generation artifacts only; it does not run discovery, scanner, FMP
-updates, final-holdout updates, forward updates, or daily-cycle commands.
+drilldowns, and the highest-scoring blocked rows. Highest-scoring blocked rows
+include Candidate Detail links built from the raw generation, ticker, model, and
+direction identifiers. The panel reads local signal discovery generation
+artifacts only; it does not run discovery, scanner, FMP updates, final-holdout
+updates, forward updates, or daily-cycle commands.
 
 ## Current V1 Generation
 
