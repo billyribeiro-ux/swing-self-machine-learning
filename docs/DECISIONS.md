@@ -1,5 +1,23 @@
 # Decision Log
 
+## 2026-06-28 — Expanding KMeans regime features use an exact-output cache
+
+Decision: Add `expanding_kmeans_regime_cache_v1` around the existing
+per-date expanding KMeans regime calculation. The cache stores exact historical
+`market_regime_cluster_expanding` labels under ignored `data/cache/regime/`
+only after recording the universe snapshot, symbol set, date ordering, regime
+input columns, KMeans parameters, random seed, no-scaling preprocessing policy,
+minimum sample requirement, input-prefix hash, full-input hash, output hash,
+covered dates, and timestamps. A valid unchanged prefix can reuse cached
+historical labels and compute only later dates with the same expanding refit
+semantics. Any validation failure, forced rebuild, or historical-prefix change
+falls back to full recompute and rewrites the cache atomically.
+
+Reason: Read-only equivalence research rejected less-frequent KMeans refit
+schedules as `TOO_DIFFERENT`, so the optimization must not change refit cadence
+or regime labels. Exact caching reduces routine feature-build runtime while
+preserving the current chronology-safe one-fit-per-eligible-date behavior.
+
 ## 2026-06-27 — Dashboard navigation is signal-first
 
 Decision: Refactor the Streamlit Command Center visible navigation into a

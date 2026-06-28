@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Exact Expanding KMeans Regime Cache V1 for `build-features`: the feature builder now atomically caches exact per-date expanding KMeans regime labels under ignored `data/cache/regime/`, validates all frozen inputs before reuse, supports `--rebuild-regime-cache` / `SWING_RSI_REBUILD_REGIME_CACHE=1`, and reports cache status, fits avoided, fits performed, and regime runtime without changing the feature manifest.
 - Batched feature-builder column construction to eliminate pandas DataFrame fragmentation warnings during `build-features` while preserving feature rows, label rows, modeling rows, feature values, column order, and the feature manifest hash.
 - Normalized dashboard/report export tables before CSV/XLSX/Arrow serialization so mixed diagnostic columns such as `Value` no longer fail with PyArrow `Expected bytes, got numpy.int64`, while genuine numeric/date columns remain typed and secrets stay redacted.
 - Fixed Signal Board default visibility so zero-live states still show shadow/paper rows, pending entries, open/closed shadow positions, and section-level row counts while rejected/research candidates stay collapsed until explicitly enabled.
