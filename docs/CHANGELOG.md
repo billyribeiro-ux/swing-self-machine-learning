@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Normalized dashboard/report export tables before CSV/XLSX/Arrow serialization so mixed diagnostic columns such as `Value` no longer fail with PyArrow `Expected bytes, got numpy.int64`, while genuine numeric/date columns remain typed and secrets stay redacted.
 - Fixed Signal Board default visibility so zero-live states still show shadow/paper rows, pending entries, open/closed shadow positions, and section-level row counts while rejected/research candidates stay collapsed until explicitly enabled.
 - Added row-level Signal Board links that open Candidate Detail with the matching scan ID, ticker, model ID, and direction preselected through query parameters.
 - Refactored the Streamlit Command Center into a Signal-First Trading Research Dashboard V1 with Signal Board as the home page, explicit live/shadow/rejected/pending/open/closed labels, model edge statuses, scanner-candidate wording, complete engine snapshot export, disabled discovery/promotion/final-holdout-init/forward-update controls, and AppTest coverage for signal-first behavior and page-load safety.

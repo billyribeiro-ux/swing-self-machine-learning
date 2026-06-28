@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import sys
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import openpyxl
 import pandas as pd
 import pytest
 
 from swing_rsi.application.dashboard_exports import (
+    normalize_table_for_export,
     save_xlsx_report,
     to_csv_bytes,
     to_xlsx_bytes,
@@ -522,6 +525,84 @@ def test_exports_create_csv_and_xlsx_without_secrets(tmp_path: Path) -> None:
     assert set(workbook.sheetnames) == {"models", "gates"}
     assert workbook["models"]["A1"].value == "model_id"
     assert "secret" not in workbook_path.read_bytes().decode("latin1", errors="ignore")
+
+
+def test_mixed_value_export_normalization_is_arrow_safe(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "Metric": [
+                "text",
+                "int",
+                "float",
+                "bool",
+                "none",
+                "nan",
+                "positive_inf",
+                "negative_inf",
+                "secret",
+            ],
+            "Value": [
+                "alpha",
+                np.int64(7),
+                3.25,
+                True,
+                None,
+                np.nan,
+                np.inf,
+                -np.inf,
+                "FMP_API_KEY=super-secret",
+            ],
+        }
+    )
+
+    normalized = normalize_table_for_export(frame)
+
+    assert str(normalized["Value"].dtype) == "string"
+    values = normalized["Value"].tolist()
+    assert "0" not in values
+    assert "Not available" in values
+    assert "∞" in values
+    assert "-∞" in values
+    assert "7" in values
+    assert "3.25" in values
+    assert "True" in values
+    assert not any("FMP_API_KEY" in value or "super-secret" in value for value in values)
+
+    csv_bytes = to_csv_bytes(frame)
+    assert b"Not available" in csv_bytes
+    assert b"FMP_API_KEY" not in csv_bytes
+    assert b"super-secret" not in csv_bytes
+
+    xlsx_bytes = to_xlsx_bytes({"mixed": frame})
+    workbook_path = tmp_path / "mixed.xlsx"
+    workbook_path.write_bytes(xlsx_bytes)
+    workbook = openpyxl.load_workbook(workbook_path)
+    sheet_values = [cell.value for cell in workbook["mixed"]["B"][1:]]
+    assert "Not available" in sheet_values
+    assert "∞" in sheet_values
+    assert "-∞" in sheet_values
+
+    parquet_buffer = BytesIO()
+    normalized.to_parquet(parquet_buffer, index=False)
+    parquet_buffer.seek(0)
+    round_trip = pd.read_parquet(parquet_buffer)
+    assert round_trip["Value"].tolist() == values
+
+
+def test_export_normalization_preserves_numeric_tables() -> None:
+    frame = pd.DataFrame(
+        {
+            "metric": ["a", "b", "c"],
+            "value": [1, 2, 3],
+            "rate": [0.1, np.nan, 0.3],
+        }
+    )
+
+    normalized = normalize_table_for_export(frame)
+
+    assert pd.api.types.is_integer_dtype(normalized["value"])
+    assert pd.api.types.is_float_dtype(normalized["rate"])
+    assert pd.isna(normalized.loc[1, "rate"])
 
 
 def test_save_xlsx_report_uses_ignored_dashboard_export_directory(tmp_path: Path) -> None:

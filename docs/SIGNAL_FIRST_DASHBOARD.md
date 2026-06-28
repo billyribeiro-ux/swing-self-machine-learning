@@ -122,9 +122,16 @@ src/swing_rsi/application/dashboard_exports.py
 
 Reusable helpers:
 
+- `normalize_table_for_export(...)`
 - `to_csv_bytes(...)`
 - `to_xlsx_bytes(...)`
 - `save_xlsx_report(...)`
+
+All CSV/XLSX workbook exports normalize tables before serialization. Numeric
+tables stay numeric, date columns stay date-like, and mixed diagnostic display
+columns such as `Value`, `Actual`, and `Threshold` become redacted strings. This
+prevents Arrow/Parquet conversion failures from mixed object values without
+turning unavailable values into zeros.
 
 The Reports and Exports page includes `Export Complete Engine Snapshot`, which
 saves an XLSX workbook under:

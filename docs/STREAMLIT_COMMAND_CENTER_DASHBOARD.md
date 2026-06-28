@@ -88,9 +88,18 @@ FMP is not contacted on page load. If no key is configured, the dashboard shows 
 
 Reusable helpers live in `src/swing_rsi/application/dashboard_exports.py`:
 
+- `normalize_table_for_export(...)`
 - `to_csv_bytes(...)`
 - `to_xlsx_bytes(...)`
 - `save_xlsx_report(...)`
+
+All dashboard tables pass through `normalize_table_for_export(...)` before CSV
+or XLSX serialization. The helper preserves genuinely numeric and date columns,
+but converts mixed display columns such as `Value`, `Actual`, `Threshold`,
+`Reason`, and `Status` to safe strings so Streamlit/Arrow, CSV, XLSX, and
+Parquet diagnostics do not fail on mixed Python object values. Missing display
+values remain `Not available`, and infinities remain distinguishable as `∞` and
+`-∞`.
 
 XLSX exports use `openpyxl`, freeze the header row, enable filters, apply readable widths, and redact API-key-like content. Generated dashboard workbooks are saved under:
 
