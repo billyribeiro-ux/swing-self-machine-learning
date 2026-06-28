@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a Candidate Detail Missing Evidence Audit badge that counts unavailable footprint evidence rows by category.
 - Added Footprint Attribution V1 evidence quantification in Candidate Detail, including measured footprint tables, supporting/conflicting evidence, analog outcomes, residual/unexplained attribution, compact Signal Board footprint summaries, and CSV/XLSX footprint export sheets.
 - Added a Candidate Detail deep-link copy block and `deep_link` workbook sheet built from full raw scan/model/run/event identifiers.
 - Added a Candidate Detail `Full Raw Identifiers` copy block and `raw_identifiers` workbook sheet so full scan/model/run/event identifiers remain easy to audit after Signal Board friendly formatting.

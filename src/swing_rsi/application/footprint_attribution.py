@@ -37,6 +37,13 @@ FOOTPRINT_DISPLAY_COLUMNS = [
     "Evidence Type",
     "Strength",
 ]
+MISSING_EVIDENCE_AUDIT_COLUMNS = [
+    "Category",
+    "Unavailable Evidence Rows",
+    "Total Evidence Rows",
+    "Unavailable Share",
+    "Status",
+]
 ANALOG_COLUMNS = [
     "analog_date",
     "symbol",
@@ -125,6 +132,50 @@ def signal_board_footprint_summary(row: pd.Series) -> str:
     if "broad_market" in role:
         return "Broad-market ETF footprint"
     return "Model evidence footprint"
+
+
+def missing_evidence_audit_frame(evidence: pd.DataFrame) -> pd.DataFrame:
+    if evidence.empty:
+        return pd.DataFrame(
+            [
+                {
+                    "Category": "All categories",
+                    "Unavailable Evidence Rows": 0,
+                    "Total Evidence Rows": 0,
+                    "Unavailable Share": "0.00%",
+                    "Status": "No footprint evidence rows",
+                }
+            ],
+            columns=MISSING_EVIDENCE_AUDIT_COLUMNS,
+        )
+    frame = evidence.copy()
+    for column in FOOTPRINT_EVIDENCE_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = ""
+    missing = (
+        frame["Missing Data Status"].astype(str).eq(EVIDENCE_UNAVAILABLE)
+        | frame["Evidence"].astype(str).eq(EVIDENCE_UNAVAILABLE)
+        | frame["Value"].astype(str).eq(EVIDENCE_UNAVAILABLE)
+    )
+    audit_rows = []
+    for category, group in frame.assign(_missing=missing).groupby("Category", sort=True):
+        total = len(group)
+        unavailable = int(group["_missing"].sum())
+        share = unavailable / total if total else 0.0
+        audit_rows.append(
+            {
+                "Category": str(category),
+                "Unavailable Evidence Rows": unavailable,
+                "Total Evidence Rows": total,
+                "Unavailable Share": _format_percent(share),
+                "Status": "Evidence unavailable" if unavailable else "Complete",
+            }
+        )
+    audit = pd.DataFrame(audit_rows, columns=MISSING_EVIDENCE_AUDIT_COLUMNS)
+    return audit.sort_values(
+        ["Unavailable Evidence Rows", "Category"],
+        ascending=[False, True],
+    ).reset_index(drop=True)
 
 
 def _latest_feature_frame(root: Path) -> pd.DataFrame:

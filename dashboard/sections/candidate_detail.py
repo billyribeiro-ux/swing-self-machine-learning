@@ -12,6 +12,7 @@ from swing_rsi.application.dashboard_service import candidate_detail_url, scanne
 from swing_rsi.application.footprint_attribution import (
     FOOTPRINT_DISPLAY_COLUMNS,
     footprint_evidence_frames,
+    missing_evidence_audit_frame,
 )
 
 
@@ -291,6 +292,33 @@ def _footprint_summary_text(summary: pd.DataFrame) -> str:
     ).strip()
 
 
+def _render_missing_evidence_audit(audit: pd.DataFrame) -> None:
+    streamlit = st()
+    unavailable = 0
+    affected = 0
+    top_category = "None"
+    if not audit.empty and "Unavailable Evidence Rows" in audit.columns:
+        counts = pd.to_numeric(audit["Unavailable Evidence Rows"], errors="coerce").fillna(0)
+        unavailable = int(counts.sum())
+        affected = int((counts > 0).sum())
+        if unavailable:
+            top_category = str(audit.iloc[int(counts.idxmax())]["Category"])
+    columns = streamlit.columns(3)
+    columns[0].metric("Missing evidence rows", f"{unavailable:,}")
+    columns[1].metric("Categories affected", f"{affected:,}")
+    columns[2].metric("Top missing category", top_category)
+    if unavailable:
+        streamlit.warning(
+            "Evidence unavailable rows are explicit; missing data is not treated as confirmed."
+        )
+    else:
+        streamlit.success(
+            "Missing evidence audit: all displayed footprint evidence rows have values."
+        )
+    with streamlit.expander("Missing Evidence Audit", expanded=bool(unavailable)):
+        streamlit.dataframe(display_frame(audit), width="stretch", hide_index=True)
+
+
 def render_page() -> None:
     streamlit = st()
     root = repository_root()
@@ -319,6 +347,7 @@ def render_page() -> None:
     deep_link = _candidate_detail_deep_link(identifiers)
     deep_link_export = _deep_link_frame(deep_link)
     footprint = footprint_evidence_frames(root, candidate)
+    missing_audit = missing_evidence_audit_frame(footprint.evidence)
     summary = _summary_frame(candidate)
     checks = _checks_frame(candidate)
     attribution = _attribution_frame(candidate)
@@ -327,6 +356,7 @@ def render_page() -> None:
     risk = _risk_frame(candidate)
 
     streamlit.info(_footprint_summary_text(footprint.summary))
+    _render_missing_evidence_audit(missing_audit)
 
     streamlit.subheader("Full Raw Identifiers")
     with streamlit.expander("Full Raw Identifier Copy Block", expanded=False):

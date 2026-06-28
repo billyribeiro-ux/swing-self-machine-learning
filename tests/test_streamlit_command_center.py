@@ -43,6 +43,7 @@ from swing_rsi.application.dashboard_service import (
 from swing_rsi.application.footprint_attribution import (
     EVIDENCE_UNAVAILABLE,
     footprint_evidence_frames,
+    missing_evidence_audit_frame,
 )
 from swing_rsi.data.loader import save_ohlcv_csv
 from swing_rsi.engine.gates import make_gate
@@ -725,6 +726,10 @@ def test_signal_board_detail_links_preselect_candidate_detail(
     assert "Conflicting Evidence" in subheaders
     assert "Historical Analogs" in subheaders
     assert "Residual / Unexplained" in subheaders
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert "Missing evidence rows" in metrics
+    assert "Categories affected" in metrics
+    assert "Top missing category" in metrics
 
 
 def test_candidate_detail_raw_identifier_copy_block_and_exports(
@@ -938,6 +943,27 @@ def test_footprint_evidence_quantifies_tza_shadow_candidate(tmp_path: Path) -> N
     assert relationship["Evidence Type"] == "supportive"
     assert not frames.conflicting_evidence.empty
     assert not frames.residual_unexplained.empty
+
+
+def test_missing_evidence_audit_counts_unavailable_rows_by_category(tmp_path: Path) -> None:
+    candidate = pd.Series(
+        {
+            "ticker": "TZA",
+            "direction": "Bullish",
+            "as_of_date": "2026-06-26",
+            "status": "PENDING ENTRY",
+        }
+    )
+    frames = footprint_evidence_frames(tmp_path, candidate)
+    audit = missing_evidence_audit_frame(frames.evidence)
+
+    assert not audit.empty
+    assert audit["Unavailable Evidence Rows"].sum() > 0
+    assert audit["Status"].eq("Evidence unavailable").any()
+    inverse = audit.loc[audit["Category"] == "Expanding inverse ETF strength"].iloc[0]
+    assert inverse["Unavailable Evidence Rows"] > 0
+    assert inverse["Total Evidence Rows"] > 0
+    assert str(inverse["Unavailable Share"]).endswith("%")
 
 
 def test_footprint_analogs_conflicts_residual_and_exports(tmp_path: Path) -> None:

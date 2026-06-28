@@ -59,11 +59,16 @@ Each row records:
 
 Candidate Detail renders:
 
-1. Footprint Evidence Table
-2. Supporting Evidence
-3. Conflicting Evidence
-4. Historical Analogs
-5. Residual / Unexplained
+1. Missing Evidence Audit badge and category table
+2. Footprint Evidence Table
+3. Supporting Evidence
+4. Conflicting Evidence
+5. Historical Analogs
+6. Residual / Unexplained
+
+The Missing Evidence Audit counts `Evidence unavailable` footprint rows by
+category. Missing measurements remain explicit and are not treated as
+confirmed evidence.
 
 The Signal Board remains compact and shows only a short footprint summary such
 as `Risk-off inverse ETF footprint`.
