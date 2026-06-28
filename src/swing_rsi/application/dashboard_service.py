@@ -362,6 +362,9 @@ def candidate_detail_url(
     ticker: object,
     model_id: object,
     direction: object = "",
+    run_id: object = "",
+    event_id: object = "",
+    status: object = "",
 ) -> str:
     params = {
         key: text
@@ -370,6 +373,9 @@ def candidate_detail_url(
             ("ticker", _clean_text(ticker)),
             ("model_id", _clean_text(model_id)),
             ("direction", _clean_text(direction)),
+            ("run_id", _clean_text(run_id)),
+            ("event_id", _clean_text(event_id)),
+            ("status", _clean_text(status)),
         )
         if text
     }
@@ -645,6 +651,7 @@ def _scanner_rows_from_signal_events(events: pd.DataFrame) -> pd.DataFrame:
         row.setdefault("direction", event.get("direction", ""))
         row.setdefault("model_id", event.get("model_id", ""))
         row.setdefault("feature_snapshot_hash", event.get("feature_snapshot_hash", ""))
+        row["event_id"] = event.get("event_id", "")
         row["event_type"] = event.get("event_type", "")
         row["event_time_utc"] = event.get("event_time_utc", "")
         row["run_id"] = payload.get("run_id", "")
@@ -715,6 +722,16 @@ def _event_payload_value(event: pd.Series | None, *names: str) -> object:
     return NOT_AVAILABLE
 
 
+def _event_value(event: pd.Series | None, name: str) -> object:
+    if event is None:
+        return NOT_AVAILABLE
+    return event.get(name, NOT_AVAILABLE)
+
+
+def _first_event(*events: pd.Series | None) -> pd.Series | None:
+    return next((event for event in events if event is not None), None)
+
+
 def _signal_next_required_event(
     classification: str,
     lifecycle_status: str,
@@ -734,6 +751,24 @@ def _signal_next_required_event(
         reason = _clean_text(rejection_reason)
         return f"Rejected: {reason}" if reason else "Rejected; no entry."
     return "Development research review only; not eligible for live action."
+
+
+def _why_shadow_only(classification: str, lifecycle_status: str) -> str:
+    if lifecycle_status == PENDING_ENTRY:
+        return (
+            "This row is waiting for the next eligible session open. "
+            "It is not a live trade recommendation."
+        )
+    if lifecycle_status == OPEN_SHADOW_POSITION:
+        return (
+            "This shadow position is waiting for target, stop, or time exit. "
+            "It is not a live trade recommendation."
+        )
+    if lifecycle_status == CLOSED:
+        return "This row is closed prospective evidence, not a live trade recommendation."
+    if classification == SHADOW_ONLY:
+        return "Shadow rows are paper-validation events used to collect prospective evidence."
+    return NOT_AVAILABLE
 
 
 def scanner_results_frame(root: str | Path) -> pd.DataFrame:
@@ -846,11 +881,20 @@ def signal_board_frame(root: str | Path) -> pd.DataFrame:
         key = _row_match_key(row)
         pending = event_maps["pending"].get(key)
         filled = event_maps["filled"].get(key)
+        closed = event_maps["closed"].get(key)
+        linked_event = _first_event(pending, filled, closed)
+        event_id = _first_available(_event_value(linked_event, "event_id"), row.get("event_id"))
+        run_id = _first_available(
+            _event_payload_value(linked_event, "run_id"),
+            row.get("run_id"),
+        )
         records.append(
             {
                 "ticker": _display_value(row.get("ticker")),
                 "direction": _display_value(row.get("direction")),
                 "scan_id": _display_value(row.get("scan_id")),
+                "run_id": _display_value(run_id),
+                "event_id": _display_value(event_id),
                 "signal_status": signal_status,
                 "live_shadow_rejected_classification": classification,
                 "edge_status": edge_status,
@@ -884,14 +928,27 @@ def signal_board_frame(root: str | Path) -> pd.DataFrame:
                 "ood_warning": _display_value(row.get("ood_warning")),
                 "gate_status": "PASS" if gate_eligible else "BLOCKED",
                 "rejection_reason": _display_value(row.get("exclusion_reason")),
+                "why_shadow_only": _why_shadow_only(classification, lifecycle),
                 "next_required_event": _signal_next_required_event(
                     classification, lifecycle, row.get("exclusion_reason")
+                ),
+                "open_url": candidate_detail_url(
+                    scan_id=row.get("scan_id"),
+                    ticker=row.get("ticker"),
+                    model_id=model_id,
+                    direction=row.get("direction"),
+                    run_id=run_id,
+                    event_id=event_id,
+                    status=signal_status,
                 ),
                 "candidate_detail_url": candidate_detail_url(
                     scan_id=row.get("scan_id"),
                     ticker=row.get("ticker"),
                     model_id=model_id,
                     direction=row.get("direction"),
+                    run_id=run_id,
+                    event_id=event_id,
+                    status=signal_status,
                 ),
                 "export": False,
             }

@@ -80,9 +80,23 @@ Current signals are research/shadow validation only.
 
 Missing MFE/MAE values display as `Not available`, not zero.
 
-Each Signal Board row includes an `Open detail` link that routes to
-Candidate Detail with `scan_id`, `ticker`, `model_id`, and `direction` query
-parameters. Candidate Detail uses those parameters as selectbox defaults.
+Signal Board defaults to sectioned visibility:
+
+1. Live Actionable Signals
+2. Shadow / Paper Signals
+3. Pending Entries
+4. Open Shadow Positions
+5. Closed / Matured Outcomes
+6. Rejected / Research Candidates
+
+Rejected and research-only candidates are collapsed by default behind `Show
+rejected/research rows`. Shadow, pending, open, and closed rows remain visible
+even when live actionable count is zero.
+
+Each Signal Board row includes an `Open detail` link that routes to Candidate
+Detail with `run_id`, `event_id`, `scan_id`, `ticker`, `model_id`, `direction`,
+and `status` where available. Candidate Detail uses those parameters as
+selectbox defaults.
 
 ## Edge Status
 

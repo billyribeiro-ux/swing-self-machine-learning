@@ -154,48 +154,50 @@ relationships: []
     scanner_dir = tmp_path / "artifacts" / "scanner"
     scanner_dir.mkdir(parents=True)
     scanner_path = scanner_dir / "scan-demo_scanner.csv"
+    rejected_row = {
+        "scan_id": "scan-demo",
+        "as_of_date": "2026-05-26",
+        "ticker": "DEMO",
+        "product_class_scope": "POOLED",
+        "direction": "Bullish",
+        "horizon": 10,
+        "model_id": "model-demo",
+        "calibrated_probability": 0.61,
+        "expected_return": 0.02,
+        "expected_mfe": 0.04,
+        "expected_mae": -0.01,
+        "target_before_stop_probability": 0.55,
+        "candidate_status": "REJECTED",
+        "exclusion_reason": "model_not_promoted; failed_gate",
+        "top_attribution_categories": "Model contribution",
+        "supporting_evidence": "Supporting evidence",
+        "historical_analogs": "[]",
+        "feature_snapshot_hash": "featurehash",
+    }
+    shadow_row = {
+        "scan_id": "scan-demo",
+        "as_of_date": "2026-05-26",
+        "ticker": "DEMO2",
+        "product_class_scope": "POOLED",
+        "direction": "Bullish",
+        "horizon": 10,
+        "model_id": "model-demo",
+        "calibrated_probability": 0.63,
+        "expected_return": 0.03,
+        "expected_mfe": None,
+        "expected_mae": None,
+        "target_before_stop_probability": 0.57,
+        "candidate_status": "ACTIONABLE_PAPER_CANDIDATE",
+        "exclusion_reason": "",
+        "top_attribution_categories": "Model contribution",
+        "supporting_evidence": "Supporting evidence",
+        "historical_analogs": "[]",
+        "feature_snapshot_hash": "featurehash",
+    }
     pd.DataFrame(
         [
-            {
-                "scan_id": "scan-demo",
-                "as_of_date": "2026-05-26",
-                "ticker": "DEMO",
-                "product_class_scope": "POOLED",
-                "direction": "Bullish",
-                "horizon": 10,
-                "model_id": "model-demo",
-                "calibrated_probability": 0.61,
-                "expected_return": 0.02,
-                "expected_mfe": 0.04,
-                "expected_mae": -0.01,
-                "target_before_stop_probability": 0.55,
-                "candidate_status": "REJECTED",
-                "exclusion_reason": "model_not_promoted; failed_gate",
-                "top_attribution_categories": "Model contribution",
-                "supporting_evidence": "Supporting evidence",
-                "historical_analogs": "[]",
-                "feature_snapshot_hash": "featurehash",
-            },
-            {
-                "scan_id": "scan-demo",
-                "as_of_date": "2026-05-26",
-                "ticker": "DEMO2",
-                "product_class_scope": "POOLED",
-                "direction": "Bullish",
-                "horizon": 10,
-                "model_id": "model-demo",
-                "calibrated_probability": 0.63,
-                "expected_return": 0.03,
-                "expected_mfe": None,
-                "expected_mae": None,
-                "target_before_stop_probability": 0.57,
-                "candidate_status": "ACTIONABLE_PAPER_CANDIDATE",
-                "exclusion_reason": "",
-                "top_attribution_categories": "Model contribution",
-                "supporting_evidence": "Supporting evidence",
-                "historical_analogs": "[]",
-                "feature_snapshot_hash": "featurehash",
-            },
+            rejected_row,
+            shadow_row,
         ]
     ).to_csv(scanner_path, index=False)
     with engine_connection(db) as connection:
@@ -271,6 +273,48 @@ relationships: []
                 json.dumps({"feature_manifest_hash": "featurehash"}),
             ),
         )
+        shadow_payload = {
+            "run_id": "run-demo",
+            "mode": "SHADOW_FINAL_HOLDOUT",
+            "not_live_trade_recommendation": True,
+            "scanner_row": shadow_row,
+            "entry_rule": "next_completed_session_open",
+            "planned_entry_date": "2026-05-27",
+            "expected_return": shadow_row["expected_return"],
+            "expected_mfe": shadow_row["expected_mfe"],
+            "expected_mae": shadow_row["expected_mae"],
+            "target_before_stop_probability": shadow_row["target_before_stop_probability"],
+        }
+        for event_id, unique_key, event_type in (
+            (
+                "signal-demo2-event",
+                "signal|scan-demo|DEMO2|Bullish|model-demo",
+                "FINAL_HOLDOUT_SIGNAL_CREATED",
+            ),
+            (
+                "pending-demo2-event",
+                "pending|scan-demo|DEMO2|Bullish|model-demo",
+                "FINAL_HOLDOUT_ENTRY_PENDING",
+            ),
+        ):
+            connection.execute(
+                """
+                INSERT INTO forward_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    unique_key,
+                    event_type,
+                    "2026-06-27T12:45:00+00:00",
+                    "2026-05-26",
+                    "DEMO2",
+                    "Bullish",
+                    "model-demo",
+                    "scan-demo",
+                    "featurehash",
+                    json.dumps(shadow_payload),
+                ),
+            )
     monkeypatch.setattr("dashboard.ui.components.resolve_project_root", lambda _: tmp_path)
 
     def fail_download(*_: object, **__: object) -> None:
@@ -355,15 +399,52 @@ def test_signal_first_tables_label_live_shadow_and_missing_paths(
     scanner = scanner_results_frame(command_center_root)
 
     assert metrics["live_actionable_signals"] == 0
+    assert metrics["shadow_paper_signals"] == 1
+    assert metrics["pending_entries"] == 1
     assert "REJECTED" in set(board["live_shadow_rejected_classification"])
     assert "SHADOW ONLY" in set(board["live_shadow_rejected_classification"])
     shadow = board.loc[board["ticker"].astype(str) == "DEMO2"].iloc[0]
+    assert shadow["signal_status"] == "PENDING ENTRY"
     assert shadow["expected_mfe"] == "Not available"
     assert shadow["expected_mae"] == "Not available"
+    assert shadow["next_required_event"] == "Pending entry waits for next session open."
+    assert (
+        shadow["why_shadow_only"] == "This row is waiting for the next eligible session open. "
+        "It is not a live trade recommendation."
+    )
     joined = " ".join(scanner.astype(str).stack().tolist())
     assert "Trade signal" not in joined
     rejected = scanner.loc[scanner["candidate_classification"].astype(str) == "REJECTED"]
     assert not rejected.empty
+
+
+def test_signal_board_default_sections_keep_shadow_and_pending_visible(
+    command_center_root: Path,
+) -> None:
+    db = command_center_root / "state" / "engine.sqlite3"
+    before_db = db.read_bytes()
+
+    app = AppTest.from_file("dashboard/sections/signal_board.py").run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert db.read_bytes() == before_db
+    assert app.toggle[0].label == "Show rejected/research rows"
+    assert app.toggle[0].value is False
+    subheaders = {subheader.value for subheader in app.subheader}
+    assert "Live Actionable Signals: 0 rows" in subheaders
+    assert "Shadow / Paper Signals: 1 row" in subheaders
+    assert "Pending Entries: 1 row" in subheaders
+    assert "Open Shadow Positions: 0 rows" in subheaders
+    assert "Closed / Matured Outcomes: 0 rows" in subheaders
+    assert any(
+        "No live actionable signals. Shadow and pending rows remain visible below." in info.value
+        for info in app.info
+    )
+    assert any(
+        "This row is waiting for the next eligible session open. "
+        "It is not a live trade recommendation." in info.value
+        for info in app.info
+    )
 
 
 def test_signal_board_detail_links_preselect_candidate_detail(
@@ -377,8 +458,17 @@ def test_signal_board_detail_links_preselect_candidate_detail(
         ticker="DEMO2",
         model_id="model-demo",
         direction="Bullish",
+        run_id="run-demo",
+        event_id="pending-demo2-event",
+        status="PENDING ENTRY",
     )
+    assert linked["open_url"] == linked["candidate_detail_url"]
     assert linked["candidate_detail_url"].startswith("/candidate-detail?")
+    assert "run_id=run-demo" in linked["open_url"]
+    assert "event_id=pending-demo2-event" in linked["open_url"]
+    assert "model_id=model-demo" in linked["open_url"]
+    assert "ticker=DEMO2" in linked["open_url"]
+    assert "direction=Bullish" in linked["open_url"]
 
     app = AppTest.from_file("dashboard/sections/candidate_detail.py")
     app.query_params["scan_id"] = "scan-demo"

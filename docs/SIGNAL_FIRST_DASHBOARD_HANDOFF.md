@@ -48,6 +48,18 @@ No promoted live scanner model exists yet.
 Current signals are research/shadow validation only.
 ```
 
+Signal Board default sections are:
+
+1. Live Actionable Signals
+2. Shadow / Paper Signals
+3. Pending Entries
+4. Open Shadow Positions
+5. Closed / Matured Outcomes
+6. Rejected / Research Candidates
+
+Rejected/research candidates are collapsed by default. Shadow and pending rows
+remain visible when there are zero live actionable rows.
+
 ## Edge Status Definitions
 
 - `RESEARCH ONLY`: model exists but failed development gates or is diagnostic only.
@@ -116,10 +128,13 @@ runner refuses the operational repository.
 Signal Board rows include an `Open detail` URL in the rendered table. The URL
 uses query parameters:
 
+- `run_id`
+- `event_id`
 - `scan_id`
 - `ticker`
 - `model_id`
 - `direction`
+- `status`
 
 Candidate Detail reads those parameters and preselects the matching scan,
 ticker, and model controls while preserving manual selector use.
@@ -136,9 +151,12 @@ Added or updated coverage proves:
   Diagnostics load through Streamlit AppTest.
 - Page loads do not contact FMP and do not mutate SQLite, scanner CSV, or model artifacts.
 - Live actionable count is zero when no model is promoted.
+- Signal Board still shows shadow and pending rows when live actionable count is zero.
+- Rejected/research rows are collapsed by default.
 - Rejected scanner rows are not labeled `Trade signal`.
 - Shadow rows are labeled `SHADOW ONLY`.
 - Missing MFE/MAE displays as `Not available`.
+- Pending rows include the next required event and Open link identifiers.
 - Signal Board links preselect Candidate Detail through query parameters.
 - Complete engine snapshot XLSX opens with `openpyxl` and contains required sheets.
 - Command buttons require confirmation.

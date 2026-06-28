@@ -12,9 +12,38 @@ from dashboard.ui.components import (
 from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_service import (
+    CLOSED,
     LIVE_ACTIONABLE,
+    OPEN_SHADOW_POSITION,
+    PENDING_ENTRY,
+    REJECTED,
+    RESEARCH_ONLY,
+    SHADOW_ONLY,
     signal_board_frame,
     signal_board_metrics,
+)
+
+SIGNAL_COLUMNS: tuple[str, ...] = (
+    "ticker",
+    "direction",
+    "model_id",
+    "generation",
+    "run_id",
+    "event_id",
+    "edge_status",
+    "signal_status",
+    "live_shadow_rejected_classification",
+    "as_of_date",
+    "pending_entry_date",
+    "entry_rule",
+    "expected_return",
+    "expected_mfe",
+    "expected_mae",
+    "target_before_stop_probability",
+    "ood_warning",
+    "why_shadow_only",
+    "next_required_event",
+    "open_url",
 )
 
 
@@ -58,6 +87,48 @@ def _filtered(frame: pd.DataFrame) -> pd.DataFrame:
         if values:
             filtered = filtered.loc[filtered[column].astype(str).isin(values)]
     return filtered
+
+
+def _section_frame(frame: pd.DataFrame, mask: pd.Series) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    return frame.loc[mask.reindex(frame.index, fill_value=False)].copy()
+
+
+def _display_section(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [column for column in SIGNAL_COLUMNS if column in frame.columns]
+    display = display_frame(frame[columns]).rename(columns={"Open Url": "Open"})
+    return display
+
+
+def _row_count_label(count: int) -> str:
+    return f"{count:,} row" if count == 1 else f"{count:,} rows"
+
+
+def _render_section(title: str, frame: pd.DataFrame, *, empty_message: str) -> None:
+    streamlit = st()
+    streamlit.subheader(f"{title}: {_row_count_label(len(frame))}")
+    if frame.empty:
+        streamlit.info(empty_message)
+        return
+    display = _display_section(frame)
+    column_config = {}
+    if "Open" in display.columns:
+        column_config["Open"] = streamlit.column_config.LinkColumn(
+            "Open",
+            display_text="Open detail",
+        )
+    streamlit.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        column_config=column_config,
+    )
+    render_table_downloads(
+        frame,
+        basename=title.lower().replace("/", "").replace(" ", "_"),
+        label=title.lower().replace("/", "").replace(" ", "_"),
+    )
 
 
 def render_page() -> None:
@@ -111,6 +182,15 @@ def render_page() -> None:
             "No scanner candidates, shadow events, or signal rows are available locally."
         )
         return
+    streamlit.info(
+        "Live actionable signals require a promoted model. No model is promoted yet. "
+        "Shadow rows are paper-validation events used to collect prospective evidence."
+    )
+    show_rejected_research = streamlit.toggle(
+        "Show rejected/research rows",
+        value=False,
+        help="Off by default so shadow, pending, open, and closed rows stay visible first.",
+    )
     filtered = _filtered(frame)
     live_count = int(
         (
@@ -119,22 +199,68 @@ def render_page() -> None:
         ).sum()
     )
     if live_count == 0:
-        streamlit.info("No live actionable scanner rows are present in the current local state.")
+        streamlit.info("No live actionable signals. Shadow and pending rows remain visible below.")
 
-    streamlit.subheader("Signal Board")
-    display = display_frame(filtered).rename(columns={"Candidate Detail Url": "Candidate Detail"})
-    column_config = {}
-    if "Candidate Detail" in display.columns:
-        column_config["Candidate Detail"] = streamlit.column_config.LinkColumn(
-            "Candidate Detail",
-            display_text="Open detail",
-        )
-    streamlit.dataframe(
-        display,
-        width="stretch",
-        hide_index=True,
-        column_config=column_config,
+    classification = filtered.get(
+        "live_shadow_rejected_classification", pd.Series(dtype=str, index=filtered.index)
+    ).astype(str)
+    signal_status = filtered.get(
+        "signal_status", pd.Series(dtype=str, index=filtered.index)
+    ).astype(str)
+    live = _section_frame(filtered, classification == LIVE_ACTIONABLE)
+    shadow = _section_frame(filtered, classification == SHADOW_ONLY)
+    pending = _section_frame(filtered, signal_status == PENDING_ENTRY)
+    open_positions = _section_frame(filtered, signal_status == OPEN_SHADOW_POSITION)
+    closed = _section_frame(filtered, signal_status == CLOSED)
+    rejected_research = _section_frame(
+        filtered,
+        classification.isin([REJECTED, RESEARCH_ONLY]),
     )
+
+    _render_section(
+        "Live Actionable Signals",
+        live,
+        empty_message="No promoted live scanner signals are currently available.",
+    )
+    _render_section(
+        "Shadow / Paper Signals",
+        shadow,
+        empty_message="No shadow or paper-validation rows match the current filters.",
+    )
+    if not pending.empty:
+        streamlit.info(
+            "This row is waiting for the next eligible session open. "
+            "It is not a live trade recommendation."
+        )
+    _render_section(
+        "Pending Entries",
+        pending,
+        empty_message="No pending shadow entries match the current filters.",
+    )
+    _render_section(
+        "Open Shadow Positions",
+        open_positions,
+        empty_message="No open shadow positions match the current filters.",
+    )
+    _render_section(
+        "Closed / Matured Outcomes",
+        closed,
+        empty_message="No closed or matured shadow outcomes match the current filters.",
+    )
+
+    with streamlit.expander(
+        f"Rejected / Research Candidates: {_row_count_label(len(rejected_research))}",
+        expanded=show_rejected_research,
+    ):
+        if show_rejected_research:
+            _render_section(
+                "Rejected / Research Candidates",
+                rejected_research,
+                empty_message="No rejected or research-only rows match the current filters.",
+            )
+        else:
+            streamlit.caption("Enable Show rejected/research rows to inspect these candidates.")
+
     render_table_downloads(filtered, basename="signal_board", label="signal_board")
 
 
