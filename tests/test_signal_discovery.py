@@ -15,9 +15,11 @@ from swing_rsi.engine.signal_discovery import (
     SIGNAL_DISCOVERY_SCHEMA_VERSION,
     default_archetype_registry,
     default_hypothesis_registry,
+    export_signal_discovery_blocker_report,
     export_signal_discovery_generation,
     load_signal_discovery_frames,
     run_signal_discovery,
+    signal_discovery_blocker_report_frames,
 )
 
 
@@ -317,6 +319,55 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
         "rejected_rows",
         "footprint_evidence",
         "historical_analogs",
+    }.issubset(set(workbook.sheetnames))
+
+
+def test_signal_discovery_blocker_report_summarizes_reasons_and_groups(
+    signal_discovery_root: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    root, config = signal_discovery_root
+    run_signal_discovery(root, config_path=config)
+    report = signal_discovery_blocker_report_frames(root)
+
+    assert not report["summary"].empty
+    assert not report["blocker_rows"].empty
+    assert not report["by_reason"].empty
+    assert not report["by_hypothesis"].empty
+    assert not report["by_archetype"].empty
+    assert not report["by_ticker"].empty
+    assert not report["by_scope"].empty
+    assert {"NO_SIGNAL", "REJECTED_BY_POLICY"}.intersection(
+        set(report["blocker_rows"]["decision"].astype(str))
+    )
+    assert "blocker_reason" in report["by_reason"].columns
+    assert "hypothesis_id" in report["by_hypothesis"].columns
+    assert "archetype" in report["by_archetype"].columns
+    assert "ticker" in report["by_ticker"].columns
+    assert "product_class_scope" in report["by_scope"].columns
+    assert report["summary"]["blocker_rows"].iloc[0] == len(report["blocker_rows"])
+
+    output_dir = tmp_path / "blocker_export"
+    written = export_signal_discovery_blocker_report(
+        root,
+        generation="latest",
+        output=output_dir,
+    )
+    names = {path.name for path in written}
+    workbook = openpyxl.load_workbook(BytesIO(to_xlsx_bytes(report)))
+
+    assert "by_reason.csv" in names
+    assert "blocker_rows.csv" in names
+    assert "metadata.json" in names
+    assert {
+        "summary",
+        "metadata",
+        "blocker_rows",
+        "by_reason",
+        "by_hypothesis",
+        "by_archetype",
+        "by_ticker",
+        "by_scope",
     }.issubset(set(workbook.sheetnames))
 
 

@@ -12,6 +12,7 @@ from swing_rsi.application.engine_service import (
     build_autonomous_features,
     evaluate_final_holdout,
     export_multi_angle_signal_discovery,
+    export_multi_angle_signal_discovery_blockers,
     final_holdout_status,
     forward_events,
     initialize_final_holdout,
@@ -22,6 +23,7 @@ from swing_rsi.application.engine_service import (
     run_live_scanner,
     run_model_discovery,
     run_multi_angle_signal_discovery,
+    signal_discovery_blocker_report,
     signal_discovery_status,
     update_final_holdout,
     update_universe_data,
@@ -337,6 +339,33 @@ def command_signal_discovery_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_signal_discovery_blockers(args: argparse.Namespace) -> int:
+    report = signal_discovery_blocker_report(Path.cwd(), generation=args.generation)
+    summary = report["summary"]
+    by_reason = report["by_reason"]
+    if summary.empty:
+        print("No signal discovery blocker report is available.")
+        return 0
+    print("Signal discovery blocker report")
+    print(summary.to_string(index=False))
+    if not by_reason.empty:
+        print("\nTop blocker reasons")
+        print(by_reason.head(args.limit).to_string(index=False))
+    return 0
+
+
+def command_signal_discovery_blockers_export(args: argparse.Namespace) -> int:
+    written = export_multi_angle_signal_discovery_blockers(
+        Path.cwd(),
+        generation=args.generation,
+        output=args.output,
+    )
+    print(f"Exported {len(written):,} signal discovery blocker report files to {args.output}")
+    for path in written:
+        print(f"- {path}")
+    return 0
+
+
 def command_model_registry(_: argparse.Namespace) -> int:
     models = list_registered_models(Path.cwd())
     if not models:
@@ -583,6 +612,22 @@ def build_parser() -> argparse.ArgumentParser:
     signal_export.add_argument("--generation", default="latest")
     signal_export.add_argument("--output", required=True)
     signal_export.set_defaults(handler=command_signal_discovery_export)
+
+    signal_blockers = subparsers.add_parser(
+        "signal-discovery-blockers",
+        help="Summarize NO_SIGNAL and rejected signal discovery blockers",
+    )
+    signal_blockers.add_argument("--generation", default="latest")
+    signal_blockers.add_argument("--limit", type=int, default=10)
+    signal_blockers.set_defaults(handler=command_signal_discovery_blockers)
+
+    signal_blockers_export = subparsers.add_parser(
+        "signal-discovery-blockers-export",
+        help="Export signal discovery blocker summary sheets",
+    )
+    signal_blockers_export.add_argument("--generation", default="latest")
+    signal_blockers_export.add_argument("--output", required=True)
+    signal_blockers_export.set_defaults(handler=command_signal_discovery_blockers_export)
 
     registry = subparsers.add_parser("model-registry", help="List registered models")
     registry.set_defaults(handler=command_model_registry)

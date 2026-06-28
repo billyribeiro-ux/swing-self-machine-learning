@@ -16,6 +16,7 @@ from swing_rsi.application.dashboard_service import (
     save_complete_engine_snapshot,
     scanner_rows_frame,
     scanner_snapshot_list_frame,
+    signal_discovery_blocker_frames,
     signal_discovery_generation_frames,
 )
 
@@ -118,6 +119,25 @@ def render_page() -> None:
             streamlit.success(f"Saved {output.relative_to(root)}")
     else:
         streamlit.info("No signal discovery generation is available locally.")
+
+    blocker_frames = signal_discovery_blocker_frames(root)
+    blocker_sheets = {name: frame for name, frame in blocker_frames.items() if not frame.empty}
+    streamlit.subheader("Signal Discovery Blockers")
+    if blocker_sheets and not blocker_sheets.get("blocker_rows", pd.DataFrame()).empty:
+        streamlit.dataframe(
+            display_frame(blocker_sheets.get("by_reason", pd.DataFrame()).head(20)),
+            width="stretch",
+            hide_index=True,
+        )
+        if streamlit.button("Create signal discovery blocker workbook"):
+            output = save_xlsx_report(
+                root,
+                "signal_discovery_blockers.xlsx",
+                blocker_sheets,
+            )
+            streamlit.success(f"Saved {output.relative_to(root)}")
+    else:
+        streamlit.info("No NO_SIGNAL or rejected signal discovery blockers are available locally.")
 
     models = registered_models_readonly(root)
     if models:

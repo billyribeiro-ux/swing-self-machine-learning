@@ -48,6 +48,7 @@ from swing_rsi.engine.universe import load_universe_config
 
 SIGNAL_DISCOVERY_SCHEMA_VERSION = "multi_angle_signal_discovery_v1"
 SIGNAL_DISCOVERY_GENERATION_TYPE = "signal_discovery_generation"
+SIGNAL_DISCOVERY_BLOCKER_REPORT_SCHEMA_VERSION = "signal_discovery_blocker_report_v1"
 SIGNAL_DISCOVERY_DIR = "signal_discovery"
 DEFAULT_SIGNAL_DISCOVERY_CONFIG = Path("configs/signal_discovery/v1.yaml")
 
@@ -750,6 +751,250 @@ def export_signal_discovery_generation(
         shutil.copyfile(metadata_source, target)
         written.append(target)
     return tuple(written)
+
+
+def signal_discovery_blocker_report_frames(
+    root: str | Path, generation: str = "latest"
+) -> dict[str, pd.DataFrame]:
+    frames = load_signal_discovery_frames(root, generation=generation)
+    blockers = _signal_discovery_blocker_rows(frames)
+    metadata = _signal_discovery_blocker_metadata(frames, blockers)
+    return {
+        "summary": _signal_discovery_blocker_summary(metadata, blockers),
+        "metadata": metadata,
+        "blocker_rows": blockers,
+        "by_reason": _blocker_group(blockers, ["blocker_reason", "blocker_family"]),
+        "by_hypothesis": _blocker_group(
+            blockers,
+            ["hypothesis_id", "archetype", "action", "blocker_reason"],
+        ),
+        "by_archetype": _blocker_group(blockers, ["archetype", "action", "blocker_reason"]),
+        "by_ticker": _blocker_group(blockers, ["ticker", "blocker_reason"]),
+        "by_scope": _blocker_group(blockers, ["product_class_scope", "blocker_reason"]),
+    }
+
+
+def export_signal_discovery_blocker_report(
+    root: str | Path,
+    *,
+    generation: str = "latest",
+    output: str | Path,
+) -> tuple[Path, ...]:
+    report = signal_discovery_blocker_report_frames(root, generation=generation)
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for name, frame in report.items():
+        path = output_dir / f"{name}.csv"
+        frame.to_csv(path, index=False)
+        written.append(path)
+    metadata_json = output_dir / "metadata.json"
+    metadata_json.write_text(
+        json.dumps(report["metadata"].to_dict(orient="records"), indent=2, default=str),
+        encoding="utf-8",
+    )
+    written.append(metadata_json)
+    return tuple(written)
+
+
+def _signal_discovery_blocker_rows(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    candidates = frames.get("candidates", pd.DataFrame())
+    if candidates.empty:
+        return pd.DataFrame(columns=_blocker_columns())
+    rows: list[dict[str, object]] = []
+    for _, row in candidates.iterrows():
+        decision = str(row.get("decision") or "")
+        candidate_status = str(row.get("candidate_status") or "")
+        is_blocked = decision == "NO_SIGNAL" or decision.startswith("REJECTED")
+        if not is_blocked:
+            continue
+        reason = (
+            str(row.get("rejection_reason") or "").strip()
+            if decision.startswith("REJECTED")
+            else str(row.get("no_signal_reason") or "").strip()
+        )
+        if not reason:
+            reason = decision or candidate_status or "blocker_reason_unavailable"
+        rows.append(
+            {
+                "generation_id": row.get("generation_id", ""),
+                "as_of_date": row.get("as_of_date", ""),
+                "ticker": row.get("ticker", row.get("symbol", "")),
+                "action": row.get("action", ""),
+                "direction": row.get("direction", ""),
+                "archetype": row.get("archetype", ""),
+                "archetype_id": row.get("archetype_id", ""),
+                "hypothesis_id": row.get("hypothesis_id", ""),
+                "model_family": row.get("model_family", row.get("family", "")),
+                "product_class_scope": row.get("product_class_scope", row.get("scope", "")),
+                "decision": decision,
+                "candidate_status": candidate_status,
+                "blocker_reason": reason,
+                "blocker_family": _blocker_family(reason),
+                "signal_score": _as_float(row.get("signal_score"), default=math.nan),
+                "direction_probability": _as_float(
+                    row.get("probability", row.get("calibrated_probability")),
+                    default=math.nan,
+                ),
+                "target_before_stop_probability": _as_float(
+                    row.get("target_before_stop_probability"), default=math.nan
+                ),
+                "expected_return": _as_float(row.get("expected_return"), default=math.nan),
+                "expected_mfe": _as_float(row.get("expected_mfe"), default=math.nan),
+                "expected_mae": _as_float(row.get("expected_mae"), default=math.nan),
+                "ood_feature_rate": _as_float(row.get("ood_feature_rate"), default=math.nan),
+                "next_required_event": row.get("next_required_event", ""),
+            }
+        )
+    return pd.DataFrame(rows, columns=_blocker_columns())
+
+
+def _blocker_columns() -> list[str]:
+    return [
+        "generation_id",
+        "as_of_date",
+        "ticker",
+        "action",
+        "direction",
+        "archetype",
+        "archetype_id",
+        "hypothesis_id",
+        "model_family",
+        "product_class_scope",
+        "decision",
+        "candidate_status",
+        "blocker_reason",
+        "blocker_family",
+        "signal_score",
+        "direction_probability",
+        "target_before_stop_probability",
+        "expected_return",
+        "expected_mfe",
+        "expected_mae",
+        "ood_feature_rate",
+        "next_required_event",
+    ]
+
+
+def _blocker_family(reason: str) -> str:
+    text = reason.lower()
+    if "target_before_stop" in text:
+        return "target_before_stop"
+    if "probability" in text:
+        return "direction_probability"
+    if "expected_value" in text or "expected_return" in text:
+        return "expected_value"
+    if "signal_score" in text:
+        return "signal_score"
+    if "ood" in text:
+        return "ood"
+    if "cap" in text:
+        return "candidate_cap"
+    if "conflict" in text:
+        return "conflict"
+    return "other"
+
+
+def _signal_discovery_blocker_metadata(
+    frames: dict[str, pd.DataFrame], blockers: pd.DataFrame
+) -> pd.DataFrame:
+    metadata = frames.get("metadata", pd.DataFrame())
+    values: dict[str, object] = {
+        "schema_version": SIGNAL_DISCOVERY_BLOCKER_REPORT_SCHEMA_VERSION,
+        "blocker_rows": len(blockers),
+        "distinct_tickers": _distinct_count(blockers, "ticker"),
+        "distinct_hypotheses": _distinct_count(blockers, "hypothesis_id"),
+        "distinct_archetypes": _distinct_count(blockers, "archetype"),
+    }
+    if not metadata.empty and {"field", "value"}.issubset(metadata.columns):
+        values.update(
+            {
+                str(row["field"]): row["value"]
+                for _, row in metadata.iterrows()
+                if str(row.get("field") or "")
+            }
+        )
+    return pd.DataFrame([{"field": key, "value": value} for key, value in sorted(values.items())])
+
+
+def _signal_discovery_blocker_summary(
+    metadata: pd.DataFrame, blockers: pd.DataFrame
+) -> pd.DataFrame:
+    fields = {
+        str(row["field"]): row["value"]
+        for _, row in metadata.iterrows()
+        if {"field", "value"}.issubset(metadata.columns)
+    }
+    return pd.DataFrame(
+        [
+            {
+                "schema_version": SIGNAL_DISCOVERY_BLOCKER_REPORT_SCHEMA_VERSION,
+                "generation_id": fields.get("generation_id", ""),
+                "latest_decision_date": fields.get("latest_decision_date", ""),
+                "blocker_rows": len(blockers),
+                "no_signal_rows": int((blockers["decision"] == "NO_SIGNAL").sum())
+                if "decision" in blockers.columns
+                else 0,
+                "rejected_rows": int(
+                    blockers.get("decision", pd.Series(dtype=str))
+                    .astype(str)
+                    .str.startswith("REJECTED")
+                    .sum()
+                )
+                if "decision" in blockers.columns
+                else 0,
+                "distinct_tickers": _distinct_count(blockers, "ticker"),
+                "distinct_hypotheses": _distinct_count(blockers, "hypothesis_id"),
+                "top_blocker_reason": _top_value(blockers, "blocker_reason"),
+            }
+        ]
+    )
+
+
+def _blocker_group(blockers: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:
+    output_columns = [
+        *group_columns,
+        "rows",
+        "distinct_tickers",
+        "average_signal_score",
+        "max_signal_score",
+        "average_expected_return",
+        "average_target_before_stop_probability",
+    ]
+    if blockers.empty:
+        return pd.DataFrame(columns=output_columns)
+    frame = blockers.copy()
+    for column in group_columns:
+        if column not in frame.columns:
+            frame[column] = ""
+    grouped = frame.groupby(group_columns, dropna=False)
+    output = grouped.agg(
+        rows=("ticker", "size"),
+        distinct_tickers=("ticker", "nunique"),
+        average_signal_score=("signal_score", "mean"),
+        max_signal_score=("signal_score", "max"),
+        average_expected_return=("expected_return", "mean"),
+        average_target_before_stop_probability=(
+            "target_before_stop_probability",
+            "mean",
+        ),
+    ).reset_index()
+    return output.sort_values(
+        ["rows", *group_columns], ascending=[False, *([True] * len(group_columns))]
+    ).reset_index(drop=True)
+
+
+def _distinct_count(frame: pd.DataFrame, column: str) -> int:
+    if frame.empty or column not in frame.columns:
+        return 0
+    return int(frame[column].dropna().astype(str).nunique())
+
+
+def _top_value(frame: pd.DataFrame, column: str) -> str:
+    if frame.empty or column not in frame.columns:
+        return ""
+    counts = frame[column].dropna().astype(str).value_counts()
+    return str(counts.index[0]) if not counts.empty else ""
 
 
 def _evaluate_hypothesis(

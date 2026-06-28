@@ -59,9 +59,11 @@ from swing_rsi.engine.scanner import (
 )
 from swing_rsi.engine.signal_discovery import (
     SignalDiscoveryRun,
+    export_signal_discovery_blocker_report,
     export_signal_discovery_generation,
     load_signal_discovery_frames,
     run_signal_discovery,
+    signal_discovery_blocker_report_frames,
 )
 from swing_rsi.engine.storage import dumps, engine_connection, initialize_engine_db
 from swing_rsi.engine.universe import UniverseConfig, load_universe_config, universe_to_frame_rows
@@ -362,6 +364,23 @@ def export_multi_angle_signal_discovery(
     output: str | Path,
 ) -> tuple[Path, ...]:
     return export_signal_discovery_generation(root, generation=generation, output=output)
+
+
+def signal_discovery_blocker_report(
+    root: str | Path,
+    *,
+    generation: str = "latest",
+) -> dict[str, pd.DataFrame]:
+    return signal_discovery_blocker_report_frames(root, generation=generation)
+
+
+def export_multi_angle_signal_discovery_blockers(
+    root: str | Path,
+    *,
+    generation: str = "latest",
+    output: str | Path,
+) -> tuple[Path, ...]:
+    return export_signal_discovery_blocker_report(root, generation=generation, output=output)
 
 
 def list_registered_models(root: str | Path) -> list[RegisteredModel]:

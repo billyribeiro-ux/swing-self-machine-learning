@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a read-only Signal Discovery blocker report that summarizes latest NO_SIGNAL and rejected rows by blocker reason, hypothesis, archetype, ticker, and product scope, with CLI CSV/JSON export and Reports and Exports workbook support.
 - Added Autonomous Multi-Angle Signal Discovery V1: a versioned `multi_angle_signal_discovery_v1` hypothesis registry, train-only chronological discovery engine, BUY/SELL/NO_SIGNAL/rejected/shadow/research candidate schema, local immutable `signal_discovery_generation` artifacts, CLI status/export commands, Signal Board/Candidate Detail/Reports dashboard integration, and safety tests for label isolation, split discipline, analog chronology, exports, and operational immutability.
 - Added a Candidate Detail Missing Evidence Audit badge that counts unavailable footprint evidence rows by category.
 - Added Footprint Attribution V1 evidence quantification in Candidate Detail, including measured footprint tables, supporting/conflicting evidence, analog outcomes, residual/unexplained attribution, compact Signal Board footprint summaries, and CSV/XLSX footprint export sheets.

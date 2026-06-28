@@ -176,6 +176,18 @@ Export latest generation:
 .venv/bin/python -m swing_rsi.cli signal-discovery-export --generation latest --output reports/signal_discovery_v1
 ```
 
+Summarize latest blockers without rerunning discovery:
+
+```bash
+.venv/bin/python -m swing_rsi.cli signal-discovery-blockers --generation latest --limit 10
+```
+
+Export blocker summary sheets:
+
+```bash
+.venv/bin/python -m swing_rsi.cli signal-discovery-blockers-export --generation latest --output reports/signal_discovery_blockers_v1
+```
+
 These commands do not promote models, run final-holdout updates, run
 forward-update, run daily-cycle, or contact FMP.
 
@@ -202,6 +214,17 @@ summary, metadata, hypotheses, candidates, selected candidates, no-signal rows,
 rejected rows, footprint evidence, historical analogs, score components, and
 gate results.
 
+Reports and Exports can also create a Signal Discovery Blockers workbook with:
+
+- `summary`
+- `metadata`
+- `blocker_rows`
+- `by_reason`
+- `by_hypothesis`
+- `by_archetype`
+- `by_ticker`
+- `by_scope`
+
 ## Current V1 Generation
 
 Latest validation generation:
@@ -224,6 +247,18 @@ Results:
 The top NO_SIGNAL blockers were target-before-stop probability below threshold
 and probability below threshold. One row, SOXS under `sector_rotation_buy_20d`,
 was rejected by OOD.
+
+Current blocker report:
+
+- Blocker rows: 498
+- NO_SIGNAL rows: 497
+- Rejected rows: 1
+- Distinct tickers: 35
+- Distinct hypotheses: 15
+- Top blocker reason: `probability_below_threshold`
+- `probability_below_threshold`: 280 rows
+- `target_before_stop_probability_below_threshold`: 217 rows
+- `ood_feature_rate_above_limit`: 1 row
 
 ## Limitations
 

@@ -31,7 +31,10 @@ from swing_rsi.engine.product_scope import (
 )
 from swing_rsi.engine.registry import RegisteredModel
 from swing_rsi.engine.registry import _row_to_model as registry_row_to_model
-from swing_rsi.engine.signal_discovery import load_signal_discovery_frames
+from swing_rsi.engine.signal_discovery import (
+    load_signal_discovery_frames,
+    signal_discovery_blocker_report_frames,
+)
 from swing_rsi.engine.universe import UniverseConfig, load_universe_config, universe_to_frame_rows
 from swing_rsi.settings import get_fmp_api_key
 
@@ -910,6 +913,10 @@ def signal_discovery_summary_frame(root: str | Path) -> pd.DataFrame:
 
 def signal_discovery_candidates_frame(root: str | Path) -> pd.DataFrame:
     return signal_discovery_generation_frames(root).get("candidates", pd.DataFrame())
+
+
+def signal_discovery_blocker_frames(root: str | Path) -> dict[str, pd.DataFrame]:
+    return signal_discovery_blocker_report_frames(root)
 
 
 def _records_json_by_signal(frame: pd.DataFrame) -> dict[str, str]:

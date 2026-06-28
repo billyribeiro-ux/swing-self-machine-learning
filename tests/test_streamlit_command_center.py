@@ -39,6 +39,7 @@ from swing_rsi.application.dashboard_service import (
     scanner_results_frame,
     signal_board_frame,
     signal_board_metrics,
+    signal_discovery_blocker_frames,
     signal_discovery_generation_frames,
 )
 from swing_rsi.application.footprint_attribution import (
@@ -1310,11 +1311,15 @@ def test_reports_and_exports_displays_signal_discovery_generation(
     _write_signal_discovery_generation(command_center_root)
 
     frames = signal_discovery_generation_frames(command_center_root)
+    blocker_frames = signal_discovery_blocker_frames(command_center_root)
     app = AppTest.from_file("dashboard/sections/reports_and_exports.py").run(timeout=30)
 
     _assert_no_streamlit_exceptions(app)
     assert "Signal Discovery Generation" in {subheader.value for subheader in app.subheader}
+    assert "Signal Discovery Blockers" in {subheader.value for subheader in app.subheader}
     assert not frames["candidates"].empty
+    assert not blocker_frames["blocker_rows"].empty
+    assert not blocker_frames["by_reason"].empty
     workbook = openpyxl.load_workbook(
         BytesIO(
             to_xlsx_bytes(
