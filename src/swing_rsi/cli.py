@@ -11,6 +11,7 @@ from swing_rsi.application.datasets import download_daily_to_raw
 from swing_rsi.application.engine_service import (
     build_autonomous_features,
     evaluate_final_holdout,
+    export_multi_angle_signal_discovery,
     final_holdout_status,
     forward_events,
     initialize_final_holdout,
@@ -20,6 +21,8 @@ from swing_rsi.application.engine_service import (
     run_forward_update,
     run_live_scanner,
     run_model_discovery,
+    run_multi_angle_signal_discovery,
+    signal_discovery_status,
     update_final_holdout,
     update_universe_data,
 )
@@ -269,6 +272,71 @@ def command_discover_models(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_discover_signals(args: argparse.Namespace) -> int:
+    result = run_multi_angle_signal_discovery(
+        Path.cwd(),
+        config_path=args.config,
+        universe_path=args.universe,
+    )
+    print(f"Signal discovery generation ID: {result.generation_id}")
+    print(f"Hypotheses evaluated: {result.metadata.get('hypotheses_evaluated')}")
+    print(
+        f"BUY candidates: {int((result.candidates.get('decision', pd.Series(dtype=str)) == 'BUY_CANDIDATE').sum())}"
+    )
+    print(
+        "SELL candidates: "
+        f"{int((result.candidates.get('decision', pd.Series(dtype=str)) == 'SELL_SHORT_CANDIDATE').sum())}"
+    )
+    print(f"NO_SIGNAL rows: {len(result.no_signal):,}")
+    print(f"Rejected rows: {len(result.rejected):,}")
+    print(f"Generation directory: {result.generation_dir}")
+    if not result.selected_candidates.empty:
+        columns = [
+            column
+            for column in (
+                "ticker",
+                "action",
+                "archetype",
+                "signal_score",
+                "footprint_summary",
+                "top_support",
+                "top_conflict",
+            )
+            if column in result.selected_candidates.columns
+        ]
+        print(
+            result.selected_candidates.sort_values("signal_score", ascending=False)[columns]
+            .head(10)
+            .to_string(index=False)
+        )
+    else:
+        print("No BUY/SELL candidates passed V1 research policy. NO_SIGNAL rows were persisted.")
+    print("No model was promoted. No final-holdout or forward-update command was run.")
+    return 0
+
+
+def command_signal_discovery_status(_: argparse.Namespace) -> int:
+    status = signal_discovery_status(Path.cwd())
+    if status.get("status") == "NOT_FOUND":
+        print("No signal discovery generation found.")
+        return 0
+    for key, value in sorted(status.items()):
+        print(f"{key}: {value}")
+    return 0
+
+
+def command_signal_discovery_export(args: argparse.Namespace) -> int:
+    written = export_multi_angle_signal_discovery(
+        Path.cwd(),
+        generation=args.generation,
+        output=args.output,
+    )
+    print(f"Exported {len(written):,} signal discovery files to {args.output}")
+    for path in written:
+        print(f"- {path}")
+    return 0
+
+
 def command_model_registry(_: argparse.Namespace) -> int:
     models = list_registered_models(Path.cwd())
     if not models:
@@ -493,6 +561,28 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--minimum-training-samples", type=int, default=200)
     discover.add_argument("--minimum-holdout-samples", type=int, default=80)
     discover.set_defaults(handler=command_discover_models)
+
+    discover_signals = subparsers.add_parser(
+        "discover-signals",
+        help="Evaluate multi-angle signal hypotheses and persist one immutable research generation",
+    )
+    discover_signals.add_argument("--config", default=None)
+    discover_signals.add_argument("--universe", default=None)
+    discover_signals.set_defaults(handler=command_discover_signals)
+
+    signal_status = subparsers.add_parser(
+        "signal-discovery-status",
+        help="Show the latest multi-angle signal discovery generation status",
+    )
+    signal_status.set_defaults(handler=command_signal_discovery_status)
+
+    signal_export = subparsers.add_parser(
+        "signal-discovery-export",
+        help="Export a signal discovery generation to CSV/JSON files",
+    )
+    signal_export.add_argument("--generation", default="latest")
+    signal_export.add_argument("--output", required=True)
+    signal_export.set_defaults(handler=command_signal_discovery_export)
 
     registry = subparsers.add_parser("model-registry", help="List registered models")
     registry.set_defaults(handler=command_model_registry)

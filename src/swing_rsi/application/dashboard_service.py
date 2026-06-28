@@ -31,6 +31,7 @@ from swing_rsi.engine.product_scope import (
 )
 from swing_rsi.engine.registry import RegisteredModel
 from swing_rsi.engine.registry import _row_to_model as registry_row_to_model
+from swing_rsi.engine.signal_discovery import load_signal_discovery_frames
 from swing_rsi.engine.universe import UniverseConfig, load_universe_config, universe_to_frame_rows
 from swing_rsi.settings import get_fmp_api_key
 
@@ -899,6 +900,168 @@ def _why_shadow_only(classification: str, lifecycle_status: str) -> str:
     return NOT_AVAILABLE
 
 
+def signal_discovery_generation_frames(root: str | Path) -> dict[str, pd.DataFrame]:
+    return load_signal_discovery_frames(root)
+
+
+def signal_discovery_summary_frame(root: str | Path) -> pd.DataFrame:
+    return signal_discovery_generation_frames(root).get("summary", pd.DataFrame())
+
+
+def signal_discovery_candidates_frame(root: str | Path) -> pd.DataFrame:
+    return signal_discovery_generation_frames(root).get("candidates", pd.DataFrame())
+
+
+def _records_json_by_signal(frame: pd.DataFrame) -> dict[str, str]:
+    if frame.empty or "signal_id" not in frame.columns:
+        return {}
+    records: dict[str, str] = {}
+    for signal_id, group in frame.groupby(frame["signal_id"].astype(str), sort=False):
+        records[str(signal_id)] = json.dumps(group.to_dict(orient="records"), default=str)
+    return records
+
+
+def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
+    frames = signal_discovery_generation_frames(root)
+    candidates = frames.get("candidates", pd.DataFrame())
+    if candidates.empty:
+        return pd.DataFrame()
+    analogs_by_signal = _records_json_by_signal(frames.get("historical_analogs", pd.DataFrame()))
+    evidence_by_signal = _records_json_by_signal(frames.get("footprint_evidence", pd.DataFrame()))
+    rows: list[dict[str, object]] = []
+    for _, row in candidates.iterrows():
+        signal_id = str(_display_value(row.get("signal_id")))
+        decision = _clean_text(row.get("decision"))
+        candidate_status = _clean_text(row.get("candidate_status")) or RESEARCH_ONLY
+        historical_analogs = analogs_by_signal.get(
+            signal_id, _display_value(row.get("historical_analog_support"))
+        )
+        rows.append(
+            {
+                "signal_id": signal_id,
+                "scan_id": _display_value(row.get("generation_id")),
+                "as_of_date": _display_value(row.get("as_of_date")),
+                "ticker": _display_value(row.get("ticker")),
+                "direction": _display_value(row.get("direction")),
+                "action": _display_value(row.get("action")),
+                "archetype": _display_value(row.get("archetype")),
+                "archetype_id": _display_value(row.get("archetype_id")),
+                "hypothesis_id": _display_value(row.get("hypothesis_id")),
+                "signal_score": _display_value(row.get("signal_score")),
+                "scope": _display_value(row.get("scope")),
+                "model": _display_value(row.get("model_id")),
+                "model_id": _display_value(row.get("model_id")),
+                "family": _display_value(row.get("model_family")),
+                "generation": _display_value(row.get("generation_id")),
+                "feature_snapshot_hash": _display_value(row.get("feature_snapshot_hash")),
+                "row_product_class_role": _display_value(row.get("row_product_class_role")),
+                "horizon": _display_value(row.get("horizon")),
+                "liquidity_score": _display_value(row.get("liquidity_score")),
+                "composite_utility_score": _display_value(row.get("risk_adjusted_utility")),
+                "edge_status": _display_value(row.get("edge_status")),
+                "status": candidate_status,
+                "candidate_classification": candidate_status,
+                "probability": _display_value(row.get("probability")),
+                "expected_return": _display_value(row.get("expected_return")),
+                "expected_mfe": _display_value(row.get("expected_mfe")),
+                "expected_mae": _display_value(row.get("expected_mae")),
+                "target_before_stop_probability": _display_value(
+                    row.get("target_before_stop_probability")
+                ),
+                "top_attribution_category": _display_value(row.get("top_support")),
+                "top_confirming_relationships": _display_value(row.get("top_support")),
+                "supporting_evidence": _display_value(row.get("top_support")),
+                "historical_analogs": historical_analogs,
+                "top_divergences": _display_value(row.get("top_conflict")),
+                "top_support": _display_value(row.get("top_support")),
+                "top_conflict": _display_value(row.get("top_conflict")),
+                "historical_analog_support": _display_value(row.get("historical_analog_support")),
+                "footprint_evidence_json": evidence_by_signal.get(signal_id, ""),
+                "footprint_summary": _display_value(row.get("footprint_summary")),
+                "rejection_reason": _display_value(
+                    row.get("rejection_reason") or row.get("no_signal_reason")
+                ),
+                "no_signal_reason": _display_value(row.get("no_signal_reason")),
+                "candidate_status": decision,
+                "signal_source": "multi_angle_signal_discovery_v1",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _signal_discovery_board_rows(root: str | Path) -> pd.DataFrame:
+    candidates = signal_discovery_candidates_frame(root)
+    if candidates.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, object]] = []
+    for _, row in candidates.iterrows():
+        status = _display_value(row.get("candidate_status"))
+        model_id = _display_value(row.get("model_id"))
+        generation = _display_value(row.get("generation_id"))
+        rows.append(
+            {
+                "ticker": _display_value(row.get("ticker")),
+                "direction": _display_value(row.get("direction")),
+                "action": _display_value(row.get("action")),
+                "archetype": _display_value(row.get("archetype")),
+                "signal_score": _display_value(row.get("signal_score")),
+                "footprint_summary": _display_value(row.get("footprint_summary")),
+                "top_support": _display_value(row.get("top_support")),
+                "top_conflict": _display_value(row.get("top_conflict")),
+                "historical_analog_support": _display_value(row.get("historical_analog_support")),
+                "scan_id": generation,
+                "run_id": NOT_AVAILABLE,
+                "run_display": "Signal Discovery",
+                "event_id": NOT_AVAILABLE,
+                "event_display": _display_value(row.get("decision")),
+                "signal_status": status,
+                "live_shadow_rejected_classification": status,
+                "edge_status": _display_value(row.get("edge_status")),
+                "model_id": model_id,
+                "model_display": str(model_id),
+                "scope": _display_value(row.get("scope")),
+                "family": _display_value(row.get("model_family")),
+                "horizon": _display_value(row.get("horizon")),
+                "generation": generation,
+                "generation_display": _generation_display(generation),
+                "as_of_date": _display_value(row.get("as_of_date")),
+                "entry_rule": "next session open after future promotion only",
+                "pending_entry_date": NOT_AVAILABLE,
+                "entry_price_if_filled": NOT_AVAILABLE,
+                "expected_return": _display_value(row.get("expected_return")),
+                "expected_mfe": _display_value(row.get("expected_mfe")),
+                "expected_mae": _display_value(row.get("expected_mae")),
+                "target_before_stop_probability": _display_value(
+                    row.get("target_before_stop_probability")
+                ),
+                "ood_warning": _display_value(row.get("ood_feature_rate")),
+                "gate_status": "BLOCKED",
+                "rejection_reason": _display_value(
+                    row.get("rejection_reason") or row.get("no_signal_reason")
+                ),
+                "why_shadow_only": _display_value(row.get("not_live_actionable_reason")),
+                "next_required_event": _display_value(row.get("next_required_event")),
+                "open_url": candidate_detail_url(
+                    scan_id=generation,
+                    ticker=row.get("ticker"),
+                    model_id=model_id,
+                    direction=row.get("direction"),
+                    status=status,
+                ),
+                "candidate_detail_url": candidate_detail_url(
+                    scan_id=generation,
+                    ticker=row.get("ticker"),
+                    model_id=model_id,
+                    direction=row.get("direction"),
+                    status=status,
+                ),
+                "export": False,
+                "signal_source": "multi_angle_signal_discovery_v1",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def scanner_results_frame(root: str | Path) -> pd.DataFrame:
     models, final_map = _model_maps(root)
     edge_map = {
@@ -906,8 +1069,9 @@ def scanner_results_frame(root: str | Path) -> pd.DataFrame:
         for model_id, model in models.items()
     }
     rows = _scanner_rows_with_events(root)
+    signal_rows = _signal_discovery_scanner_rows(root)
     if rows.empty:
-        return pd.DataFrame(
+        empty = pd.DataFrame(
             columns=[
                 "scan_id",
                 "as_of_date",
@@ -927,6 +1091,7 @@ def scanner_results_frame(root: str | Path) -> pd.DataFrame:
                 "rejection_reason",
             ]
         )
+        return signal_rows if not signal_rows.empty else empty
     events = forward_events_frame(root, final_holdout_only=None)
     event_maps = _signal_event_keys(events)
     records: list[dict[str, object]] = []
@@ -992,7 +1157,10 @@ def scanner_results_frame(root: str | Path) -> pd.DataFrame:
                 "candidate_status": _display_value(row.get("candidate_status")),
             }
         )
-    return pd.DataFrame(records)
+    scanner_frame = pd.DataFrame(records)
+    if signal_rows.empty:
+        return scanner_frame
+    return pd.concat([scanner_frame, signal_rows], ignore_index=True, sort=False)
 
 
 def signal_board_frame(root: str | Path) -> pd.DataFrame:
@@ -1106,7 +1274,11 @@ def signal_board_frame(root: str | Path) -> pd.DataFrame:
                 "export": False,
             }
         )
-    return pd.DataFrame(records)
+    frame = pd.DataFrame(records)
+    signal_rows = _signal_discovery_board_rows(root)
+    if signal_rows.empty:
+        return frame
+    return pd.concat([frame, signal_rows], ignore_index=True, sort=False)
 
 
 def signal_board_metrics(root: str | Path) -> dict[str, object]:
@@ -2624,7 +2796,7 @@ def regime_cache_status_frame(root: str | Path) -> pd.DataFrame:
 
 def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]:
     scanner = scanner_results_frame(root)
-    return {
+    frames = {
         "signal_board": signal_board_frame(root),
         "shadow_forward_status": shadow_forward_status_frame(root),
         "model_edge_status": model_edge_status_frame(root),
@@ -2654,6 +2826,12 @@ def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]
         "data_universe": universe_health_frame(root),
         "reports_index": reports_inventory_frame(root),
     }
+    discovery = signal_discovery_generation_frames(root)
+    for name in ("summary", "hypotheses", "candidates", "no_signal", "rejected"):
+        frame = discovery.get(name)
+        if frame is not None and not frame.empty:
+            frames[f"signal_discovery_{name}"] = frame
+    return frames
 
 
 def save_complete_engine_snapshot(root: str | Path) -> Path:

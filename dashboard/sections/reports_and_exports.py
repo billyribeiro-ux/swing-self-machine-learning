@@ -16,6 +16,7 @@ from swing_rsi.application.dashboard_service import (
     save_complete_engine_snapshot,
     scanner_rows_frame,
     scanner_snapshot_list_frame,
+    signal_discovery_generation_frames,
 )
 
 
@@ -80,6 +81,43 @@ def render_page() -> None:
             },
         )
         streamlit.success(f"Saved {output.relative_to(root)}")
+
+    discovery_frames = signal_discovery_generation_frames(root)
+    discovery_sheets = {
+        name: frame
+        for name, frame in discovery_frames.items()
+        if name
+        in {
+            "summary",
+            "metadata",
+            "hypotheses",
+            "candidates",
+            "selected_candidates",
+            "no_signal",
+            "rejected",
+            "footprint_evidence",
+            "historical_analogs",
+            "score_components",
+            "gate_results",
+        }
+        and not frame.empty
+    }
+    streamlit.subheader("Signal Discovery Generation")
+    if discovery_sheets:
+        streamlit.dataframe(
+            display_frame(discovery_sheets.get("summary", pd.DataFrame())),
+            width="stretch",
+            hide_index=True,
+        )
+        if streamlit.button("Create signal discovery generation workbook"):
+            output = save_xlsx_report(
+                root,
+                "signal_discovery_generation.xlsx",
+                discovery_sheets,
+            )
+            streamlit.success(f"Saved {output.relative_to(root)}")
+    else:
+        streamlit.info("No signal discovery generation is available locally.")
 
     models = registered_models_readonly(root)
     if models:

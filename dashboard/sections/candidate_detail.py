@@ -264,6 +264,34 @@ def _risk_frame(candidate: pd.Series) -> pd.DataFrame:
     return pd.DataFrame([{"risk": label, "value": str(value)} for label, value in fields])
 
 
+def _signal_score_frame(candidate: pd.Series) -> pd.DataFrame:
+    fields = (
+        ("action", "Action"),
+        ("archetype", "Archetype"),
+        ("hypothesis_id", "Hypothesis ID"),
+        ("signal_score", "Signal Score"),
+        ("probability", "Direction Probability"),
+        ("target_before_stop_probability", "Target-Before-Stop Probability"),
+        ("expected_return", "Expected Return"),
+        ("expected_mfe", "Expected MFE"),
+        ("expected_mae", "Expected MAE"),
+        ("composite_utility_score", "Risk-Adjusted Utility"),
+        ("liquidity_score", "Liquidity Score"),
+        ("top_support", "Top Support"),
+        ("top_conflict", "Top Conflict"),
+        ("historical_analog_support", "Historical Analog Support"),
+        ("no_signal_reason", "No-Signal Reason"),
+        ("rejection_reason", "Rejection Reason"),
+        ("signal_source", "Signal Source"),
+    )
+    rows = [
+        {"component": label, "value": _clean_identifier_value(candidate.get(field, ""))}
+        for field, label in fields
+        if _clean_identifier_value(candidate.get(field, ""))
+    ]
+    return pd.DataFrame(rows)
+
+
 def _plain_english(candidate: pd.Series) -> str:
     classification = str(candidate.get("candidate_classification", ""))
     reason = str(candidate.get("rejection_reason", ""))
@@ -349,6 +377,7 @@ def render_page() -> None:
     footprint = footprint_evidence_frames(root, candidate)
     missing_audit = missing_evidence_audit_frame(footprint.evidence)
     summary = _summary_frame(candidate)
+    signal_score = _signal_score_frame(candidate)
     checks = _checks_frame(candidate)
     attribution = _attribution_frame(candidate)
     analogs = footprint.historical_analogs
@@ -357,6 +386,9 @@ def render_page() -> None:
 
     streamlit.info(_footprint_summary_text(footprint.summary))
     _render_missing_evidence_audit(missing_audit)
+    if not signal_score.empty:
+        streamlit.subheader("Signal Score Breakdown")
+        streamlit.dataframe(display_frame(signal_score), width="stretch", hide_index=True)
 
     streamlit.subheader("Full Raw Identifiers")
     with streamlit.expander("Full Raw Identifier Copy Block", expanded=False):
@@ -471,6 +503,7 @@ def render_page() -> None:
                 "conflicting_evidence": footprint.conflicting_evidence,
                 "historical_analogs": analogs,
                 "residual_unexplained": footprint.residual_unexplained,
+                "signal_score_breakdown": signal_score,
                 "attribution": attribution,
                 "feature_snapshot": feature_snapshot,
             }

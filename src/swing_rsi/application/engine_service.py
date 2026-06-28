@@ -57,6 +57,12 @@ from swing_rsi.engine.scanner import (
     latest_common_session,
     run_scanner,
 )
+from swing_rsi.engine.signal_discovery import (
+    SignalDiscoveryRun,
+    export_signal_discovery_generation,
+    load_signal_discovery_frames,
+    run_signal_discovery,
+)
 from swing_rsi.engine.storage import dumps, engine_connection, initialize_engine_db
 from swing_rsi.engine.universe import UniverseConfig, load_universe_config, universe_to_frame_rows
 
@@ -311,6 +317,51 @@ def run_model_discovery(
         universe=universe,
     )
     return (*result.registered_models, *result.rejected_models)
+
+
+def run_multi_angle_signal_discovery(
+    root: str | Path,
+    *,
+    config_path: str | Path | None = None,
+    universe_path: str | Path | None = None,
+) -> SignalDiscoveryRun:
+    return run_signal_discovery(
+        root,
+        config_path=config_path,
+        universe_path=universe_path,
+    )
+
+
+def signal_discovery_status(root: str | Path) -> dict[str, object]:
+    frames = load_signal_discovery_frames(root)
+    metadata = frames.get("metadata", pd.DataFrame())
+    summary = frames.get("summary", pd.DataFrame())
+    if metadata.empty and summary.empty:
+        return {"status": "NOT_FOUND"}
+    metadata_map = (
+        {
+            str(row["field"]): row["value"]
+            for _, row in metadata.iterrows()
+            if "field" in metadata.columns and "value" in metadata.columns
+        }
+        if not metadata.empty
+        else {}
+    )
+    summary_row = (
+        {str(key): value for key, value in summary.iloc[0].to_dict().items()}
+        if not summary.empty
+        else {}
+    )
+    return {"status": "FOUND", **metadata_map, **summary_row}
+
+
+def export_multi_angle_signal_discovery(
+    root: str | Path,
+    *,
+    generation: str = "latest",
+    output: str | Path,
+) -> tuple[Path, ...]:
+    return export_signal_discovery_generation(root, generation=generation, output=output)
 
 
 def list_registered_models(root: str | Path) -> list[RegisteredModel]:
