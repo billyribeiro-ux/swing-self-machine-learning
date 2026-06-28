@@ -113,7 +113,9 @@ or export audit fields.
 Candidate Detail includes a compact `Full Raw Identifiers` section. It displays
 the selected candidate's raw scan, model, generation, run, event, status, and
 feature-snapshot identifiers in both a table and a copyable text block. The
-Candidate Detail workbook includes the same fields on a `raw_identifiers` sheet.
+same section also displays a copyable `/candidate-detail?...` deep link built
+from the full raw identifiers. The Candidate Detail workbook includes the same
+fields on a `raw_identifiers` sheet and the URL on a `deep_link` sheet.
 
 ## Signal Board Regime Cache Status
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a Candidate Detail deep-link copy block and `deep_link` workbook sheet built from full raw scan/model/run/event identifiers.
 - Added a Candidate Detail `Full Raw Identifiers` copy block and `raw_identifiers` workbook sheet so full scan/model/run/event identifiers remain easy to audit after Signal Board friendly formatting.
 - Added friendly Signal Board display identifiers for models, generations, shadow runs, and events while preserving full raw IDs in Candidate Detail links and CSV/XLSX exports.
 - Fixed Regime KMeans Cache dashboard visibility after the Signal-First refactor: Signal Board now shows compact cache status cards, Developer Diagnostics keeps detailed cache metadata with CSV/XLSX exports, and page load remains read-only.

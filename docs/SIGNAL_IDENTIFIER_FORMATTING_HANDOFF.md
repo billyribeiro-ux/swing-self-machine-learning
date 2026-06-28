@@ -7,7 +7,8 @@ Date: 2026-06-28
 Signal Board now shows friendly display identifiers for model, generation, run,
 and event columns while preserving full raw IDs for audit paths. Candidate
 Detail now adds a compact `Full Raw Identifiers` copy block and workbook sheet
-for the selected row.
+for the selected row, plus a copyable full `/candidate-detail?...` deep link
+built from those raw identifiers.
 
 Visible examples from the current development Signal Board:
 
@@ -64,7 +65,9 @@ Candidate Detail now renders `Full Raw Identifiers` with:
   event, status, and feature-snapshot identifiers;
 - a single copyable text block containing `field=value` lines;
 - a CSV export for `raw_identifiers`;
-- a `raw_identifiers` sheet in the Candidate Detail workbook.
+- a copyable full Candidate Detail deep link;
+- CSV export for `deep_link`;
+- `raw_identifiers` and `deep_link` sheets in the Candidate Detail workbook.
 
 When Candidate Detail is opened from Signal Board, query-string `run_id`,
 `event_id`, and `status` values are used for the identifier panel so the opened
@@ -87,13 +90,16 @@ related signal event.
   passed through the `Open detail` URL.
 - Added raw-identifier coverage for Candidate Detail copy text and the
   `raw_identifiers` XLSX sheet.
+- Added deep-link coverage proving the generated `/candidate-detail?...` URL
+  contains full raw scan, ticker, model, direction, run, event, and status
+  identifiers and is exported to the `deep_link` XLSX sheet.
 
 ## Verification Results
 
 Final verification on the formatted tree:
 
 - `.venv/bin/pytest`
-  - Result: `347 passed, 11576 warnings in 119.15s`
+  - Result: `347 passed, 11576 warnings in 113.17s`
   - Warnings were existing pandas constant-input and joblib NumPy deprecation
     warnings.
 - `.venv/bin/ruff check .`
@@ -106,7 +112,7 @@ Final verification on the formatted tree:
 Focused dashboard verification before the full run:
 
 - `.venv/bin/pytest tests/test_streamlit_command_center.py -q`
-  - Result: `26 passed in 3.21s`
+  - Result: `26 passed in 3.11s`
 
 Read-only development Signal Board sample confirmed:
 
@@ -171,5 +177,5 @@ None. This is dashboard visibility and export-preservation work only.
 
 ## Next Smallest Task
 
-Add a small Candidate Detail deep-link copy block that includes the full
-`/candidate-detail?...` URL for the selected row.
+Add a compact visual affordance to distinguish final-holdout shadow rows from
+ordinary scanner review rows in Candidate Detail.

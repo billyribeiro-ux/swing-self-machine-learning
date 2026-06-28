@@ -8,7 +8,7 @@ from dashboard.ui.components import render_page_guidance, render_page_header, re
 from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_exports import to_xlsx_bytes
-from swing_rsi.application.dashboard_service import scanner_results_frame
+from swing_rsi.application.dashboard_service import candidate_detail_url, scanner_results_frame
 
 
 def _json_frame(value: object) -> pd.DataFrame:
@@ -92,6 +92,32 @@ def _identifier_copy_text(identifiers: pd.DataFrame) -> str:
         if value:
             lines.append(f"{row.get('field', '')}={value}")
     return "\n".join(lines)
+
+
+def _identifier_lookup(identifiers: pd.DataFrame) -> dict[str, str]:
+    if identifiers.empty:
+        return {}
+    return {
+        str(row.get("field", "")): _clean_identifier_value(row.get("value", ""))
+        for _, row in identifiers.iterrows()
+    }
+
+
+def _candidate_detail_deep_link(identifiers: pd.DataFrame) -> str:
+    values = _identifier_lookup(identifiers)
+    return candidate_detail_url(
+        scan_id=values.get("scan_id", ""),
+        ticker=values.get("ticker", ""),
+        model_id=values.get("model_id", ""),
+        direction=values.get("direction", ""),
+        run_id=values.get("run_id", ""),
+        event_id=values.get("event_id", ""),
+        status=values.get("status", ""),
+    )
+
+
+def _deep_link_frame(deep_link: str) -> pd.DataFrame:
+    return pd.DataFrame([{"field": "candidate_detail_url", "value": deep_link}])
 
 
 def _selectbox_index(options: list[str], requested: str) -> int:
@@ -275,6 +301,8 @@ def render_page() -> None:
     streamlit.info(_plain_english(candidate))
 
     identifiers = _raw_identifier_frame(candidate, dict(streamlit.query_params))
+    deep_link = _candidate_detail_deep_link(identifiers)
+    deep_link_export = _deep_link_frame(deep_link)
     summary = _summary_frame(candidate)
     checks = _checks_frame(candidate)
     attribution = _attribution_frame(candidate)
@@ -286,6 +314,8 @@ def render_page() -> None:
     with streamlit.expander("Full Raw Identifier Copy Block", expanded=False):
         streamlit.dataframe(display_frame(identifiers), width="stretch", hide_index=True)
         streamlit.code(_identifier_copy_text(identifiers), language="text")
+        streamlit.caption("Candidate Detail deep link")
+        streamlit.code(deep_link, language="text")
 
     streamlit.subheader("Signal Summary")
     streamlit.dataframe(display_frame(summary), width="stretch", hide_index=True)
@@ -319,11 +349,17 @@ def render_page() -> None:
         basename="candidate_detail_raw_identifiers",
         label="raw_identifiers",
     )
+    render_table_downloads(
+        deep_link_export,
+        basename="candidate_detail_deep_link",
+        label="deep_link",
+    )
     streamlit.download_button(
         "Download candidate detail workbook XLSX",
         data=to_xlsx_bytes(
             {
                 "raw_identifiers": identifiers,
+                "deep_link": deep_link_export,
                 "attribution": attribution,
                 "analogs": analogs,
                 "feature_snapshot": feature_snapshot,
