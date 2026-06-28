@@ -1,5 +1,96 @@
 # Decision Log
 
+## 2026-06-28 — Footprint attribution claims require measured evidence rows
+
+Decision: Candidate Detail footprint language now uses `footprint_attribution_v1`.
+Every footprint claim must render with a measured local evidence row or explicit
+`Evidence unavailable` status. Candidate Detail separates supporting evidence,
+conflicting evidence, historical analog outcomes, and residual/unexplained
+attribution, while Signal Board keeps only a compact footprint summary.
+
+Reason: Generic footprint summaries can sound more certain than the underlying
+scanner artifacts support. Quantified evidence keeps shadow-validation review
+auditable without changing features, labels, model logic, thresholds, gates,
+scanner selection, or paper-forward state.
+
+## 2026-06-28 — Expanding KMeans regime features use an exact-output cache
+
+Decision: Add `expanding_kmeans_regime_cache_v1` around the existing
+per-date expanding KMeans regime calculation. The cache stores exact historical
+`market_regime_cluster_expanding` labels under ignored `data/cache/regime/`
+only after recording the universe snapshot, symbol set, date ordering, regime
+input columns, KMeans parameters, random seed, no-scaling preprocessing policy,
+minimum sample requirement, input-prefix hash, full-input hash, output hash,
+covered dates, and timestamps. A valid unchanged prefix can reuse cached
+historical labels and compute only later dates with the same expanding refit
+semantics. Any validation failure, forced rebuild, or historical-prefix change
+falls back to full recompute and rewrites the cache atomically.
+
+Reason: Read-only equivalence research rejected less-frequent KMeans refit
+schedules as `TOO_DIFFERENT`, so the optimization must not change refit cadence
+or regime labels. Exact caching reduces routine feature-build runtime while
+preserving the current chronology-safe one-fit-per-eligible-date behavior.
+
+## 2026-06-27 — Dashboard navigation is signal-first
+
+Decision: Refactor the Streamlit Command Center visible navigation into a
+Signal-First Trading Research Dashboard with pages ordered around scanner rows,
+shadow validation, model edge status, candidate detail, product-class research,
+gate audit, data health, exports, safe commands, legacy baselines, and developer
+diagnostics. The Signal Board is the default page and must label rows as live
+actionable, shadow-only, rejected, pending, open, closed, or research-only.
+
+Reason: The previous dashboard surfaced infrastructure before the primary
+research questions: what candidate appeared, whether it is live or shadow-only,
+why it appeared, why it was rejected or actionable, what evidence still blocks
+the model, and what can be exported. Signal-first navigation improves review
+clarity without changing model code, gates, thresholds, promotion policy, or
+prospective final-holdout governance.
+
+## 2026-06-27 — Dashboard navigation tests target the launched entrypoint
+
+Decision: Command Center navigation regression tests must execute `dashboard/app.py`
+and capture the `st.Page` registrations made by the actual launched Streamlit
+entrypoint. Helper-only page-list tests remain useful, but they are not
+sufficient evidence that `streamlit run dashboard/app.py` exposes the required
+12 visible Command Center pages.
+
+Reason: A reported sidebar mismatch showed the old 9-page navigation from the
+operational repository while the development helper list already contained the
+12 Command Center labels. Testing the launched entrypoint catches drift between
+reports, helpers, and the UI path users actually run, while preserving the
+development/operational safety boundary.
+
+## 2026-06-27 — Streamlit Command Center V1 is the local development operations console
+
+Decision: Replace the V0 autonomous dashboard navigation with a local-only Streamlit Command Center V1 registered through explicit `st.navigation` pages: Overview, Data and Universe, Model Registry, Gate Audit, Product-Class Specialists, Scanner Snapshots, Candidate Attribution, Shadow Final Holdout, Paper Forward Test, Reports and Exports, Engine Commands, and Legacy Baselines. Page loads use read-only local state readers for SQLite, artifacts, reports, manifests, raw data, feature data, and universe configuration. Mutating actions require explicit confirmation and remain limited to development commands; discovery and promotion are disabled in the dashboard. FMP key entry is password-only, writes only to the development `.env` after confirmation, and never displays or logs the key.
+
+Reason: The development engine now has enough model, scanner, gate, final-holdout, and paper-forward state that a consolidated local operations console is needed, but the model/governance loop is not stable enough for a deployed app, auth layer, or promotion UI. Keeping Streamlit local and explicit preserves the current research boundary while improving inspection, exports, and safe manual operation.
+
+## 2026-06-27 — POOLED bull HistGradientBoosting MAE uses a scoped robust target transform
+
+Decision: Add `robust_path_target_transform_v1` only for the `POOLED` bull `hist_gradient_boosting` MAE head at the 10-session horizon. This head trains its HistGradientBoostingRegressor on `log1p` of the nonnegative internal adverse MAE magnitude target fitted from training rows only. Runtime prediction inverse-maps with `expm1`, then applies the existing canonical MAE sign contract and unchanged OOD Governance V2 bounds in canonical internal magnitude units. All other scopes, directions, families, and heads persist `path_target_transform = none`.
+
+Reason: The remaining OOD source diagnosis found no failing learned-model OOD gate and no feature-sanitization, label, or OOD-bound defect. The only repeated learned-model OOD pattern was six non-selected development-holdout warnings for POOLED bull HistGradientBoosting MAE on 2025-10-31, classified as estimator extrapolation with product-class heterogeneity and a localized date/regime effect. A train-only monotonic log transform is narrower than changing labels, thresholds, gates, product-class scopes, model families, final-holdout rules, or OOD Governance V2.
+
+## 2026-06-26 — Model feature matrices sanitize nonfinite values before estimators
+
+Decision: Add `model_feature_nonfinite_hygiene_v1` as a model-matrix boundary policy. Feature matrices used for training, calibration, development holdout, scanner prediction, and audit prediction replace positive infinity, negative infinity, and unsafe finite float64 magnitudes with `NaN` before the existing train-fitted imputation path. Existing `NaN` values remain missing values, not market signals. New model artifacts persist nonfinite hygiene counts, affected columns, affected feature families, affected symbols/dates, split/stage records, and the hygiene policy hash. Scanner identity includes the hygiene metadata hash, and legacy artifacts are labeled `legacy_pre_nonfinite_hygiene` when loaded.
+
+Reason: The Product-Class Specialist V2 evidence diagnosis reproduced rejected `INVERSE` bull models caused by `obv_change_20 = -inf` for `RWM` and `SH` on `2016-07-19`. The root cause was missing nonfinite input hygiene with a contributing scope-specific data-quality issue. Treating infinities as missing values preserves labels, raw OHLCV, thresholds, quality gates, OOD Governance V2, and calibration governance while preventing invalid numerical values from reaching estimators.
+
+## 2026-06-25 — Product-class specialist scopes separate inverse and leveraged instruments
+
+Decision: Advance product-class specialist metadata to `product_class_specialist_v2` and replace the mixed non-ordinary target bucket with separate `INVERSE`, `LEVERAGED_LONG`, and `LEVERAGED_INVERSE` scopes. `inverse_etf` rows map to `INVERSE`, `leveraged_long_etf` rows map to `LEVERAGED_LONG`, and `leveraged_inverse_etf` rows map to `LEVERAGED_INVERSE`. `POOLED` and `ORDINARY` remain unchanged. Scope membership continues to derive only from governed universe roles, and full-universe context features remain available before target rows are filtered by scope.
+
+Reason: The product-class evidence diagnosis showed that the combined leveraged/inverse cohort still mixed mechanically different instruments. SOXL/SOXS-related path errors and mixed specialist evidence justify testing narrower target distributions without changing labels, thresholds, quality gates, OOD Governance V2, feature construction, or the frozen operational prospective model.
+
+## 2026-06-25 — Product-class specialist challengers separate target rows from market context
+
+Decision: Add `product_class_specialist_v1` challenger scope metadata with `POOLED`, `ORDINARY`, and `LEVERAGED_INVERSE` scopes derived only from governed universe roles. Specialist discovery filters eligible prediction rows by scope after full-universe feature construction, so market, sector, breadth, relationship, inverse/leveraged, and regime context remain available while ordinary and leveraged/inverse target distributions are no longer pooled indiscriminately. The first specialist generation trains only active nonlinear learned families, with matching naive controls where data is sufficient; logistic-family specialist challengers are excluded because their MFE/MAE path heads are retired.
+
+Reason: Read-only nonlinear diagnostics showed leveraged and inverse ETFs materially affected path-return, MFE, MAE, OOD, calibration, and concentration behavior. Product specialization tests that heterogeneity without touching the frozen pooled operational model, weakening quality gates, changing labels, changing thresholds, or using development evidence as final-holdout proof.
+
 ## 2026-06-22 — Path-metric heads use target-specific train-only feature screens
 
 Decision: Expected-return, MFE, and MAE regressors now use independent train-only feature screens keyed to their exact continuous path targets. The screens start from the complete eligible numeric feature universe, exclude labels and prohibited metadata, fit missingness/variance/imputation on training rows only, score surviving features with `mutual_info_regression`, prune correlations in score order, and persist separate manifests under `path_metric_target_specific_feature_screen_v1`.
@@ -205,3 +296,15 @@ Reason: Holdout selection, live scanner actionability, scanner caps, and portfol
 Decision: Preserve historical MFE and MAE labels unchanged, but train MFE on favorable magnitude and MAE on adverse magnitude under `path_metric_magnitude_domain_v1`. Linear-family path-magnitude heads use Tweedie regression with a log link, HistGradientBoosting uses Poisson loss, ExtraTrees trains directly on nonnegative magnitudes, and naive controls use nonnegative magnitude summaries.
 
 Reason: MFE is physically nonnegative and MAE is physically nonpositive. The previous unconstrained path regressors could emit negative MFE or positive MAE predictions. Domain correctness must be achieved by target representation and estimator choice, not post-hoc clipping.
+
+## 2026-06-24 — Linear-family path MFE/MAE heads are retired
+
+Decision: Logistic-family model artifacts keep the primary positive-return classifier, target-before-stop classifier, and expected-return regressor active, but mark MFE and MAE path heads `RETIRED_UNSUITABLE_ESTIMATOR` under `linear_family_path_head_retirement_v1`. They fit no Tweedie MFE/MAE estimator and fail mandatory required-path-head-active promotion gates. ExtraTrees and HistGradientBoosting path heads remain active under the existing magnitude-domain contract.
+
+Reason: The baseline domain-preserving generation still showed the linear path heads as unsuitable for required MFE/MAE magnitude modeling. Retiring the unsuitable heads is safer than preserving a formally domain-valid but unsuitable estimator, and it keeps scanner actionability, promotion, and prospective final-holdout enrollment aligned with required path-head availability.
+
+## 2026-06-24 — Path heads train in ATR-normalized target units
+
+Decision: Preserve historical expected-return, MFE, and MAE labels unchanged, but train active path heads on internal targets divided by close-known signal-date `atr_pct_14` under `atr_normalized_path_targets_v1`. Expected return uses signed ATR units, MFE uses favorable magnitude ATR units, and MAE uses adverse magnitude ATR units. Predictions are mapped back to canonical decimal returns before scanner output, selection policy, attribution, portfolio replay, and paper-forward testing. Logistic-family MFE/MAE heads remain retired.
+
+Reason: The nonlinear diagnosis found raw-percentage path targets were heterogeneous across ordinary stocks, ETFs, leveraged ETFs, inverse ETFs, regimes, and years. ATR normalization addresses the target-unit heterogeneity directly while preserving label history, target/stop definitions, model families, selection thresholds, and OOD Governance V2 thresholds.

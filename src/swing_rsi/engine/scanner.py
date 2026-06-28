@@ -13,16 +13,25 @@ import pandas as pd
 from swing_rsi.engine.attribution import explain_candidate
 from swing_rsi.engine.models import (
     EXPECTED_RETURN_HEAD,
+    LINEAR_PATH_HEAD_RETIREMENT_REASON,
     MAE_HEAD,
     MFE_HEAD,
+    PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
     PATH_MAGNITUDE_HEADS,
     PATH_METRIC_HEADS,
+    PATH_TARGET_ATR_FEATURE,
+    PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+    PATH_TARGET_TRANSFORM_NONE,
+    ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     ModelBundle,
+    bundle_feature_hygiene_metadata,
     bundle_feature_screen_metadata,
     bundle_head_feature_manifest,
     bundle_path_domain_metadata,
+    bundle_product_class_metadata,
     bundle_tbs_calibration_metadata,
+    path_target_transform_metadata_hash,
     predict_bundle,
 )
 from swing_rsi.engine.ood import (
@@ -30,6 +39,16 @@ from swing_rsi.engine.ood import (
     PREDICTION_OOD_GOVERNANCE_VERSION,
     REGRESSION_HEADS,
     bundle_ood_identity,
+)
+from swing_rsi.engine.product_scope import (
+    PRODUCT_CLASS_SCHEMA_VERSION,
+    PRODUCT_CLASS_SCOPE_MISMATCH_REASON,
+    PRODUCT_CLASS_SCOPE_POOLED,
+    ProductClassScope,
+    build_product_class_scope_definition,
+    normalize_product_class_scope,
+    product_class_scope_for_role,
+    scope_allows_symbol,
 )
 from swing_rsi.engine.selection import (
     CANONICAL_CANDIDATE_ORDER,
@@ -42,9 +61,10 @@ from swing_rsi.engine.selection import (
     selection_policy_from_metrics,
 )
 from swing_rsi.engine.storage import dumps, engine_connection, loads
+from swing_rsi.engine.universe import UniverseConfig
 
-SCANNER_IDENTITY_SCHEMA_VERSION = 7
-SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v7-path-domain-metadata"
+SCANNER_IDENTITY_SCHEMA_VERSION = 12
+SCANNER_IMPLEMENTATION_VERSION = "scanner-cache-identity-v12-path-target-transform"
 
 
 @dataclass(frozen=True)
@@ -163,6 +183,26 @@ def _bundle_metric_string(bundle: ModelBundle, key: str) -> str:
     return str(value) if value not in {None, ""} else ""
 
 
+def _normalized_product_scope_metadata(bundle: ModelBundle) -> dict[str, object]:
+    metadata = bundle_product_class_metadata(bundle)
+    roles = [str(value) for value in cast(tuple[object, ...], metadata["eligible_roles"])]
+    symbols = [str(value) for value in cast(tuple[object, ...], metadata["eligible_symbols"])]
+    return {
+        "schema_version": str(metadata["schema_version"]),
+        "scope": str(metadata["scope"]),
+        "eligible_roles": roles,
+        "eligible_symbols": symbols,
+        "eligible_symbol_count": len(symbols),
+        "role_scope_mapping": {
+            str(key): str(value)
+            for key, value in cast(dict[str, object], metadata["role_scope_mapping"]).items()
+        },
+        "role_scope_mapping_hash": str(metadata["role_scope_mapping_hash"]),
+        "scope_configuration_hash": str(metadata["scope_configuration_hash"]),
+        "universe_scope_hash": str(metadata["universe_scope_hash"]),
+    }
+
+
 def _finite_float(value: object) -> float:
     try:
         numeric = float(str(value))
@@ -195,6 +235,15 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
     ):
         if bool(item.get(f"{head_name}_feature_screen_metadata_missing", False)):
             rejection_reasons.append(reason)
+        feature_screen_schema = str(item.get(f"{head_name}_feature_screen_schema") or "")
+        target_normalization_schema = str(
+            item.get(f"{head_name}_target_normalization_schema_version") or ""
+        )
+        if (
+            feature_screen_schema == "path_metric_target_specific_feature_screen_v1"
+            and target_normalization_schema != PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+        ):
+            rejection_reasons.append(f"{head_name}_target_normalization_metadata_missing")
     for head_name, output_column, metadata_reason, magnitude_reason, signed_reason in (
         (
             "mfe",
@@ -211,8 +260,24 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
             "mae_prediction_sign_contract_failed",
         ),
     ):
+        retired_path_head = (
+            str(item.get(f"{head_name}_path_head_capability_state") or "")
+            == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+        )
+        if retired_path_head:
+            retirement_reason = str(
+                item.get(f"{head_name}_path_head_retirement_reason")
+                or LINEAR_PATH_HEAD_RETIREMENT_REASON
+            )
+            rejection_reasons.append(f"{head_name}_{retirement_reason}")
+            continue
         if bool(item.get(f"{head_name}_domain_metadata_missing", False)):
             rejection_reasons.append(metadata_reason)
+        if bool(
+            item.get(f"{head_name}_path_target_transform_metadata_missing", False)
+            or item.get(f"{output_column}_path_target_transform_metadata_missing", False)
+        ):
+            rejection_reasons.append("path_target_transform_metadata_missing")
         if bool(item.get(f"{output_column}_magnitude_prediction_invalid", False)):
             rejection_reasons.append(magnitude_reason)
         if bool(item.get(f"{output_column}_signed_prediction_invalid", False)):
@@ -237,6 +302,12 @@ def _prediction_integrity_result(item: dict[str, object]) -> dict[str, object]:
     max_severity = 0.0
     for head in REGRESSION_HEADS:
         output_column = HEAD_OUTPUT_COLUMNS[head]
+        if (
+            head in {"mfe", "mae"}
+            and str(item.get(f"{head}_path_head_capability_state") or "")
+            == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+        ):
+            continue
         if (
             (head == "return" and expected_return_missing)
             or (head == "mfe" and mfe_missing)
@@ -302,6 +373,8 @@ def _build_scan_execution_identity(
     model_target_before_stop_calibration_metadata: dict[str, dict[str, object]],
     model_path_feature_metadata: dict[str, dict[str, object]],
     model_path_domain_metadata: dict[str, dict[str, object]],
+    model_product_scope_metadata: dict[str, dict[str, object]],
+    model_feature_hygiene_metadata: dict[str, dict[str, object]],
     scanner_config: ScannerConfig,
     universe_snapshot_id: str,
     feature_manifest_hash: str,
@@ -343,10 +416,19 @@ def _build_scan_execution_identity(
         model_id: model_path_domain_metadata.get(model_id, {}) for model_id in model_ids
     }
     path_domain_metadata_hash = _stable_hash(path_domain_metadata_payload)
+    product_scope_metadata_payload = {
+        model_id: model_product_scope_metadata.get(model_id, {}) for model_id in model_ids
+    }
+    product_scope_metadata_hash = _stable_hash(product_scope_metadata_payload)
+    feature_hygiene_metadata_payload = {
+        model_id: model_feature_hygiene_metadata.get(model_id, {}) for model_id in model_ids
+    }
+    feature_hygiene_metadata_hash = _stable_hash(feature_hygiene_metadata_payload)
     identity_payload: dict[str, object] = {
         "scanner_identity_schema_version": SCANNER_IDENTITY_SCHEMA_VERSION,
         "scanner_implementation_version": SCANNER_IMPLEMENTATION_VERSION,
         "prediction_ood_governance_schema_version": PREDICTION_OOD_GOVERNANCE_VERSION,
+        "product_class_schema_version": PRODUCT_CLASS_SCHEMA_VERSION,
         "market_as_of_date": as_of_date,
         "universe_snapshot_id": universe_snapshot_id,
         "feature_manifest_hash": feature_manifest_hash,
@@ -378,6 +460,10 @@ def _build_scan_execution_identity(
         "path_metric_feature_metadata_hash": path_feature_metadata_hash,
         "path_metric_domain_metadata": path_domain_metadata_payload,
         "path_metric_domain_metadata_hash": path_domain_metadata_hash,
+        "product_class_scope_metadata": product_scope_metadata_payload,
+        "product_class_scope_metadata_hash": product_scope_metadata_hash,
+        "model_feature_nonfinite_hygiene_metadata": feature_hygiene_metadata_payload,
+        "model_feature_nonfinite_hygiene_metadata_hash": feature_hygiene_metadata_hash,
         "effective_selection_policies": effective_policy_payload,
         "raw_scanner_config": raw_config,
         "raw_scanner_config_hash": raw_config_hash,
@@ -401,6 +487,10 @@ def _build_scan_execution_identity(
         "path_metric_feature_metadata_hash": path_feature_metadata_hash,
         "path_metric_domain_metadata_json": dumps(path_domain_metadata_payload),
         "path_metric_domain_metadata_hash": path_domain_metadata_hash,
+        "product_class_scope_metadata_json": dumps(product_scope_metadata_payload),
+        "product_class_scope_metadata_hash": product_scope_metadata_hash,
+        "model_feature_nonfinite_hygiene_metadata_json": dumps(feature_hygiene_metadata_payload),
+        "model_feature_nonfinite_hygiene_metadata_hash": feature_hygiene_metadata_hash,
         "effective_model_policy_json": dumps(effective_policy_payload),
         "effective_policy_bundle_hash": effective_policy_bundle_hash,
         "canonical_scan_execution_identity": identity_payload,
@@ -448,6 +538,10 @@ def _metadata_matches_scan_identity(
         == expected_metadata["path_metric_feature_metadata_hash"]
         and metadata.get("path_metric_domain_metadata_hash")
         == expected_metadata["path_metric_domain_metadata_hash"]
+        and metadata.get("product_class_scope_metadata_hash")
+        == expected_metadata["product_class_scope_metadata_hash"]
+        and metadata.get("model_feature_nonfinite_hygiene_metadata_hash")
+        == expected_metadata["model_feature_nonfinite_hygiene_metadata_hash"]
         and metadata.get("feature_manifest_hash") == expected_metadata["feature_manifest_hash"]
         and metadata.get("universe_snapshot_id") == expected_metadata["universe_snapshot_id"]
         and metadata.get("model_generation_ids") == expected_metadata["model_generation_ids"]
@@ -508,6 +602,88 @@ def _persist_scanner_candidates(db_path: str | Path, rows: pd.DataFrame) -> None
             )
 
 
+def _row_scope_from_item(
+    item: dict[str, object],
+    *,
+    universe_scope: ProductClassScope | None = None,
+    universe_role: str | None = None,
+) -> tuple[ProductClassScope | None, str, str]:
+    role = universe_role or str(item.get("role") or "").strip()
+    if not role:
+        return universe_scope, "", "missing_product_class_role"
+    try:
+        return product_class_scope_for_role(role), role, ""
+    except ValueError as exc:
+        return None, role, str(exc)
+
+
+def _scope_rejection_row(
+    *,
+    scan_id: str,
+    as_of_date: str,
+    item: dict[str, object],
+    bundle: ModelBundle,
+    model_state: str,
+    quality_eligible: bool,
+    policy_hash: str | None,
+    snapshot_hash: str,
+    row_scope: ProductClassScope | None,
+    row_role: str,
+    scope_error: str,
+) -> dict[str, object]:
+    product_metadata = bundle_product_class_metadata(bundle)
+    model_scope = str(product_metadata["scope"] or PRODUCT_CLASS_SCOPE_POOLED)
+    product_roles = tuple(cast(tuple[object, ...], product_metadata["eligible_roles"]))
+    product_symbols = tuple(cast(tuple[object, ...], product_metadata["eligible_symbols"]))
+    reason = PRODUCT_CLASS_SCOPE_MISMATCH_REASON
+    if scope_error:
+        reason = f"{reason};{scope_error}"
+    return {
+        "scan_id": scan_id,
+        "as_of_date": as_of_date,
+        "ticker": item.get("symbol", ""),
+        "direction": "Bullish" if bundle.direction == "bull" else "Bearish",
+        "horizon": int(bundle.horizon),
+        "signal_close": item.get("Close", float("nan")),
+        "calibrated_probability": math.nan,
+        "expected_return": math.nan,
+        "expected_mfe": math.nan,
+        "expected_mae": math.nan,
+        "target_before_stop_probability": math.nan,
+        "composite_utility_score": math.nan,
+        "liquidity_score": item.get("dollar_volume", math.nan),
+        "regime": item.get("market_regime_label", "unknown"),
+        "sector": item.get("sector", "unknown"),
+        "model_id": bundle.model_id,
+        "model_state": model_state,
+        "model_quality_gate_eligible": quality_eligible,
+        "selection_policy_hash": policy_hash or "",
+        "feature_snapshot_hash": snapshot_hash,
+        "candidate_status": "REJECTED",
+        "exclusion_reason": reason,
+        "product_class_schema_version": str(product_metadata["schema_version"]),
+        "product_class_scope": model_scope,
+        "row_product_class_scope": row_scope or "",
+        "row_product_class_role": row_role,
+        "product_class_scope_match": False,
+        "scanner_routing_result": PRODUCT_CLASS_SCOPE_MISMATCH_REASON,
+        "product_class_scope_configuration_hash": str(product_metadata["scope_configuration_hash"]),
+        "product_class_universe_scope_hash": str(product_metadata["universe_scope_hash"]),
+        "product_class_role_scope_mapping_hash": str(product_metadata["role_scope_mapping_hash"]),
+        "product_class_eligible_roles": ";".join(str(value) for value in product_roles),
+        "product_class_eligible_symbol_count": len(product_symbols),
+        "ood_warning": False,
+        "ood_affected_heads": "",
+        "ood_warning_details": "[]",
+        "ood_max_severity": 0.0,
+        "top_attribution_categories": "",
+        "top_confirming_relationships": "",
+        "top_divergences": "",
+        "supporting_evidence": "",
+        "historical_analogs": "[]",
+    }
+
+
 def _apply_scanner_caps(
     rows: pd.DataFrame,
     *,
@@ -543,6 +719,7 @@ def run_scanner(
     include_challengers: bool = False,
     include_candidates: bool = False,
     config: ScannerConfig | None = None,
+    universe: UniverseConfig | None = None,
 ) -> ScannerSnapshot:
     config = config or ScannerConfig()
     model_states = model_states or {bundle.model_id: "CHAMPION" for bundle in bundles}
@@ -618,6 +795,13 @@ def run_scanner(
     }
     normalized_path_feature_metadata = {}
     normalized_path_domain_metadata = {}
+    normalized_product_scope_metadata = {
+        model_id: _normalized_product_scope_metadata(bundles_by_id[model_id])
+        for model_id in model_ids
+    }
+    normalized_feature_hygiene_metadata = {
+        model_id: bundle_feature_hygiene_metadata(bundles_by_id[model_id]) for model_id in model_ids
+    }
     for model_id in model_ids:
         bundle = bundles_by_id[model_id]
         head_payload: dict[str, object] = {}
@@ -628,6 +812,23 @@ def run_scanner(
                     "screening_schema_version", "legacy_shared_path_feature_screen"
                 ),
                 "target_label_name": metadata.get("target_label_name", ""),
+                "external_target_name": metadata.get("external_target_name", ""),
+                "internal_target_name": metadata.get("internal_target_name", ""),
+                "internal_magnitude_target_name": metadata.get(
+                    "internal_magnitude_target_name", ""
+                ),
+                "target_normalization_schema_version": metadata.get(
+                    "target_normalization_schema_version", ""
+                ),
+                "target_normalization_method": metadata.get("target_normalization_method", ""),
+                "target_normalization_atr_feature_name": metadata.get(
+                    "atr_feature_name", PATH_TARGET_ATR_FEATURE
+                )
+                if metadata.get("target_normalization_schema_version")
+                == PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+                else "",
+                "target_normalization_hash": metadata.get("target_normalization_hash", ""),
+                "prediction_mapping_version": metadata.get("prediction_mapping_version", ""),
                 "selected_feature_count": metadata.get("selected_feature_count", ""),
                 "selected_feature_families": metadata.get("selected_feature_families", {}),
                 "selected_feature_manifest_hash": bundle_head_feature_manifest(bundle, head),
@@ -636,6 +837,10 @@ def run_scanner(
         domain_payload: dict[str, object] = {}
         for head in PATH_MAGNITUDE_HEADS:
             metadata = bundle_path_domain_metadata(bundle, head)
+            raw_transform_metadata = metadata.get("path_target_transform_metadata")
+            transform_metadata = (
+                raw_transform_metadata if isinstance(raw_transform_metadata, dict) else {}
+            )
             domain_payload[head] = {
                 "domain_schema_version": metadata.get(
                     "domain_schema_version", "legacy_unconstrained_path_metric_model"
@@ -648,8 +853,39 @@ def run_scanner(
                 "estimator_loss": metadata.get("estimator_loss", ""),
                 "estimator_hash": metadata.get("estimator_hash", ""),
                 "prediction_mapping_version": metadata.get("prediction_mapping_version", ""),
+                "target_normalization_schema_version": metadata.get(
+                    "target_normalization_schema_version", ""
+                ),
+                "target_normalization_atr_feature_name": metadata.get("atr_feature_name", ""),
+                "target_normalization_hash": metadata.get("target_normalization_hash", ""),
+                "internal_target_unit": metadata.get("internal_target_unit", ""),
+                "canonical_external_unit": metadata.get("canonical_external_unit", ""),
+                "path_head_capability_state": metadata.get("path_head_capability_state", ""),
+                "path_head_retirement_schema_version": metadata.get(
+                    "path_head_retirement_schema_version", ""
+                ),
+                "path_head_retirement_reason": metadata.get("path_head_retirement_reason", ""),
                 "selected_feature_manifest_hash": metadata.get(
                     "selected_feature_manifest_hash", ""
+                ),
+                "path_target_transform_schema_version": metadata.get(
+                    "path_target_transform_schema_version",
+                    ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+                ),
+                "path_target_transform": metadata.get(
+                    "path_target_transform", PATH_TARGET_TRANSFORM_NONE
+                ),
+                "path_target_transform_name": metadata.get(
+                    "path_target_transform_name", PATH_TARGET_TRANSFORM_NONE
+                ),
+                "path_target_transform_status": metadata.get("path_target_transform_status", ""),
+                "path_target_transform_fit_split": metadata.get(
+                    "path_target_transform_fit_split", ""
+                ),
+                "path_target_transform_hash": metadata.get("path_target_transform_hash", ""),
+                "path_target_inverse_transform": metadata.get("path_target_inverse_transform", ""),
+                "path_target_transform_metadata_hash": path_target_transform_metadata_hash(
+                    transform_metadata
                 ),
             }
         normalized_path_domain_metadata[model_id] = domain_payload
@@ -665,6 +901,8 @@ def run_scanner(
         model_target_before_stop_calibration_metadata=normalized_tbs_calibration_metadata,
         model_path_feature_metadata=normalized_path_feature_metadata,
         model_path_domain_metadata=normalized_path_domain_metadata,
+        model_product_scope_metadata=normalized_product_scope_metadata,
+        model_feature_hygiene_metadata=normalized_feature_hygiene_metadata,
         scanner_config=config,
         universe_snapshot_id=universe_snapshot_id,
         feature_manifest_hash=feature_manifest_hash,
@@ -699,17 +937,62 @@ def run_scanner(
     parquet_path = output / f"{scan_id}_scanner.parquet"
 
     candidate_frames: list[pd.DataFrame] = []
+    scope_rejection_rows: list[dict[str, object]] = []
+    universe_roles_by_symbol: dict[str, str] = {}
+    universe_scopes_by_symbol: dict[str, ProductClassScope] = {}
+    if universe is not None:
+        pooled_scope = build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_POOLED)
+        universe_roles_by_symbol = dict(pooled_scope.roles_by_symbol)
+        universe_scopes_by_symbol = {
+            symbol: product_class_scope_for_role(role)
+            for symbol, role in universe_roles_by_symbol.items()
+        }
     for bundle in bundles:
-        predictions = predict_bundle(bundle, latest)
-        candidate_frames.append(predictions)
-    predictions = pd.concat(candidate_frames, ignore_index=True)
-    enriched = predictions.merge(
-        latest,
-        on=["Date", "symbol"],
-        how="left",
-        suffixes=("", "_feature"),
-    )
-    rows: list[dict[str, object]] = []
+        product_metadata = bundle_product_class_metadata(bundle)
+        model_scope = normalize_product_class_scope(
+            product_metadata["scope"] or PRODUCT_CLASS_SCOPE_POOLED
+        )
+        allowed_indexes: list[object] = []
+        for index, feature_row in latest.iterrows():
+            item = {str(key): value for key, value in feature_row.to_dict().items()}
+            symbol = str(item.get("symbol") or "")
+            row_scope, row_role, scope_error = _row_scope_from_item(
+                item,
+                universe_scope=universe_scopes_by_symbol.get(symbol),
+                universe_role=universe_roles_by_symbol.get(symbol),
+            )
+            if scope_allows_symbol(model_scope, row_scope):
+                allowed_indexes.append(index)
+                continue
+            scope_rejection_rows.append(
+                _scope_rejection_row(
+                    scan_id=scan_id,
+                    as_of_date=as_of.date().isoformat(),
+                    item=item,
+                    bundle=bundle,
+                    model_state=model_states.get(bundle.model_id, "UNKNOWN"),
+                    quality_eligible=bool(model_eligibility.get(bundle.model_id, False)),
+                    policy_hash=model_policy_hashes.get(bundle.model_id),
+                    snapshot_hash=snapshot_hash,
+                    row_scope=row_scope,
+                    row_role=row_role,
+                    scope_error=scope_error,
+                )
+            )
+        if allowed_indexes:
+            predictions = predict_bundle(bundle, latest.loc[allowed_indexes])
+            candidate_frames.append(predictions)
+    if candidate_frames:
+        predictions = pd.concat(candidate_frames, ignore_index=True)
+        enriched = predictions.merge(
+            latest,
+            on=["Date", "symbol"],
+            how="left",
+            suffixes=("", "_feature"),
+        )
+    else:
+        enriched = pd.DataFrame()
+    rows: list[dict[str, object]] = list(scope_rejection_rows)
     for _, row in enriched.iterrows():
         item = {str(key): value for key, value in row.to_dict().items()}
         dollar_volume = float(item.get("dollar_volume", 0.0) or 0.0)
@@ -722,10 +1005,25 @@ def run_scanner(
         persisted_policy = model_policies.get(model_id)
         effective_policy = effective_policies.get(model_id)
         policy_hash = model_policy_hashes.get(model_id)
+        symbol = str(item.get("symbol") or "")
+        row_scope, row_role, scope_error = _row_scope_from_item(
+            item,
+            universe_scope=universe_scopes_by_symbol.get(symbol),
+            universe_role=universe_roles_by_symbol.get(symbol),
+        )
+        model_scope = normalize_product_class_scope(
+            item.get("product_class_scope") or PRODUCT_CLASS_SCOPE_POOLED
+        )
+        scope_match = scope_allows_symbol(model_scope, row_scope)
         prediction_integrity = _prediction_integrity_result(item)
         status = "ACTIONABLE_PAPER_CANDIDATE"
         exclusion = ""
-        if model_state not in {"CHAMPION", "CHALLENGER"}:
+        if not scope_match:
+            status = "REJECTED"
+            exclusion = PRODUCT_CLASS_SCOPE_MISMATCH_REASON
+            if scope_error:
+                exclusion = f"{exclusion};{scope_error}"
+        elif model_state not in {"CHAMPION", "CHALLENGER"}:
             status = "REJECTED"
             exclusion = "model_not_promoted"
         elif not quality_eligible:
@@ -823,6 +1121,21 @@ def run_scanner(
                 "expected_return_transformed": float(
                     item.get("expected_return_transformed", expected_return)
                 ),
+                "expected_return_internal_atr_units": item.get(
+                    "expected_return_internal_atr_units"
+                ),
+                "expected_return_target_normalization_schema_version": item.get(
+                    "expected_return_target_normalization_schema_version", ""
+                ),
+                "expected_return_target_normalization_hash": item.get(
+                    "expected_return_target_normalization_hash", ""
+                ),
+                "expected_return_target_normalization_atr_feature_name": item.get(
+                    "expected_return_target_normalization_atr_feature_name", ""
+                ),
+                "expected_return_target_prediction_mapping_version": item.get(
+                    "expected_return_target_prediction_mapping_version", ""
+                ),
                 "expected_return_out_of_distribution": bool(
                     item.get("expected_return_out_of_distribution", False)
                 ),
@@ -861,6 +1174,16 @@ def run_scanner(
                 "expected_mfe_internal_magnitude": float(
                     item.get("expected_mfe_internal_magnitude", float("nan"))
                 ),
+                "expected_mfe_internal_magnitude_atr_units": item.get(
+                    "expected_mfe_internal_magnitude_atr_units"
+                ),
+                "mfe_target_normalization_schema_version": item.get(
+                    "mfe_target_normalization_schema_version", ""
+                ),
+                "mfe_target_normalization_hash": item.get("mfe_target_normalization_hash", ""),
+                "mfe_target_normalization_atr_feature_name": item.get(
+                    "mfe_target_normalization_atr_feature_name", ""
+                ),
                 "expected_mfe_magnitude_prediction_invalid": bool(
                     item.get("expected_mfe_magnitude_prediction_invalid", False)
                 ),
@@ -897,6 +1220,12 @@ def run_scanner(
                     item.get("mfe_feature_screen_metadata_missing", False)
                 ),
                 "mfe_domain_schema_version": item.get("mfe_domain_schema_version", ""),
+                "mfe_path_head_capability_state": item.get("mfe_path_head_capability_state", ""),
+                "mfe_path_head_retired": bool(item.get("mfe_path_head_retired", False)),
+                "mfe_path_head_retirement_schema_version": item.get(
+                    "mfe_path_head_retirement_schema_version", ""
+                ),
+                "mfe_path_head_retirement_reason": item.get("mfe_path_head_retirement_reason", ""),
                 "mfe_domain_metadata_missing": bool(item.get("mfe_domain_metadata_missing", False)),
                 "mfe_external_target_name": item.get("mfe_external_target_name", ""),
                 "mfe_internal_magnitude_target_name": item.get(
@@ -907,6 +1236,15 @@ def run_scanner(
                 "mfe_magnitude_estimator_loss": item.get("mfe_magnitude_estimator_loss", ""),
                 "mfe_magnitude_estimator_hash": item.get("mfe_magnitude_estimator_hash", ""),
                 "mfe_prediction_mapping_version": item.get("mfe_prediction_mapping_version", ""),
+                "mfe_path_target_transform_schema_version": item.get(
+                    "mfe_path_target_transform_schema_version", ""
+                ),
+                "mfe_path_target_transform": item.get("mfe_path_target_transform", ""),
+                "mfe_path_target_transform_name": item.get("mfe_path_target_transform_name", ""),
+                "mfe_path_target_transform_hash": item.get("mfe_path_target_transform_hash", ""),
+                "mfe_path_target_transform_metadata_missing": bool(
+                    item.get("mfe_path_target_transform_metadata_missing", False)
+                ),
                 "mfe_domain_metadata_hash": (
                     _stable_hash(path_domain_metadata[MFE_HEAD])
                     if path_domain_metadata[MFE_HEAD]
@@ -919,6 +1257,31 @@ def run_scanner(
                 ),
                 "expected_mae_internal_magnitude": float(
                     item.get("expected_mae_internal_magnitude", float("nan"))
+                ),
+                "expected_mae_internal_magnitude_atr_units": item.get(
+                    "expected_mae_internal_magnitude_atr_units"
+                ),
+                "expected_mae_inverse_transformed_internal_magnitude": item.get(
+                    "expected_mae_inverse_transformed_internal_magnitude"
+                ),
+                "expected_mae_path_target_transform_schema_version": item.get(
+                    "expected_mae_path_target_transform_schema_version", ""
+                ),
+                "expected_mae_path_target_transform": item.get(
+                    "expected_mae_path_target_transform", ""
+                ),
+                "expected_mae_path_target_transform_hash": item.get(
+                    "expected_mae_path_target_transform_hash", ""
+                ),
+                "expected_mae_path_target_transform_metadata_missing": bool(
+                    item.get("expected_mae_path_target_transform_metadata_missing", False)
+                ),
+                "mae_target_normalization_schema_version": item.get(
+                    "mae_target_normalization_schema_version", ""
+                ),
+                "mae_target_normalization_hash": item.get("mae_target_normalization_hash", ""),
+                "mae_target_normalization_atr_feature_name": item.get(
+                    "mae_target_normalization_atr_feature_name", ""
                 ),
                 "expected_mae_magnitude_prediction_invalid": bool(
                     item.get("expected_mae_magnitude_prediction_invalid", False)
@@ -956,6 +1319,12 @@ def run_scanner(
                     item.get("mae_feature_screen_metadata_missing", False)
                 ),
                 "mae_domain_schema_version": item.get("mae_domain_schema_version", ""),
+                "mae_path_head_capability_state": item.get("mae_path_head_capability_state", ""),
+                "mae_path_head_retired": bool(item.get("mae_path_head_retired", False)),
+                "mae_path_head_retirement_schema_version": item.get(
+                    "mae_path_head_retirement_schema_version", ""
+                ),
+                "mae_path_head_retirement_reason": item.get("mae_path_head_retirement_reason", ""),
                 "mae_domain_metadata_missing": bool(item.get("mae_domain_metadata_missing", False)),
                 "mae_external_target_name": item.get("mae_external_target_name", ""),
                 "mae_internal_magnitude_target_name": item.get(
@@ -966,6 +1335,15 @@ def run_scanner(
                 "mae_magnitude_estimator_loss": item.get("mae_magnitude_estimator_loss", ""),
                 "mae_magnitude_estimator_hash": item.get("mae_magnitude_estimator_hash", ""),
                 "mae_prediction_mapping_version": item.get("mae_prediction_mapping_version", ""),
+                "mae_path_target_transform_schema_version": item.get(
+                    "mae_path_target_transform_schema_version", ""
+                ),
+                "mae_path_target_transform": item.get("mae_path_target_transform", ""),
+                "mae_path_target_transform_name": item.get("mae_path_target_transform_name", ""),
+                "mae_path_target_transform_hash": item.get("mae_path_target_transform_hash", ""),
+                "mae_path_target_transform_metadata_missing": bool(
+                    item.get("mae_path_target_transform_metadata_missing", False)
+                ),
                 "mae_domain_metadata_hash": (
                     _stable_hash(path_domain_metadata[MAE_HEAD])
                     if path_domain_metadata[MAE_HEAD]
@@ -1013,6 +1391,33 @@ def run_scanner(
                 ),
                 "ood_warning_details": dumps(prediction_integrity["ood_warning_details"]),
                 "ood_max_severity": prediction_integrity["ood_max_severity"],
+                "model_feature_nonfinite_hygiene_schema_version": item.get(
+                    "model_feature_nonfinite_hygiene_schema_version", ""
+                ),
+                "model_feature_nonfinite_hygiene_policy_hash": item.get(
+                    "model_feature_nonfinite_hygiene_policy_hash", ""
+                ),
+                "model_feature_nonfinite_hygiene_warning": bool(
+                    item.get("model_feature_nonfinite_hygiene_warning", False)
+                ),
+                "model_feature_invalid_pre_sanitization_count": int(
+                    item.get("model_feature_invalid_pre_sanitization_count", 0) or 0
+                ),
+                "model_feature_invalid_post_sanitization_count": int(
+                    item.get("model_feature_invalid_post_sanitization_count", 0) or 0
+                ),
+                "model_feature_hygiene_sanitized_columns": item.get(
+                    "model_feature_hygiene_sanitized_columns", ""
+                ),
+                "model_feature_hygiene_affected_symbols": item.get(
+                    "model_feature_hygiene_affected_symbols", ""
+                ),
+                "model_feature_hygiene_affected_dates": item.get(
+                    "model_feature_hygiene_affected_dates", ""
+                ),
+                "model_feature_hygiene_runtime_metadata_json": item.get(
+                    "model_feature_hygiene_runtime_metadata_json", ""
+                ),
                 "composite_utility_score": utility,
                 "liquidity_score": dollar_volume,
                 "regime": item.get("market_regime_label", "unknown"),
@@ -1026,6 +1431,29 @@ def run_scanner(
                 "model_state": model_state,
                 "model_quality_gate_eligible": quality_eligible,
                 "selection_policy_hash": policy_hash or "",
+                "product_class_schema_version": item.get(
+                    "product_class_schema_version", PRODUCT_CLASS_SCHEMA_VERSION
+                ),
+                "product_class_scope": item.get("product_class_scope", PRODUCT_CLASS_SCOPE_POOLED),
+                "row_product_class_scope": row_scope or "",
+                "row_product_class_role": row_role,
+                "product_class_scope_match": scope_match,
+                "scanner_routing_result": "product_class_scope_match"
+                if scope_match
+                else PRODUCT_CLASS_SCOPE_MISMATCH_REASON,
+                "product_class_scope_configuration_hash": item.get(
+                    "product_class_scope_configuration_hash", ""
+                ),
+                "product_class_universe_scope_hash": item.get(
+                    "product_class_universe_scope_hash", ""
+                ),
+                "product_class_role_scope_mapping_hash": item.get(
+                    "product_class_role_scope_mapping_hash", ""
+                ),
+                "product_class_eligible_roles": item.get("product_class_eligible_roles", ""),
+                "product_class_eligible_symbol_count": item.get(
+                    "product_class_eligible_symbol_count", ""
+                ),
                 "feature_snapshot_hash": snapshot_hash,
                 "candidate_status": status,
                 "exclusion_reason": exclusion,

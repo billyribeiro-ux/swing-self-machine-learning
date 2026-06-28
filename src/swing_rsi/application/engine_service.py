@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,8 @@ from swing_rsi.data.loader import load_ohlcv_csv
 from swing_rsi.engine.drift import DriftReport, build_drift_report
 from swing_rsi.engine.features import (
     FeatureBuildResult,
+    RegimeKMeansCacheConfig,
+    annotate_regime_kmeans_cache_status,
     build_feature_panel,
     feature_family_map_for_columns,
     numeric_feature_columns,
@@ -35,7 +38,13 @@ from swing_rsi.engine.forward import (
 from swing_rsi.engine.gates import promotion_eligibility
 from swing_rsi.engine.labels import LabelConfig, build_label_panel, merge_features_and_labels
 from swing_rsi.engine.manifest import create_manifest, hash_file, write_manifest
-from swing_rsi.engine.models import DiscoveryConfig, discover_models, load_model_bundle
+from swing_rsi.engine.models import (
+    NONLINEAR_SPECIALIST_MODEL_FAMILIES,
+    DiscoveryConfig,
+    discover_models,
+    load_model_bundle,
+)
+from swing_rsi.engine.product_scope import PRODUCT_CLASS_SCOPES
 from swing_rsi.engine.registry import (
     RegisteredModel,
     champion_models,
@@ -194,6 +203,7 @@ def build_autonomous_features(
     root: str | Path,
     *,
     universe_path: str | Path | None = None,
+    rebuild_regime_cache: bool = False,
 ) -> FeaturePipelineResult:
     project_root = Path(root)
     paths = ProjectPaths(project_root)
@@ -202,7 +212,21 @@ def build_autonomous_features(
     frames = load_universe_frames(project_root, universe)
     if not frames:
         raise ValueError("No raw OHLCV files are available for the enabled universe")
-    features = build_feature_panel(frames, universe)
+    force_rebuild = rebuild_regime_cache or os.getenv("SWING_RSI_REBUILD_REGIME_CACHE") == "1"
+    regime_cache_config = RegimeKMeansCacheConfig(
+        cache_dir=paths.regime_cache,
+        universe_snapshot_id=universe.snapshot_id,
+        force_rebuild=force_rebuild,
+    )
+    features = build_feature_panel(
+        frames,
+        universe,
+        regime_cache_config=regime_cache_config,
+    )
+    annotate_regime_kmeans_cache_status(
+        regime_cache_config,
+        feature_manifest_hash=features.manifest_hash,
+    )
     labels = build_label_panel(frames, LabelConfig())
     modeling = merge_features_and_labels(features.frame, labels)
     feature_path = (
@@ -279,8 +303,12 @@ def run_model_discovery(
         config=DiscoveryConfig(
             minimum_training_samples=minimum_training_samples,
             minimum_holdout_samples=minimum_holdout_samples,
+            product_class_scopes=PRODUCT_CLASS_SCOPES,
+            model_families=NONLINEAR_SPECIALIST_MODEL_FAMILIES,
+            include_naive_controls=True,
         ),
         code_root=project_root,
+        universe=universe,
     )
     return (*result.registered_models, *result.rejected_models)
 
@@ -379,6 +407,7 @@ def run_live_scanner(
         include_challengers=include_challengers,
         include_candidates=include_challengers,
         config=ScannerConfig(),
+        universe=universe,
     )
 
 

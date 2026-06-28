@@ -198,12 +198,34 @@ def command_universe_update(args: argparse.Namespace) -> int:
 
 
 def command_build_features(args: argparse.Namespace) -> int:
-    result = build_autonomous_features(Path.cwd(), universe_path=args.universe)
+    result = build_autonomous_features(
+        Path.cwd(),
+        universe_path=args.universe,
+        rebuild_regime_cache=args.rebuild_regime_cache,
+    )
     print(f"Universe: {result.universe.name} ({result.universe.snapshot_id})")
     print(f"Feature rows: {len(result.features.frame):,}")
     print(f"Label rows: {len(result.labels):,}")
     print(f"Modeling rows: {len(result.modeling_frame):,}")
     print(f"Feature manifest hash: {result.features.manifest_hash}")
+    if result.features.regime_cache_report is not None:
+        report = result.features.regime_cache_report
+        speedup = (
+            "all eligible fits avoided"
+            if report.estimated_speedup is None and report.kmeans_fits_avoided
+            else f"{report.estimated_speedup:.2f}x"
+            if report.estimated_speedup is not None
+            else "n/a"
+        )
+        print(f"Regime cache status: {report.status} ({report.reason})")
+        print(f"Regime cache cached dates reused: {report.cached_dates_reused:,}")
+        print(f"Regime cache new dates computed: {report.new_dates_computed:,}")
+        print(f"Regime cache KMeans fits avoided: {report.kmeans_fits_avoided:,}")
+        print(f"Regime cache KMeans fits performed: {report.kmeans_fits_performed:,}")
+        print(f"Regime cache runtime: {report.regime_runtime_seconds:.2f} seconds")
+        print(f"Regime cache estimated speedup: {speedup}")
+        if not report.cache_write_succeeded:
+            print(f"Regime cache write warning: {report.cache_write_error}")
     print(f"Features saved: {result.feature_path}")
     print(f"Labels saved: {result.labels_path}")
     print(f"Modeling frame saved: {result.modeling_path}")
@@ -456,6 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build autonomous feature, label, and modeling parquet files",
     )
     build_features.add_argument("--universe", default=None)
+    build_features.add_argument(
+        "--rebuild-regime-cache",
+        action="store_true",
+        help="Ignore any existing exact regime KMeans cache and rewrite it atomically",
+    )
     build_features.set_defaults(handler=command_build_features)
 
     discover = subparsers.add_parser(

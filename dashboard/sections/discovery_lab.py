@@ -57,12 +57,16 @@ def render_page() -> None:
     if not models:
         streamlit.info("No model registry entries yet.")
         return
+    streamlit.warning("Product-class specialist challenger. Development evidence only.")
     rows: list[dict[str, object]] = []
     screen_rows: list[dict[str, object]] = []
     path_screen_rows: list[dict[str, object]] = []
     calibration_rows: list[dict[str, object]] = []
+    product_scope_rows: list[dict[str, object]] = []
+    hygiene_rows: list[dict[str, object]] = []
     for model in models:
         eligibility = promotion_eligibility(model.gate_results)
+        scope = model.metrics.get("product_class_scope", "POOLED")
         rows.append(
             {
                 "model_id": model.model_id,
@@ -70,6 +74,15 @@ def render_page() -> None:
                 "direction": model.direction,
                 "horizon": model.horizon,
                 "family": model.family,
+                "product_class_scope": scope,
+                "eligible_roles": model.metrics.get("product_class_eligible_roles_json"),
+                "eligible_symbol_count": model.metrics.get("product_class_eligible_symbol_count"),
+                "scope_training_rows": model.metrics.get("product_class_training_count"),
+                "scope_calibration_rows": model.metrics.get("product_class_calibration_count"),
+                "scope_holdout_rows": model.metrics.get("product_class_development_holdout_count"),
+                "scope_target_distributions": model.metrics.get(
+                    "product_class_target_distributions_json"
+                ),
                 "research_start": model.metrics.get("research_start"),
                 "research_end": model.metrics.get("research_end"),
                 "holdout_samples": model.metrics.get("holdout_samples"),
@@ -113,9 +126,104 @@ def render_page() -> None:
                 "probability_contract_valid": model.metrics.get(
                     "prediction_probability_contract_valid"
                 ),
+                "nonfinite_hygiene_schema": model.metrics.get(
+                    "model_feature_nonfinite_hygiene_schema_version"
+                ),
+                "nonfinite_pre_sanitization_invalid": model.metrics.get(
+                    "model_feature_invalid_pre_sanitization_count"
+                ),
+                "nonfinite_post_sanitization_invalid": model.metrics.get(
+                    "model_feature_invalid_post_sanitization_count"
+                ),
                 "mandatory_gates_failed": eligibility.mandatory_failed,
                 "mandatory_gates_not_configured": eligibility.not_configured,
                 "promotion_eligible": eligibility.eligible,
+            }
+        )
+        product_scope_rows.append(
+            {
+                "model_id": model.model_id,
+                "state": model.state,
+                "direction": model.direction,
+                "horizon": model.horizon,
+                "family": model.family,
+                "scope": scope,
+                "eligible_roles": model.metrics.get("product_class_eligible_roles_json"),
+                "eligible_symbol_count": model.metrics.get("product_class_eligible_symbol_count"),
+                "training_rows": model.metrics.get("product_class_training_count"),
+                "calibration_rows": model.metrics.get("product_class_calibration_count"),
+                "holdout_rows": model.metrics.get("product_class_development_holdout_count"),
+                "target_distributions": model.metrics.get(
+                    "product_class_target_distributions_json"
+                ),
+                "brier": model.calibration_metrics.get("holdout_brier"),
+                "brier_skill_score": model.calibration_metrics.get("brier_skill_score"),
+                "ece": model.calibration_metrics.get("expected_calibration_error"),
+                "tbs_calibrator": model.metrics.get("target_before_stop_calibration_method"),
+                "return_ood_rate": model.metrics.get("return_prediction_ood_rate"),
+                "mfe_ood_rate": model.metrics.get("mfe_prediction_ood_rate"),
+                "mae_ood_rate": model.metrics.get("mae_prediction_ood_rate"),
+                "selected_samples": model.metrics.get("selected_holdout_samples"),
+                "selected_rate": model.metrics.get("selected_observation_rate"),
+                "mean_selected_return": model.metrics.get("holdout_mean_net_return"),
+                "portfolio_max_drawdown": model.metrics.get("portfolio_max_drawdown"),
+                "symbol_concentration": model.metrics.get("symbol_concentration_top"),
+                "sector_concentration": model.metrics.get("sector_concentration_top"),
+                "primary_feature_families": model.metrics.get(
+                    "selected_feature_family_counts_json"
+                ),
+                "tbs_feature_families": model.metrics.get(
+                    "target_before_stop_selected_feature_family_counts_json"
+                ),
+                "expected_return_feature_families": model.metrics.get(
+                    "expected_return_selected_feature_family_counts_json"
+                ),
+                "mfe_feature_families": model.metrics.get(
+                    "mfe_selected_feature_family_counts_json"
+                ),
+                "mae_feature_families": model.metrics.get(
+                    "mae_selected_feature_family_counts_json"
+                ),
+                "nonfinite_hygiene_schema": model.metrics.get(
+                    "model_feature_nonfinite_hygiene_schema_version"
+                ),
+                "nonfinite_hygiene_policy_hash": model.metrics.get(
+                    "model_feature_nonfinite_hygiene_policy_hash"
+                ),
+                "nonfinite_pre_sanitization_invalid": model.metrics.get(
+                    "model_feature_invalid_pre_sanitization_count"
+                ),
+                "nonfinite_post_sanitization_invalid": model.metrics.get(
+                    "model_feature_invalid_post_sanitization_count"
+                ),
+            }
+        )
+        hygiene_rows.append(
+            {
+                "model_id": model.model_id,
+                "state": model.state,
+                "product_class_scope": scope,
+                "direction": model.direction,
+                "horizon": model.horizon,
+                "family": model.family,
+                "schema": model.metrics.get("model_feature_nonfinite_hygiene_schema_version"),
+                "policy_hash": model.metrics.get("model_feature_nonfinite_hygiene_policy_hash"),
+                "pre_nonfinite": model.metrics.get(
+                    "model_feature_nonfinite_pre_sanitization_count"
+                ),
+                "pre_invalid": model.metrics.get("model_feature_invalid_pre_sanitization_count"),
+                "post_invalid": model.metrics.get("model_feature_invalid_post_sanitization_count"),
+                "post_missing": model.metrics.get("model_feature_post_sanitization_missing_count"),
+                "sanitized_columns": model.metrics.get(
+                    "model_feature_hygiene_sanitized_columns_json"
+                ),
+                "affected_families": model.metrics.get(
+                    "model_feature_hygiene_affected_feature_families_json"
+                ),
+                "affected_symbols": model.metrics.get(
+                    "model_feature_hygiene_affected_symbols_json"
+                ),
+                "affected_dates": model.metrics.get("model_feature_hygiene_affected_dates_json"),
             }
         )
         family_counts: dict[str, object] = {}
@@ -130,6 +238,7 @@ def render_page() -> None:
         screen_rows.append(
             {
                 "model_id": model.model_id,
+                "product_class_scope": scope,
                 "direction": model.direction,
                 "horizon": model.horizon,
                 "family": model.family,
@@ -164,6 +273,7 @@ def render_page() -> None:
             path_screen_rows.append(
                 {
                     "model_id": model.model_id,
+                    "product_class_scope": scope,
                     "direction": model.direction,
                     "horizon": model.horizon,
                     "family": model.family,
@@ -179,6 +289,12 @@ def render_page() -> None:
                         f"{prefix}_screening_configuration_hash"
                     ),
                     "domain_schema": model.metrics.get(f"{prefix}_domain_schema_version", ""),
+                    "path_head_state": model.metrics.get(
+                        f"{prefix}_path_head_capability_state", ""
+                    ),
+                    "retirement_reason": model.metrics.get(
+                        f"{prefix}_path_head_retirement_reason", ""
+                    ),
                     "internal_magnitude_target": model.metrics.get(
                         f"{prefix}_internal_magnitude_target_name", ""
                     ),
@@ -205,6 +321,7 @@ def render_page() -> None:
             calibration_rows.append(
                 {
                     "model_id": model.model_id,
+                    "product_class_scope": scope,
                     "direction": model.direction,
                     "horizon": model.horizon,
                     "family": model.family,
@@ -229,6 +346,8 @@ def render_page() -> None:
             "Target-Before-Stop Feature Screen",
             "Path-Metric Feature Screens",
             "Target-Before-Stop Calibration",
+            "Product-Class Diagnostics",
+            "Nonfinite Hygiene",
         ]
     )
     with tabs[0]:
@@ -255,6 +374,18 @@ def render_page() -> None:
         )
         streamlit.dataframe(
             display_frame(pd.DataFrame(calibration_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+    with tabs[4]:
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(product_scope_rows)),
+            width="stretch",
+            hide_index=True,
+        )
+    with tabs[5]:
+        streamlit.dataframe(
+            display_frame(pd.DataFrame(hygiene_rows)),
             width="stretch",
             hide_index=True,
         )

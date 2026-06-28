@@ -64,6 +64,7 @@ def test_compact_registry_rows_fit_default_dashboard_table() -> None:
         "Dir",
         "Hz",
         "Family",
+        "Scope",
         "Created",
         "Train",
         "Holdout",

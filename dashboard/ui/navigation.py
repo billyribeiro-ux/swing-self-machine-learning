@@ -14,109 +14,150 @@ class DashboardSection:
     renderer: Callable[[], None]
 
 
-def _overview() -> None:
-    from dashboard.sections.overview import render_page
+def _signal_board() -> None:
+    from dashboard.sections.signal_board import render_page
 
     render_page()
 
 
-def _data_audit() -> None:
+def _shadow_forward_test() -> None:
+    from dashboard.sections.shadow_forward_test import render_page
+
+    render_page()
+
+
+def _model_edge_status() -> None:
+    from dashboard.sections.model_edge_status import render_page
+
+    render_page()
+
+
+def _scanner_results() -> None:
+    from dashboard.sections.scanner_results import render_page
+
+    render_page()
+
+
+def _candidate_detail() -> None:
+    from dashboard.sections.candidate_detail import render_page
+
+    render_page()
+
+
+def _product_class_research() -> None:
+    from dashboard.sections.product_class_research import render_page
+
+    render_page()
+
+
+def _gate_audit() -> None:
+    from dashboard.sections.gate_audit import render_page
+
+    render_page()
+
+
+def _data_universe() -> None:
     from dashboard.sections.data_universe import render_page
 
     render_page()
 
 
-def _discovery_lab() -> None:
-    from dashboard.sections.discovery_lab import render_page
+def _reports_and_exports() -> None:
+    from dashboard.sections.reports_and_exports import render_page
 
     render_page()
 
 
-def _live_scanner() -> None:
-    from dashboard.sections.live_scanner import render_page
+def _engine_commands() -> None:
+    from dashboard.sections.engine_commands import render_page
 
     render_page()
 
 
-def _candidate_attribution() -> None:
-    from dashboard.sections.candidate_attribution import render_page
-
-    render_page()
-
-
-def _portfolio_backtests() -> None:
-    from dashboard.sections.portfolio_backtests import render_page
-
-    render_page()
-
-
-def _paper_forward_test() -> None:
-    from dashboard.sections.paper_forward_test import render_page
-
-    render_page()
-
-
-def _model_registry() -> None:
-    from dashboard.sections.model_registry import render_page
-
-    render_page()
-
-
-def _baselines_legacy() -> None:
+def _legacy_baselines() -> None:
     from dashboard.sections.baselines_legacy import render_page
 
     render_page()
 
 
+def _developer_diagnostics() -> None:
+    from dashboard.sections.developer_diagnostics import render_page
+
+    render_page()
+
+
 USER_FACING_SECTIONS: tuple[DashboardSection, ...] = (
-    DashboardSection("Overview", Path("dashboard/sections/overview.py"), "overview", _overview),
+    DashboardSection(
+        "Signal Board",
+        Path("dashboard/sections/signal_board.py"),
+        "signal-board",
+        _signal_board,
+    ),
+    DashboardSection(
+        "Shadow Forward Test",
+        Path("dashboard/sections/shadow_forward_test.py"),
+        "shadow-forward-test",
+        _shadow_forward_test,
+    ),
+    DashboardSection(
+        "Model Edge Status",
+        Path("dashboard/sections/model_edge_status.py"),
+        "model-edge-status",
+        _model_edge_status,
+    ),
+    DashboardSection(
+        "Scanner Results",
+        Path("dashboard/sections/scanner_results.py"),
+        "scanner-results",
+        _scanner_results,
+    ),
+    DashboardSection(
+        "Candidate Detail",
+        Path("dashboard/sections/candidate_detail.py"),
+        "candidate-detail",
+        _candidate_detail,
+    ),
+    DashboardSection(
+        "Product-Class Research",
+        Path("dashboard/sections/product_class_research.py"),
+        "product-class-research",
+        _product_class_research,
+    ),
+    DashboardSection(
+        "Gate Audit",
+        Path("dashboard/sections/gate_audit.py"),
+        "gate-audit",
+        _gate_audit,
+    ),
     DashboardSection(
         "Data and Universe",
         Path("dashboard/sections/data_universe.py"),
         "data-universe",
-        _data_audit,
+        _data_universe,
     ),
     DashboardSection(
-        "Discovery Lab",
-        Path("dashboard/sections/discovery_lab.py"),
-        "discovery-lab",
-        _discovery_lab,
+        "Reports and Exports",
+        Path("dashboard/sections/reports_and_exports.py"),
+        "reports-and-exports",
+        _reports_and_exports,
     ),
     DashboardSection(
-        "Live Scanner",
-        Path("dashboard/sections/live_scanner.py"),
-        "live-scanner",
-        _live_scanner,
+        "Engine Commands",
+        Path("dashboard/sections/engine_commands.py"),
+        "engine-commands",
+        _engine_commands,
     ),
     DashboardSection(
-        "Candidate Attribution",
-        Path("dashboard/sections/candidate_attribution.py"),
-        "candidate-attribution",
-        _candidate_attribution,
-    ),
-    DashboardSection(
-        "Portfolio Backtests",
-        Path("dashboard/sections/portfolio_backtests.py"),
-        "portfolio-backtests",
-        _portfolio_backtests,
-    ),
-    DashboardSection(
-        "Paper Forward Test",
-        Path("dashboard/sections/paper_forward_test.py"),
-        "paper-forward-test",
-        _paper_forward_test,
-    ),
-    DashboardSection(
-        "Model Registry",
-        Path("dashboard/sections/model_registry.py"),
-        "model-registry",
-        _model_registry,
-    ),
-    DashboardSection(
-        "Baselines and Legacy RSI",
+        "Legacy Baselines",
         Path("dashboard/sections/baselines_legacy.py"),
-        "baselines-legacy-rsi",
-        _baselines_legacy,
+        "legacy-baselines",
+        _legacy_baselines,
+    ),
+    DashboardSection(
+        "Developer Diagnostics",
+        Path("dashboard/sections/developer_diagnostics.py"),
+        "developer-diagnostics",
+        _developer_diagnostics,
     ),
 )
 

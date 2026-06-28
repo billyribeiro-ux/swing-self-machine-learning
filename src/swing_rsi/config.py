@@ -40,6 +40,14 @@ class ProjectPaths:
         return self.root / "data" / "forward_tests"
 
     @property
+    def cache_data(self) -> Path:
+        return self.root / "data" / "cache"
+
+    @property
+    def regime_cache(self) -> Path:
+        return self.cache_data / "regime"
+
+    @property
     def artifacts(self) -> Path:
         return self.root / "artifacts"
 
@@ -76,6 +84,7 @@ class ProjectPaths:
             self.manifests,
             self.reports,
             self.forward_tests,
+            self.regime_cache,
             self.model_artifacts,
             self.explainability_artifacts,
             self.registry_artifacts,

@@ -607,6 +607,9 @@ def _base_gate_metrics(**overrides: object) -> dict[str, object]:
         metrics.update(
             {
                 f"{head}_domain_schema_version": "path_metric_magnitude_domain_v1",
+                f"{head}_path_head_capability_state": "ACTIVE",
+                f"{head}_path_head_retirement_schema_version": "",
+                f"{head}_path_head_retirement_reason": "",
                 f"{head}_external_target_name": external_target,
                 f"{head}_internal_magnitude_target_name": internal_target,
                 f"{head}_internal_target_definition": definition,

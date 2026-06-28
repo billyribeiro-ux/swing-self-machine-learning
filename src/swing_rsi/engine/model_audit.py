@@ -110,6 +110,27 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "direction": model.direction,
             "horizon": model.horizon,
             "family": model.family,
+            "product_class_schema_version": metrics.get("product_class_schema_version"),
+            "product_class_scope": metrics.get("product_class_scope"),
+            "product_class_scope_configuration_hash": metrics.get(
+                "product_class_scope_configuration_hash"
+            ),
+            "product_class_universe_scope_hash": metrics.get("product_class_universe_scope_hash"),
+            "product_class_role_scope_mapping_hash": metrics.get(
+                "product_class_role_scope_mapping_hash"
+            ),
+            "product_class_eligible_roles": metrics.get("product_class_eligible_roles_json"),
+            "product_class_eligible_symbol_count": metrics.get(
+                "product_class_eligible_symbol_count"
+            ),
+            "product_class_training_count": metrics.get("product_class_training_count"),
+            "product_class_calibration_count": metrics.get("product_class_calibration_count"),
+            "product_class_development_holdout_count": metrics.get(
+                "product_class_development_holdout_count"
+            ),
+            "product_class_target_distributions": metrics.get(
+                "product_class_target_distributions_json"
+            ),
             "research_start": metrics.get("research_start"),
             "research_end": metrics.get("research_end"),
             "train_start": model.training_start,
@@ -148,10 +169,49 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "expected_return_screening_manifest_hash": metrics.get(
                 "expected_return_screening_manifest_hash"
             ),
+            "expected_return_target_normalization_schema_version": metrics.get(
+                "expected_return_target_normalization_schema_version"
+            ),
+            "expected_return_target_normalization_hash": metrics.get(
+                "expected_return_target_normalization_hash"
+            ),
+            "expected_return_target_normalization_atr_feature_name": metrics.get(
+                "expected_return_target_normalization_atr_feature_name"
+            ),
+            "expected_return_internal_target_name": metrics.get(
+                "expected_return_internal_target_name"
+            ),
+            "expected_return_target_prediction_mapping_version": metrics.get(
+                "expected_return_target_prediction_mapping_version"
+            ),
+            "return_holdout_internal_atr_unit_prediction_min": metrics.get(
+                "return_holdout_internal_atr_unit_prediction_min"
+            ),
+            "return_holdout_internal_atr_unit_prediction_max": metrics.get(
+                "return_holdout_internal_atr_unit_prediction_max"
+            ),
+            "return_holdout_canonical_prediction_min": metrics.get(
+                "return_holdout_canonical_prediction_min"
+            ),
+            "return_holdout_canonical_prediction_max": metrics.get(
+                "return_holdout_canonical_prediction_max"
+            ),
             "mfe_selected_feature_count": metrics.get("mfe_selected_feature_count"),
             "mfe_screening_target": metrics.get("mfe_screening_target"),
             "mfe_screening_manifest_hash": metrics.get("mfe_screening_manifest_hash"),
             "mfe_domain_schema_version": metrics.get("mfe_domain_schema_version"),
+            "mfe_target_normalization_schema_version": metrics.get(
+                "mfe_target_normalization_schema_version"
+            ),
+            "mfe_target_normalization_hash": metrics.get("mfe_target_normalization_hash"),
+            "mfe_target_normalization_atr_feature_name": metrics.get(
+                "mfe_target_normalization_atr_feature_name"
+            ),
+            "mfe_path_head_capability_state": metrics.get("mfe_path_head_capability_state"),
+            "mfe_path_head_retirement_schema_version": metrics.get(
+                "mfe_path_head_retirement_schema_version"
+            ),
+            "mfe_path_head_retirement_reason": metrics.get("mfe_path_head_retirement_reason"),
             "mfe_external_target_name": metrics.get("mfe_external_target_name"),
             "mfe_internal_magnitude_target_name": metrics.get("mfe_internal_magnitude_target_name"),
             "mfe_internal_target_definition": metrics.get("mfe_internal_target_definition"),
@@ -159,6 +219,11 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "mfe_magnitude_estimator_loss": metrics.get("mfe_magnitude_estimator_loss"),
             "mfe_magnitude_estimator_hash": metrics.get("mfe_magnitude_estimator_hash"),
             "mfe_prediction_mapping_version": metrics.get("mfe_prediction_mapping_version"),
+            "mfe_path_target_transform_schema_version": metrics.get(
+                "mfe_path_target_transform_schema_version"
+            ),
+            "mfe_path_target_transform": metrics.get("mfe_path_target_transform"),
+            "mfe_path_target_transform_hash": metrics.get("mfe_path_target_transform_hash"),
             "mfe_magnitude_training_target_min": metrics.get("mfe_magnitude_training_target_min"),
             "mfe_magnitude_training_target_max": metrics.get("mfe_magnitude_training_target_max"),
             "mfe_holdout_internal_magnitude_prediction_min": metrics.get(
@@ -166,6 +231,12 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             ),
             "mfe_holdout_internal_magnitude_prediction_max": metrics.get(
                 "mfe_holdout_internal_magnitude_prediction_max"
+            ),
+            "mfe_holdout_internal_magnitude_atr_unit_prediction_min": metrics.get(
+                "mfe_holdout_internal_magnitude_atr_unit_prediction_min"
+            ),
+            "mfe_holdout_internal_magnitude_atr_unit_prediction_max": metrics.get(
+                "mfe_holdout_internal_magnitude_atr_unit_prediction_max"
             ),
             "mfe_holdout_canonical_prediction_min": metrics.get(
                 "mfe_holdout_canonical_prediction_min"
@@ -180,6 +251,18 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "mae_screening_target": metrics.get("mae_screening_target"),
             "mae_screening_manifest_hash": metrics.get("mae_screening_manifest_hash"),
             "mae_domain_schema_version": metrics.get("mae_domain_schema_version"),
+            "mae_target_normalization_schema_version": metrics.get(
+                "mae_target_normalization_schema_version"
+            ),
+            "mae_target_normalization_hash": metrics.get("mae_target_normalization_hash"),
+            "mae_target_normalization_atr_feature_name": metrics.get(
+                "mae_target_normalization_atr_feature_name"
+            ),
+            "mae_path_head_capability_state": metrics.get("mae_path_head_capability_state"),
+            "mae_path_head_retirement_schema_version": metrics.get(
+                "mae_path_head_retirement_schema_version"
+            ),
+            "mae_path_head_retirement_reason": metrics.get("mae_path_head_retirement_reason"),
             "mae_external_target_name": metrics.get("mae_external_target_name"),
             "mae_internal_magnitude_target_name": metrics.get("mae_internal_magnitude_target_name"),
             "mae_internal_target_definition": metrics.get("mae_internal_target_definition"),
@@ -187,6 +270,26 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             "mae_magnitude_estimator_loss": metrics.get("mae_magnitude_estimator_loss"),
             "mae_magnitude_estimator_hash": metrics.get("mae_magnitude_estimator_hash"),
             "mae_prediction_mapping_version": metrics.get("mae_prediction_mapping_version"),
+            "mae_path_target_transform_schema_version": metrics.get(
+                "mae_path_target_transform_schema_version"
+            ),
+            "mae_path_target_transform": metrics.get("mae_path_target_transform"),
+            "mae_path_target_transform_hash": metrics.get("mae_path_target_transform_hash"),
+            "mae_training_target_pre_transform_distribution": metrics.get(
+                "mae_training_target_pre_transform_distribution_json"
+            ),
+            "mae_training_target_post_transform_distribution": metrics.get(
+                "mae_training_target_post_transform_distribution_json"
+            ),
+            "mae_holdout_transformed_prediction_distribution": metrics.get(
+                "mae_holdout_transformed_prediction_distribution_json"
+            ),
+            "mae_holdout_inverse_transformed_magnitude_distribution": metrics.get(
+                "mae_holdout_inverse_transformed_magnitude_distribution_json"
+            ),
+            "mae_holdout_canonical_signed_distribution": metrics.get(
+                "mae_holdout_canonical_signed_distribution_json"
+            ),
             "mae_magnitude_training_target_min": metrics.get("mae_magnitude_training_target_min"),
             "mae_magnitude_training_target_max": metrics.get("mae_magnitude_training_target_max"),
             "mae_holdout_internal_magnitude_prediction_min": metrics.get(
@@ -194,6 +297,12 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             ),
             "mae_holdout_internal_magnitude_prediction_max": metrics.get(
                 "mae_holdout_internal_magnitude_prediction_max"
+            ),
+            "mae_holdout_internal_magnitude_atr_unit_prediction_min": metrics.get(
+                "mae_holdout_internal_magnitude_atr_unit_prediction_min"
+            ),
+            "mae_holdout_internal_magnitude_atr_unit_prediction_max": metrics.get(
+                "mae_holdout_internal_magnitude_atr_unit_prediction_max"
             ),
             "mae_holdout_canonical_prediction_min": metrics.get(
                 "mae_holdout_canonical_prediction_min"
@@ -222,6 +331,45 @@ def _summary_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             ),
             "prediction_bounds_training_only": metrics.get("prediction_bounds_training_only"),
             "prediction_path_metric_sign_valid": metrics.get("prediction_path_metric_sign_valid"),
+            "model_feature_nonfinite_hygiene_schema_version": metrics.get(
+                "model_feature_nonfinite_hygiene_schema_version"
+            ),
+            "model_feature_nonfinite_hygiene_policy_hash": metrics.get(
+                "model_feature_nonfinite_hygiene_policy_hash"
+            ),
+            "model_feature_nonfinite_hygiene_metadata": metrics.get(
+                "model_feature_nonfinite_hygiene_metadata_json"
+            ),
+            "model_feature_nonfinite_hygiene_records": metrics.get(
+                "model_feature_nonfinite_hygiene_records_json"
+            ),
+            "model_feature_nonfinite_pre_sanitization_count": metrics.get(
+                "model_feature_nonfinite_pre_sanitization_count"
+            ),
+            "model_feature_invalid_pre_sanitization_count": metrics.get(
+                "model_feature_invalid_pre_sanitization_count"
+            ),
+            "model_feature_invalid_post_sanitization_count": metrics.get(
+                "model_feature_invalid_post_sanitization_count"
+            ),
+            "model_feature_post_sanitization_missing_count": metrics.get(
+                "model_feature_post_sanitization_missing_count"
+            ),
+            "model_feature_hygiene_affected_columns": metrics.get(
+                "model_feature_hygiene_affected_columns_json"
+            ),
+            "model_feature_hygiene_sanitized_columns": metrics.get(
+                "model_feature_hygiene_sanitized_columns_json"
+            ),
+            "model_feature_hygiene_affected_feature_families": metrics.get(
+                "model_feature_hygiene_affected_feature_families_json"
+            ),
+            "model_feature_hygiene_affected_symbols": metrics.get(
+                "model_feature_hygiene_affected_symbols_json"
+            ),
+            "model_feature_hygiene_affected_dates": metrics.get(
+                "model_feature_hygiene_affected_dates_json"
+            ),
             "temporal_fold_schema_version": metrics.get("temporal_fold_schema_version"),
             "temporal_fold_folds_requested": metrics.get("temporal_fold_folds_requested"),
             "temporal_fold_folds_evaluated": metrics.get("temporal_fold_folds_evaluated"),
@@ -381,6 +529,13 @@ def _feature_screen_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
             )
             manifest = metrics.get(f"{metric_prefix}_screening_manifest_hash")
             config_hash = metrics.get(f"{metric_prefix}_screening_configuration_hash")
+            normalization_schema = metrics.get(
+                f"{metric_prefix}_target_normalization_schema_version"
+            )
+            normalization_hash = metrics.get(f"{metric_prefix}_target_normalization_hash")
+            normalization_atr_feature = metrics.get(
+                f"{metric_prefix}_target_normalization_atr_feature_name"
+            )
             if not audit_records:
                 rows.append(
                     {
@@ -408,6 +563,9 @@ def _feature_screen_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
                         ),
                         "selected_feature_manifest_hash": manifest,
                         "screen_configuration_hash": config_hash,
+                        "target_normalization_schema_version": normalization_schema,
+                        "target_normalization_hash": normalization_hash,
+                        "target_normalization_atr_feature_name": normalization_atr_feature,
                     }
                 )
                 continue
@@ -437,6 +595,9 @@ def _feature_screen_frame(models: tuple[RegisteredModel, ...]) -> pd.DataFrame:
                         ),
                         "selected_feature_manifest_hash": manifest,
                         "screen_configuration_hash": config_hash,
+                        "target_normalization_schema_version": normalization_schema,
+                        "target_normalization_hash": normalization_hash,
+                        "target_normalization_atr_feature_name": normalization_atr_feature,
                         "top_25_train_mi_rank": top_rank_by_feature.get(
                             str(record.get("feature")), ""
                         ),

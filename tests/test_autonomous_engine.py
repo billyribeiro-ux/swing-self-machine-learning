@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
+import warnings
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,10 +11,24 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from pandas.errors import PerformanceWarning
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 
 from swing_rsi.engine.calibration_governance import TBS_CALIBRATION_GOVERNANCE_SCHEMA_VERSION
 from swing_rsi.engine.drift import build_drift_report
-from swing_rsi.engine.features import build_feature_panel, reject_label_columns
+from swing_rsi.engine.feature_hygiene import (
+    MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION,
+    nonfinite_hygiene_policy_hash,
+)
+from swing_rsi.engine.features import (
+    _add_cross_sectional_features,
+    _symbol_features,
+    build_feature_panel,
+    numeric_feature_columns,
+    reject_label_columns,
+)
 from swing_rsi.engine.forward import (
     advance_forward_positions,
     create_pending_events_from_snapshot,
@@ -30,24 +46,56 @@ from swing_rsi.engine.labels import LabelConfig, build_label_panel, build_symbol
 from swing_rsi.engine.manifest import hash_file
 from swing_rsi.engine.models import (
     EXPECTED_RETURN_HEAD,
+    LINEAR_PATH_HEAD_RETIREMENT_REASON,
     MAE_HEAD,
     MFE_HEAD,
+    PATH_HEAD_CAPABILITY_ACTIVE,
+    PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
     PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
     PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
     PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
+    PATH_TARGET_ATR_FEATURE,
+    PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+    PATH_TARGET_PREDICTION_MAPPING_VERSION,
+    PATH_TARGET_TRANSFORM_LOG1P,
+    PATH_TARGET_TRANSFORM_NONE,
+    ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
     TARGET_BEFORE_STOP_HEAD,
     BaseRateClassifier,
     DiscoveryConfig,
     ModelBundle,
+    RetiredPathHeadModel,
+    _apply_path_target_transform,
+    _inverse_path_target_transform_prediction,
+    _path_atr_training_target,
     _path_magnitude_prediction,
+    _path_target_prediction,
+    _path_target_transform_metadata,
     build_path_magnitude_estimator,
+    bundle_path_domain_metadata,
     discover_models,
     load_model_bundle,
     model_plugins,
+    path_target_transform_applies,
     predict_bundle,
 )
 from swing_rsi.engine.ood import PREDICTION_OOD_GOVERNANCE_VERSION
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
+from swing_rsi.engine.product_scope import (
+    PRODUCT_CLASS_SCHEMA_VERSION,
+    PRODUCT_CLASS_SCOPE_INVERSE,
+    PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
+    PRODUCT_CLASS_SCOPE_LEVERAGED_LONG,
+    PRODUCT_CLASS_SCOPE_MISMATCH_REASON,
+    PRODUCT_CLASS_SCOPE_ORDINARY,
+    PRODUCT_CLASS_SCOPE_POOLED,
+    PRODUCT_CLASS_SCOPES,
+    build_product_class_scope_definition,
+    build_product_class_scope_definitions,
+    canonical_role_scope_mapping,
+    filter_frame_for_product_class_scope,
+    product_class_scope_for_role,
+)
 from swing_rsi.engine.registry import (
     FINAL_HOLDOUT_SAMPLE_GATE_IDS,
     RegisteredModel,
@@ -101,6 +149,65 @@ class ConstantRegressor:
         return np.full(len(frame), self.value)
 
 
+class FiniteAssertingClassifier(ClassifierMixin, BaseEstimator):
+    def __init__(self, probability: float = 0.75) -> None:
+        self.probability = probability
+
+    def fit(
+        self, frame: pd.DataFrame | np.ndarray, target: np.ndarray
+    ) -> FiniteAssertingClassifier:
+        assert np.isfinite(np.asarray(frame, dtype=float)).all()
+        self.classes_ = np.array([0, 1])
+        self.is_fitted_ = True
+        return self
+
+    def predict_proba(self, frame: pd.DataFrame | np.ndarray) -> np.ndarray:
+        assert np.isfinite(np.asarray(frame, dtype=float)).all()
+        return np.tile(np.array([[1.0 - self.probability, self.probability]]), (len(frame), 1))
+
+
+class FiniteAssertingRegressor(RegressorMixin, BaseEstimator):
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def fit(self, frame: pd.DataFrame | np.ndarray, target: np.ndarray) -> FiniteAssertingRegressor:
+        assert np.isfinite(np.asarray(frame, dtype=float)).all()
+        self.is_fitted_ = True
+        return self
+
+    def predict(self, frame: pd.DataFrame | np.ndarray) -> np.ndarray:
+        assert np.isfinite(np.asarray(frame, dtype=float)).all()
+        return np.full(len(frame), self.value)
+
+
+def _finite_classifier_pipeline(probability: float = 0.75) -> Pipeline:
+    pipeline = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+            ("model", FiniteAssertingClassifier(probability)),
+        ]
+    )
+    pipeline.fit(
+        pd.DataFrame({"f1": [0.0, 1.0], "dollar_volume": [10_000_000.0, 20_000_000.0]}),
+        np.array([0, 1]),
+    )
+    return pipeline
+
+
+def _finite_regressor_pipeline(value: float) -> Pipeline:
+    pipeline = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+            ("model", FiniteAssertingRegressor(value)),
+        ]
+    )
+    pipeline.fit(
+        pd.DataFrame({"f1": [0.0, 1.0], "dollar_volume": [10_000_000.0, 20_000_000.0]}),
+        np.array([value, value]),
+    )
+    return pipeline
+
+
 class FeatureEchoRegressor:
     def __init__(self, feature: str) -> None:
         self.feature = feature
@@ -122,6 +229,417 @@ def _universe() -> UniverseConfig:
         ),
         relationships={"SPY": ("SQQQ",)},
     )
+
+
+def _product_scope_universe() -> UniverseConfig:
+    return UniverseConfig(
+        name="product-scope-test",
+        provider="fmp",
+        default_start="2018-01-02",
+        symbols=(
+            UniverseSymbol("ABC", role="stock", sector="technology", sector_proxy="XLK"),
+            UniverseSymbol("SPY", role="broad_market_etf", sector="broad_market", benchmark=True),
+            UniverseSymbol("XLK", role="sector_etf", sector="technology"),
+            UniverseSymbol("SH", role="inverse_etf", sector="inverse_market"),
+            UniverseSymbol("TQQQ", role="leveraged_long_etf", sector="leveraged_growth"),
+            UniverseSymbol("ZZZ", role="leveraged_inverse_etf", sector="inverse_growth"),
+        ),
+        relationships={"SPY": ("SH", "TQQQ", "ZZZ")},
+    )
+
+
+def test_product_class_roles_map_deterministically_from_metadata() -> None:
+    universe = _product_scope_universe()
+    definitions = build_product_class_scope_definitions(universe, scopes=PRODUCT_CLASS_SCOPES)
+
+    assert product_class_scope_for_role("stock") == PRODUCT_CLASS_SCOPE_ORDINARY
+    assert product_class_scope_for_role("broad_market_etf") == PRODUCT_CLASS_SCOPE_ORDINARY
+    assert product_class_scope_for_role("sector_etf") == PRODUCT_CLASS_SCOPE_ORDINARY
+    assert product_class_scope_for_role("inverse_etf") == PRODUCT_CLASS_SCOPE_INVERSE
+    assert product_class_scope_for_role("leveraged_long_etf") == PRODUCT_CLASS_SCOPE_LEVERAGED_LONG
+    assert product_class_scope_for_role("leveraged_inverse_etf") == (
+        PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    )
+    assert definitions[PRODUCT_CLASS_SCOPE_POOLED].eligible_symbols == (
+        "ABC",
+        "SH",
+        "SPY",
+        "TQQQ",
+        "XLK",
+        "ZZZ",
+    )
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].eligible_symbols == ("ABC", "SPY", "XLK")
+    assert definitions[PRODUCT_CLASS_SCOPE_INVERSE].eligible_symbols == ("SH",)
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_LONG].eligible_symbols == ("TQQQ",)
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].eligible_symbols == ("ZZZ",)
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].role_scope_mapping_hash == (
+        definitions[PRODUCT_CLASS_SCOPE_INVERSE].role_scope_mapping_hash
+    )
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].role_scope_mapping_hash == (
+        definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_LONG].role_scope_mapping_hash
+    )
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].role_scope_mapping_hash == (
+        definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].role_scope_mapping_hash
+    )
+
+
+def test_product_class_unknown_roles_are_rejected() -> None:
+    universe = UniverseConfig(
+        name="bad-role",
+        provider="fmp",
+        default_start="2018-01-02",
+        symbols=(UniverseSymbol("AAPL", role="mystery_etf"),),
+        relationships={},
+    )
+
+    with pytest.raises(ValueError, match="Unknown product-class universe role"):
+        build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_ORDINARY)
+
+
+def test_product_class_scope_is_not_ticker_name_heuristic() -> None:
+    universe = UniverseConfig(
+        name="ticker-agnostic",
+        provider="fmp",
+        default_start="2018-01-02",
+        symbols=(
+            UniverseSymbol("SOXL", role="stock", sector="technology"),
+            UniverseSymbol("ABC", role="leveraged_inverse_etf", sector="inverse_market"),
+        ),
+        relationships={},
+    )
+    definitions = build_product_class_scope_definitions(universe, scopes=PRODUCT_CLASS_SCOPES)
+
+    assert definitions[PRODUCT_CLASS_SCOPE_ORDINARY].eligible_symbols == ("SOXL",)
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE].eligible_symbols == ("ABC",)
+    assert definitions[PRODUCT_CLASS_SCOPE_LEVERAGED_LONG].eligible_symbols == ()
+    assert definitions[PRODUCT_CLASS_SCOPE_INVERSE].eligible_symbols == ()
+
+
+def _scope_modeling_frame() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    symbols = (
+        ("ABC", "stock"),
+        ("SPY", "broad_market_etf"),
+        ("SH", "inverse_etf"),
+        ("TQQQ", "leveraged_long_etf"),
+        ("ZZZ", "leveraged_inverse_etf"),
+    )
+    dates = pd.bdate_range("2020-01-02", periods=80)
+    for position, date_value in enumerate(dates):
+        for symbol, role in symbols:
+            rows.append(
+                {
+                    "Date": date_value,
+                    "symbol": symbol,
+                    "role": role,
+                    "sector": "test",
+                    "sector_proxy": "",
+                    "market_regime_label": "mixed",
+                    "Open": 100.0,
+                    "High": 101.0,
+                    "Low": 99.0,
+                    "Close": 100.0,
+                    "Volume": 1_000_000.0,
+                    "dollar_volume": 20_000_000.0,
+                    "market_context_signal": float(position),
+                    "relationship_context_signal": float(position % 5),
+                    PATH_TARGET_ATR_FEATURE: 1.0,
+                    "label_bull_positive_return_10": float(position % 2),
+                    "label_bull_forward_return_10": 0.01 if position % 2 else -0.01,
+                    "label_bull_mfe_10": 0.02 + (0.001 * (position % 7)),
+                    "label_bull_mae_10": -0.01 - (0.001 * (position % 5)),
+                    "label_bull_target_before_stop_10": float(position % 3 == 0),
+                    "label_end_date_10": date_value + pd.offsets.BDay(10),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_product_class_row_filter_preserves_full_universe_context_columns() -> None:
+    universe = _product_scope_universe()
+    frame = _scope_modeling_frame()
+    ordinary = build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_ORDINARY)
+    inverse = build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_INVERSE)
+    leveraged_long = build_product_class_scope_definition(
+        universe, PRODUCT_CLASS_SCOPE_LEVERAGED_LONG
+    )
+    leveraged_inverse = build_product_class_scope_definition(
+        universe, PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    )
+
+    ordinary_rows = filter_frame_for_product_class_scope(frame, ordinary)
+    inverse_rows = filter_frame_for_product_class_scope(frame, inverse)
+    leveraged_long_rows = filter_frame_for_product_class_scope(frame, leveraged_long)
+    leveraged_inverse_rows = filter_frame_for_product_class_scope(frame, leveraged_inverse)
+
+    assert set(ordinary_rows["role"]) == {"stock", "broad_market_etf"}
+    assert set(inverse_rows["role"]) == {"inverse_etf"}
+    assert set(leveraged_long_rows["role"]) == {"leveraged_long_etf"}
+    assert set(leveraged_inverse_rows["role"]) == {"leveraged_inverse_etf"}
+    assert "market_context_signal" in ordinary_rows.columns
+    assert "relationship_context_signal" in inverse_rows.columns
+    assert "relationship_context_signal" in leveraged_long_rows.columns
+    assert "relationship_context_signal" in leveraged_inverse_rows.columns
+    assert "product_class_scope" not in numeric_feature_columns(ordinary_rows)
+    assert "label_bull_forward_return_10" not in numeric_feature_columns(ordinary_rows)
+
+
+def test_product_class_splits_remain_chronological_and_purged_within_scope() -> None:
+    universe = _product_scope_universe()
+    frame = _scope_modeling_frame()
+    ordinary = filter_frame_for_product_class_scope(
+        frame,
+        build_product_class_scope_definition(universe, PRODUCT_CLASS_SCOPE_ORDINARY),
+    )
+
+    split = chronological_train_calibration_holdout_split(ordinary, horizon=10)
+
+    assert pd.Timestamp(split.train["Date"].max()) < pd.Timestamp(split.calibration["Date"].min())
+    assert pd.Timestamp(split.calibration["Date"].max()) < pd.Timestamp(split.holdout["Date"].min())
+    assert pd.to_datetime(split.train["label_end_date_10"]).max() < pd.Timestamp(
+        split.calibration_start
+    )
+    assert pd.to_datetime(split.calibration["label_end_date_10"]).max() < pd.Timestamp(
+        split.holdout_start
+    )
+    assert set(split.train["role"]) == {"stock", "broad_market_etf"}
+
+
+def test_discovery_persists_independent_product_class_specialist_artifacts(
+    tmp_path: Path,
+) -> None:
+    frame = _scope_modeling_frame()
+    family_map = {
+        column: "market_relative"
+        for column in frame.columns
+        if not str(column).startswith("label_")
+    }
+    family_map["relationship_context_signal"] = "relationship_graph"
+    family_map["market_context_signal"] = "market_relative"
+
+    result = discover_models(
+        frame,
+        db_path=tmp_path / "engine.sqlite3",
+        artifact_dir=tmp_path / "models",
+        universe_snapshot_id="u",
+        feature_manifest_hash="features",
+        feature_family_by_column=family_map,
+        config=DiscoveryConfig(
+            horizons=(10,),
+            directions=("bull",),
+            minimum_training_samples=20,
+            minimum_holdout_samples=10,
+            max_features=8,
+            mutual_information_top_k=4,
+            research_start=None,
+            random_seed=7,
+            product_class_scopes=(
+                PRODUCT_CLASS_SCOPE_ORDINARY,
+                PRODUCT_CLASS_SCOPE_INVERSE,
+                PRODUCT_CLASS_SCOPE_LEVERAGED_LONG,
+                PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE,
+            ),
+            model_families=("extra_trees",),
+            include_naive_controls=False,
+        ),
+        code_root=tmp_path,
+        universe=_product_scope_universe(),
+    )
+
+    assert len(result.registered_models) == 4
+    by_scope = {model.metrics["product_class_scope"]: model for model in result.registered_models}
+    ordinary = by_scope[PRODUCT_CLASS_SCOPE_ORDINARY]
+    inverse = by_scope[PRODUCT_CLASS_SCOPE_INVERSE]
+    leveraged_long = by_scope[PRODUCT_CLASS_SCOPE_LEVERAGED_LONG]
+    leveraged_inverse = by_scope[PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE]
+    ordinary_bundle = load_model_bundle(ordinary.artifact_path)
+    inverse_bundle = load_model_bundle(inverse.artifact_path)
+    leveraged_long_bundle = load_model_bundle(leveraged_long.artifact_path)
+    leveraged_inverse_bundle = load_model_bundle(leveraged_inverse.artifact_path)
+
+    assert len({model.model_id for model in result.registered_models}) == 4
+    assert len({model.artifact_path for model in result.registered_models}) == 4
+    assert ordinary.metrics["product_class_schema_version"] == PRODUCT_CLASS_SCHEMA_VERSION
+    assert ordinary_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_ORDINARY
+    assert inverse_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_INVERSE
+    assert leveraged_long_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_LONG
+    assert leveraged_inverse_bundle.product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE
+    assert set(ordinary_bundle.training_labels["symbol"]) <= {"ABC", "SPY"}
+    assert set(inverse_bundle.training_labels["symbol"]) <= {"SH"}
+    assert set(leveraged_long_bundle.training_labels["symbol"]) <= {"TQQQ"}
+    assert set(leveraged_inverse_bundle.training_labels["symbol"]) <= {"ZZZ"}
+    assert ordinary_bundle.product_class_universe_scope_hash != (
+        inverse_bundle.product_class_universe_scope_hash
+    )
+    assert inverse_bundle.product_class_universe_scope_hash != (
+        leveraged_long_bundle.product_class_universe_scope_hash
+    )
+    assert leveraged_long_bundle.product_class_universe_scope_hash != (
+        leveraged_inverse_bundle.product_class_universe_scope_hash
+    )
+    assert ordinary_bundle.classifier is not inverse_bundle.classifier
+    assert inverse_bundle.classifier is not leveraged_long_bundle.classifier
+    assert leveraged_long_bundle.classifier is not leveraged_inverse_bundle.classifier
+    assert "product_class_scope" not in ordinary_bundle.feature_columns
+    assert ordinary.metrics["product_class_development_evidence_label"] == (
+        "DEVELOPMENT_HOLDOUT_DIAGNOSTIC"
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "product_scope",
+        "direction",
+        "family",
+        "head_name",
+        "horizon",
+        "expected",
+    ),
+    [
+        (
+            PRODUCT_CLASS_SCOPE_POOLED,
+            "bull",
+            "hist_gradient_boosting",
+            MAE_HEAD,
+            10,
+            True,
+        ),
+        (
+            PRODUCT_CLASS_SCOPE_ORDINARY,
+            "bull",
+            "hist_gradient_boosting",
+            MAE_HEAD,
+            10,
+            False,
+        ),
+        (
+            PRODUCT_CLASS_SCOPE_LEVERAGED_LONG,
+            "bull",
+            "hist_gradient_boosting",
+            MAE_HEAD,
+            10,
+            False,
+        ),
+        (
+            PRODUCT_CLASS_SCOPE_POOLED,
+            "bear",
+            "hist_gradient_boosting",
+            MAE_HEAD,
+            10,
+            False,
+        ),
+        (PRODUCT_CLASS_SCOPE_POOLED, "bull", "extra_trees", MAE_HEAD, 10, False),
+        (PRODUCT_CLASS_SCOPE_POOLED, "bull", "hist_gradient_boosting", MFE_HEAD, 10, False),
+        (
+            PRODUCT_CLASS_SCOPE_POOLED,
+            "bull",
+            "hist_gradient_boosting",
+            EXPECTED_RETURN_HEAD,
+            10,
+            False,
+        ),
+        (
+            PRODUCT_CLASS_SCOPE_POOLED,
+            "bull",
+            "hist_gradient_boosting",
+            TARGET_BEFORE_STOP_HEAD,
+            10,
+            False,
+        ),
+    ],
+)
+def test_robust_mae_transform_scope_is_exact(
+    product_scope: str,
+    direction: str,
+    family: str,
+    head_name: str,
+    horizon: int,
+    expected: bool,
+) -> None:
+    assert (
+        path_target_transform_applies(
+            product_scope=product_scope,
+            direction=direction,
+            family=family,
+            head_name=head_name,
+            horizon=horizon,
+        )
+        is expected
+    )
+
+
+def test_robust_mae_log1p_transform_round_trip_and_preserves_labels() -> None:
+    label = pd.Series([-0.01, -0.03, -0.08], name="label_bull_mae_10")
+    magnitude = -label
+    metadata = _path_target_transform_metadata(
+        product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+        direction="bull",
+        family="hist_gradient_boosting",
+        head_name=MAE_HEAD,
+        horizon=10,
+        estimator_loss="poisson",
+    )
+
+    transformed = _apply_path_target_transform(magnitude, metadata)
+    restored = _inverse_path_target_transform_prediction(transformed, metadata)
+
+    assert metadata["schema_version"] == ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+    assert metadata["path_target_transform"] == PATH_TARGET_TRANSFORM_LOG1P
+    assert transformed.tolist() == pytest.approx(np.log1p(magnitude.to_numpy(dtype=float)))
+    assert restored.tolist() == pytest.approx(magnitude.tolist())
+    assert (restored >= 0.0).all()
+    assert label.tolist() == [-0.01, -0.03, -0.08]
+
+
+def test_pooled_bull_hgb_mae_transform_is_persisted_by_discovery(tmp_path: Path) -> None:
+    frame = _scope_modeling_frame()
+    family_map = {
+        column: "market_relative"
+        for column in frame.columns
+        if not str(column).startswith("label_")
+    }
+
+    result = discover_models(
+        frame,
+        db_path=tmp_path / "engine.sqlite3",
+        artifact_dir=tmp_path / "models",
+        universe_snapshot_id="u",
+        feature_manifest_hash="features",
+        feature_family_by_column=family_map,
+        config=DiscoveryConfig(
+            horizons=(10,),
+            directions=("bull",),
+            minimum_training_samples=20,
+            minimum_holdout_samples=10,
+            max_features=8,
+            mutual_information_top_k=4,
+            research_start=None,
+            random_seed=7,
+            product_class_scopes=(PRODUCT_CLASS_SCOPE_POOLED,),
+            model_families=("hist_gradient_boosting",),
+            include_naive_controls=False,
+        ),
+        code_root=tmp_path,
+        universe=_product_scope_universe(),
+    )
+
+    assert len(result.registered_models) == 1
+    model = result.registered_models[0]
+    bundle = load_model_bundle(model.artifact_path)
+    mae_metadata = bundle_path_domain_metadata(bundle, MAE_HEAD)
+    mfe_metadata = bundle_path_domain_metadata(bundle, MFE_HEAD)
+
+    assert bundle.product_class_scope == PRODUCT_CLASS_SCOPE_POOLED
+    assert bundle.direction == "bull"
+    assert bundle.family == "hist_gradient_boosting"
+    assert mae_metadata["path_target_transform"] == PATH_TARGET_TRANSFORM_LOG1P
+    assert mae_metadata["path_target_transform_fit_split"] == "training"
+    assert mae_metadata["path_target_transform_hash"]
+    assert mae_metadata["training_target_pre_transform_distribution"]
+    assert mae_metadata["training_target_post_transform_distribution"]
+    assert mae_metadata["holdout_transformed_prediction_distribution"]
+    assert mfe_metadata["path_target_transform"] == PATH_TARGET_TRANSFORM_NONE
+    assert (bundle.training_labels["label_bull_mae_10"] <= 0.0).all()
 
 
 def _frames(rows: int = 520) -> dict[str, pd.DataFrame]:
@@ -198,6 +716,67 @@ def test_feature_registry_covers_generated_columns_and_relationship_regime_featu
     assert feature_columns <= spec_names
     assert any(column.startswith("relationship_mutual_info_spy_sqqq") for column in feature_columns)
     assert "market_regime_cluster_expanding" in feature_columns
+
+
+def test_feature_builder_emits_no_fragmentation_warning() -> None:
+    frames = _frames()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PerformanceWarning)
+        result = build_feature_panel(frames, _universe())
+
+    frame = result.frame
+    assert len(frame) == 520 * 4
+    assert not any(str(column).startswith("label_") for column in frame.columns)
+    numeric = frame.select_dtypes(include="number")
+    assert not np.isinf(numeric.to_numpy()).any()
+    assert not numeric.drop(columns=["is_benchmark"], errors="ignore").isna().all().any()
+    labels = build_label_panel(frames, LabelConfig(horizons=(10,)))
+    modeling = frame.merge(labels, on=["Date", "symbol"], how="inner")
+    assert len(labels) == 520 * 4
+    assert len(modeling) == 520 * 4
+
+
+def test_feature_hot_paths_avoid_repeated_dataframe_insert_mutation() -> None:
+    symbol_source = inspect.getsource(_symbol_features)
+    cross_section_source = inspect.getsource(_add_cross_sectional_features)
+
+    assert ".insert(" not in symbol_source
+    assert ".insert(" not in cross_section_source
+    assert 'result["' not in symbol_source
+    assert not re.search(r"data\[[^\]]+\]\s*=(?!=)", cross_section_source)
+
+
+def test_batched_feature_builder_preserves_representative_values() -> None:
+    result = build_feature_panel(_frames(), _universe())
+    frame = result.frame
+    aapl = frame.loc[frame["symbol"] == "AAPL"].iloc[-1]
+
+    expected_values = {
+        "return_5": 0.002231568908813042,
+        "return_20": -0.06416930057336723,
+        "cci_20": -41.751053259949416,
+        "mfi_14": 50.98271001849856,
+        "plus_di_14": 8.32334889090449,
+        "minus_di_14": 14.141467296684063,
+        "adx_14": 28.28214591368054,
+        "regime_conditioned_return_20": 0.002149521571030157,
+        "relationship_corr_spy_sqqq_63": 0.2198046417958433,
+        "relative_return_vs_spy_20": -0.037132167543322825,
+        "sector_return_20": 0.040842023812473593,
+        "relative_return_vs_sector_20": -0.10501132438584082,
+    }
+    for column, expected in expected_values.items():
+        assert float(aapl[column]) == pytest.approx(expected, abs=1e-12)
+
+    assert aapl["Date"] == pd.Timestamp("2019-12-30")
+    assert aapl["symbol"] == "AAPL"
+    assert aapl["role"] == "stock"
+    assert aapl["sector"] == "technology"
+    assert aapl["sector_proxy"] == "XLK"
+    assert aapl["is_benchmark"] == 0.0
+    assert (
+        result.manifest_hash == "e0cc2fce506e6d7d97f6cdcb449ef6f911cadc5dab9e0473e73181c10975357b"
+    )
 
 
 def test_label_engine_uses_next_open_and_separates_label_columns(
@@ -440,6 +1019,7 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
                 "Close": 100.5 + position,
                 "Volume": 1_000_000.0,
                 "dollar_volume": 100_000_000.0,
+                PATH_TARGET_ATR_FEATURE: 1.0,
                 "primary_signal": float(positive_target),
                 "late_market_relative_signal": float(tbs_target),
                 "late_return_signal": return_target,
@@ -501,15 +1081,53 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
     assert "late_market_relative_signal" in str(
         learned.metrics["target_before_stop_feature_screen_audit_json"]
     )
-    assert learned.metrics["expected_return_screening_target"] == ("label_bull_forward_return_10")
-    assert learned.metrics["mfe_screening_target"] == ("label_bull_mfe_10__favorable_magnitude")
-    assert learned.metrics["mae_screening_target"] == "label_bull_mae_10__adverse_magnitude"
+    assert learned.metrics["expected_return_screening_target"] == (
+        "label_bull_forward_return_10__atr_units_atr_pct_14"
+    )
+    assert learned.metrics["mfe_screening_target"] == (
+        "label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14"
+    )
+    assert (
+        learned.metrics["mae_screening_target"]
+        == "label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14"
+    )
+    assert learned.metrics["expected_return_target_normalization_schema_version"] == (
+        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    )
+    assert learned.metrics["mfe_target_normalization_schema_version"] == (
+        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    )
+    assert learned.metrics["mae_target_normalization_schema_version"] == (
+        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    )
     assert learned.metrics["mfe_external_target_name"] == "label_bull_mfe_10"
     assert learned.metrics["mae_external_target_name"] == "label_bull_mae_10"
     assert learned.metrics["mfe_domain_schema_version"] == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
     assert learned.metrics["mae_domain_schema_version"] == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
+    assert learned.metrics["mfe_path_head_capability_state"] == (
+        PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    assert learned.metrics["mae_path_head_capability_state"] == (
+        PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    assert learned.metrics["mfe_path_head_retirement_reason"] == (
+        LINEAR_PATH_HEAD_RETIREMENT_REASON
+    )
+    assert learned.metrics["mae_path_head_retirement_reason"] == (
+        LINEAR_PATH_HEAD_RETIREMENT_REASON
+    )
+    assert learned.metrics["mfe_magnitude_estimator_class"] == "RetiredPathHeadModel"
+    assert learned.metrics["mae_magnitude_estimator_class"] == "RetiredPathHeadModel"
+    assert "TweedieRegressor" not in str(learned.metrics["mfe_magnitude_domain_metadata_json"])
+    assert "TweedieRegressor" not in str(learned.metrics["mae_magnitude_domain_metadata_json"])
+    assert isinstance(bundle.mfe_model, RetiredPathHeadModel)
+    assert isinstance(bundle.mae_model, RetiredPathHeadModel)
     assert learned.metrics["mfe_holdout_signed_domain_violation_count"] == 0
     assert learned.metrics["mae_holdout_signed_domain_violation_count"] == 0
+    gate_by_id = {gate.gate_id: gate for gate in learned.gate_results}
+    assert gate_by_id["mfe_required_path_head_active"].status == "FAIL"
+    assert gate_by_id["mae_required_path_head_active"].status == "FAIL"
+    assert promotion_eligibility(learned.gate_results).eligible is False
     assert learned.metrics["expected_return_feature_screen_schema_version"] == (
         PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION
     )
@@ -523,6 +1141,12 @@ def test_discovery_persists_target_before_stop_feature_screen_metadata(tmp_path:
         learned.metrics["expected_return_screening_manifest_hash"]
         == bundle.head_feature_manifests["expected_return"]
     )
+    nonlinear = next(model for model in result.registered_models if model.family == "extra_trees")
+    nonlinear_bundle = load_model_bundle(nonlinear.artifact_path)
+    assert nonlinear.metrics["mfe_path_head_capability_state"] == PATH_HEAD_CAPABILITY_ACTIVE
+    assert nonlinear.metrics["mae_path_head_capability_state"] == PATH_HEAD_CAPABILITY_ACTIVE
+    assert not isinstance(nonlinear_bundle.mfe_model, RetiredPathHeadModel)
+    assert not isinstance(nonlinear_bundle.mae_model, RetiredPathHeadModel)
 
 
 def test_drift_report_flags_shift_without_mutating_models() -> None:
@@ -588,7 +1212,7 @@ def _ood_metrics(
     head_bounds = {
         "return": (return_low, return_high, return_severity_limit),
         "mfe": (0.0, 0.20, 0.10),
-        "mae": (-0.20, 0.0, 0.10),
+        "mae": (0.0, 0.20, 0.10),
     }
     for head, (low, high, severity_limit) in head_bounds.items():
         metrics.update(
@@ -619,25 +1243,122 @@ def _ood_metrics(
     return metrics
 
 
+def _target_normalization_payload(
+    *,
+    head: str,
+    external_target: str,
+    internal_target: str,
+) -> dict[str, object]:
+    return {
+        "target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+        "head_name": head,
+        "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+        "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+        "atr_feature_timing": "signal_date_close_known",
+        "external_target_name": external_target,
+        "internal_target_name": internal_target,
+        "internal_target_unit": "atr_units",
+        "canonical_external_unit": "decimal_return",
+        "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+        "target_normalization_hash": configuration_hash(
+            {
+                "schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+                "head_name": head,
+                "external_target_name": external_target,
+                "internal_target_name": internal_target,
+                "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                "direction": "bull",
+                "horizon": 10,
+                "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            }
+        ),
+    }
+
+
+def _path_target_normalization_payloads() -> dict[str, dict[str, object]]:
+    return {
+        EXPECTED_RETURN_HEAD: _target_normalization_payload(
+            head=EXPECTED_RETURN_HEAD,
+            external_target="label_bull_forward_return_10",
+            internal_target="label_bull_forward_return_10__atr_units_atr_pct_14",
+        ),
+        MFE_HEAD: _target_normalization_payload(
+            head=MFE_HEAD,
+            external_target="label_bull_mfe_10",
+            internal_target="label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14",
+        ),
+        MAE_HEAD: _target_normalization_payload(
+            head=MAE_HEAD,
+            external_target="label_bull_mae_10",
+            internal_target="label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14",
+        ),
+    }
+
+
+def _path_target_normalization_metrics() -> dict[str, object]:
+    payloads = _path_target_normalization_payloads()
+    metrics: dict[str, object] = {}
+    for head, metric_prefix in (
+        (EXPECTED_RETURN_HEAD, "expected_return"),
+        (MFE_HEAD, "mfe"),
+        (MAE_HEAD, "mae"),
+    ):
+        metadata = payloads[head]
+        metrics.update(
+            {
+                f"{metric_prefix}_target_normalization_schema_version": metadata[
+                    "target_normalization_schema_version"
+                ],
+                f"{metric_prefix}_target_normalization_method": metadata[
+                    "target_normalization_method"
+                ],
+                f"{metric_prefix}_target_normalization_atr_feature_name": metadata[
+                    "atr_feature_name"
+                ],
+                f"{metric_prefix}_target_normalization_hash": metadata["target_normalization_hash"],
+                f"{metric_prefix}_internal_target_name": metadata["internal_target_name"],
+                f"{metric_prefix}_internal_target_unit": metadata["internal_target_unit"],
+                f"{metric_prefix}_canonical_external_unit": metadata["canonical_external_unit"],
+                f"{metric_prefix}_target_prediction_mapping_version": metadata[
+                    "prediction_mapping_version"
+                ],
+            }
+        )
+    return metrics
+
+
 def _path_domain_metrics() -> dict[str, object]:
     payload: dict[str, object] = {}
+    target_normalization_payloads = _path_target_normalization_payloads()
     for head, external_target, internal_target, definition in (
         (
             "mfe",
             "label_bull_mfe_10",
-            "label_bull_mfe_10__favorable_magnitude",
-            "favorable_magnitude_equals_existing_mfe",
+            "label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14",
+            "favorable_magnitude_equals_existing_mfe_divided_by_signal_close_atr_pct_14",
         ),
         (
             "mae",
             "label_bull_mae_10",
-            "label_bull_mae_10__adverse_magnitude",
-            "adverse_magnitude_equals_negative_existing_mae",
+            "label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14",
+            "adverse_magnitude_equals_negative_existing_mae_divided_by_signal_close_atr_pct_14",
         ),
     ):
+        normalization = target_normalization_payloads[head]
+        transform = _path_target_transform_metadata(
+            product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+            direction="bull",
+            family="test",
+            head_name=head,
+            horizon=10,
+            estimator_loss="test_constant_magnitude",
+        )
         payload.update(
             {
                 f"{head}_domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                f"{head}_path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+                f"{head}_path_head_retirement_schema_version": "",
+                f"{head}_path_head_retirement_reason": "",
                 f"{head}_external_target_name": external_target,
                 f"{head}_internal_magnitude_target_name": internal_target,
                 f"{head}_internal_target_definition": definition,
@@ -645,6 +1366,23 @@ def _path_domain_metrics() -> dict[str, object]:
                 f"{head}_magnitude_estimator_loss": "test_constant_magnitude",
                 f"{head}_magnitude_estimator_hash": f"{head}-estimator-hash",
                 f"{head}_prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                f"{head}_path_target_transform_schema_version": (
+                    ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+                ),
+                f"{head}_path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+                f"{head}_path_target_transform_name": PATH_TARGET_TRANSFORM_NONE,
+                f"{head}_path_target_transform_status": "none",
+                f"{head}_path_target_transform_fit_split": "",
+                f"{head}_path_target_transform_hash": transform["path_target_transform_hash"],
+                f"{head}_path_target_inverse_transform": "",
+                f"{head}_target_normalization_schema_version": (
+                    normalization["target_normalization_schema_version"]
+                ),
+                f"{head}_target_normalization_method": normalization["target_normalization_method"],
+                f"{head}_target_normalization_atr_feature_name": normalization["atr_feature_name"],
+                f"{head}_target_normalization_hash": normalization["target_normalization_hash"],
+                f"{head}_internal_target_unit": normalization["internal_target_unit"],
+                f"{head}_canonical_external_unit": normalization["canonical_external_unit"],
                 f"{head}_calibration_domain_integrity_valid": True,
                 f"{head}_holdout_domain_integrity_valid": True,
             }
@@ -681,6 +1419,7 @@ def _policy_metrics(
         "generation": generation,
         "artifact_hash": artifact_hash,
         **_path_domain_metrics(),
+        **_path_target_normalization_metrics(),
     }
     if include_tbs_calibration:
         metrics.update(
@@ -730,6 +1469,7 @@ def _bundle(
     mae_feature_columns: tuple[str, ...] | None = None,
     target_classifier: object | None = None,
     target_calibrator: object | None = None,
+    classifier: object | None = None,
     return_model: object | None = None,
     mfe_model: object | None = None,
     mae_model: object | None = None,
@@ -743,11 +1483,54 @@ def _bundle(
     calibrator_artifact_hash: str = "calibrator-artifact-a",
     include_feature_screen_metadata: bool = True,
     include_path_domain_metadata: bool = True,
+    product_class_scope: str = PRODUCT_CLASS_SCOPE_POOLED,
+    product_class_scope_hash: str = "scope-hash-pooled",
+    product_class_universe_scope_hash: str = "universe-scope-hash-pooled",
+    product_class_role_mapping_hash: str = "role-mapping-hash",
+    feature_hygiene_metadata: dict[str, object] | None = None,
 ) -> ModelBundle:
     target_feature_columns = target_feature_columns or ("f1", "dollar_volume")
     expected_return_feature_columns = expected_return_feature_columns or ("f1", "dollar_volume")
     mfe_feature_columns = mfe_feature_columns or ("f1", "dollar_volume")
     mae_feature_columns = mae_feature_columns or ("f1", "dollar_volume")
+    target_normalization_payloads = _path_target_normalization_payloads()
+    path_transform_payloads = {
+        head: _path_target_transform_metadata(
+            product_scope=product_class_scope,
+            direction="bull",
+            family="test",
+            head_name=head,
+            horizon=10,
+            estimator_loss="test_constant_magnitude",
+        )
+        for head in (MFE_HEAD, MAE_HEAD)
+    }
+    if product_class_scope == PRODUCT_CLASS_SCOPE_ORDINARY:
+        product_roles = ("broad_market_etf", "ordinary_etf", "sector_etf", "stock")
+        product_symbols = ("AAPL", "MSFT")
+    elif product_class_scope == PRODUCT_CLASS_SCOPE_INVERSE:
+        product_roles = ("inverse_etf",)
+        product_symbols = ("SH",)
+    elif product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_LONG:
+        product_roles = ("leveraged_long_etf",)
+        product_symbols = ("TQQQ",)
+    elif product_class_scope == PRODUCT_CLASS_SCOPE_LEVERAGED_INVERSE:
+        product_roles = ("leveraged_inverse_etf",)
+        product_symbols = ("SQQQ",)
+    else:
+        product_roles = tuple(sorted(canonical_role_scope_mapping()))
+        product_symbols = ("AAPL", "MSFT", "SH", "SQQQ", "TQQQ")
+    product_scope_metrics = {
+        "product_class_schema_version": PRODUCT_CLASS_SCHEMA_VERSION,
+        "product_class_scope": product_class_scope,
+        "product_class_scope_configuration_hash": product_class_scope_hash,
+        "product_class_universe_scope_hash": product_class_universe_scope_hash,
+        "product_class_role_scope_mapping_hash": product_class_role_mapping_hash,
+        "product_class_eligible_roles_json": json.dumps(list(product_roles), sort_keys=True),
+        "product_class_eligible_symbols_json": json.dumps(list(product_symbols), sort_keys=True),
+        "product_class_eligible_symbol_count": len(product_symbols),
+        "product_class_development_evidence_label": "DEVELOPMENT_HOLDOUT_DIAGNOSTIC",
+    }
     training = pd.DataFrame(
         {
             "f1": [0.0, 1.0, 2.0],
@@ -755,6 +1538,7 @@ def _bundle(
             "return_signal": [0.01, 0.02, 0.03],
             "mfe_signal": [0.03, 0.04, 0.05],
             "mae_signal": [0.01, 0.02, 0.03],
+            PATH_TARGET_ATR_FEATURE: [1.0, 1.0, 1.0],
             "dollar_volume": [10_000_000.0] * 3,
         }
     )
@@ -766,6 +1550,7 @@ def _bundle(
             "label_bull_mfe_10": [0.03, 0.04, 0.01],
             "label_bull_mae_10": [-0.01, -0.02, -0.03],
             "label_bull_target_before_stop_10": [1.0, 1.0, 0.0],
+            PATH_TARGET_ATR_FEATURE: [1.0, 1.0, 1.0],
         }
     )
     return ModelBundle(
@@ -777,17 +1562,18 @@ def _bundle(
         feature_family_by_column={
             "f1": "stock-specific price structure",
             "dollar_volume": "volume participation",
+            PATH_TARGET_ATR_FEATURE: "volatility_range",
         },
-        classifier=ConstantClassifier(probability),
+        classifier=classifier or ConstantClassifier(probability),
         calibrator=IdentityCalibrator(),
         target_before_stop_model=target_classifier or ConstantClassifier(target_probability),
         target_before_stop_calibrator=target_calibrator or IdentityCalibrator(),
         return_model=return_model or ConstantRegressor(expected_return),
         mfe_model=mfe_model or ConstantRegressor(0.04),
         mae_model=mae_model or ConstantRegressor(0.015),
-        training_medians={"f1": 1.0, "dollar_volume": 10_000_000.0},
-        training_means={"f1": 1.0, "dollar_volume": 10_000_000.0},
-        training_stds={"f1": 1.0, "dollar_volume": 1.0},
+        training_medians={"f1": 1.0, "dollar_volume": 10_000_000.0, PATH_TARGET_ATR_FEATURE: 1.0},
+        training_means={"f1": 1.0, "dollar_volume": 10_000_000.0, PATH_TARGET_ATR_FEATURE: 1.0},
+        training_stds={"f1": 1.0, "dollar_volume": 1.0, PATH_TARGET_ATR_FEATURE: 1.0},
         training_matrix=training,
         training_labels=labels,
         metrics=(
@@ -804,6 +1590,7 @@ def _bundle(
                 calibration_manifest_hash=calibration_manifest_hash,
                 calibrator_artifact_hash=calibrator_artifact_hash,
             )
+            | product_scope_metrics
             if include_policy
             else {
                 **(
@@ -824,6 +1611,8 @@ def _bundle(
                     else {}
                 ),
                 **_path_domain_metrics(),
+                **_path_target_normalization_metrics(),
+                **product_scope_metrics,
             }
         ),
         calibration_metrics={},
@@ -854,18 +1643,21 @@ def _bundle(
                     "selected_feature_count": len(expected_return_feature_columns),
                     "selected_feature_families": {"test": len(expected_return_feature_columns)},
                     "selected_feature_manifest_hash": return_manifest,
+                    **target_normalization_payloads[EXPECTED_RETURN_HEAD],
                 },
                 MFE_HEAD: {
                     "screening_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
                     "selected_feature_count": len(mfe_feature_columns),
                     "selected_feature_families": {"test": len(mfe_feature_columns)},
                     "selected_feature_manifest_hash": mfe_manifest,
+                    **target_normalization_payloads[MFE_HEAD],
                 },
                 MAE_HEAD: {
                     "screening_schema_version": PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
                     "selected_feature_count": len(mae_feature_columns),
                     "selected_feature_families": {"test": len(mae_feature_columns)},
                     "selected_feature_manifest_hash": mae_manifest,
+                    **target_normalization_payloads[MAE_HEAD],
                 },
             }
             if include_feature_screen_metadata
@@ -875,34 +1667,119 @@ def _bundle(
             {
                 MFE_HEAD: {
                     "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                    "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+                    "path_head_retirement_schema_version": "",
+                    "path_head_retirement_reason": "",
                     "head_name": MFE_HEAD,
                     "external_target_name": "label_bull_mfe_10",
-                    "internal_magnitude_target_name": ("label_bull_mfe_10__favorable_magnitude"),
-                    "internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+                    "internal_magnitude_target_name": (
+                        "label_bull_mfe_10__favorable_magnitude_atr_units_atr_pct_14"
+                    ),
+                    "internal_target_definition": (
+                        "favorable_magnitude_equals_existing_mfe_divided_by_signal_close_atr_pct_14"
+                    ),
                     "estimator_class": type(mfe_model or ConstantRegressor(0.04)).__name__,
                     "estimator_loss": "test_constant_magnitude",
                     "estimator_hash": "mfe-estimator-hash",
                     "selected_feature_manifest_hash": mfe_manifest,
                     "prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                    "target_normalization": target_normalization_payloads[MFE_HEAD],
+                    "target_normalization_schema_version": (
+                        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+                    ),
+                    "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+                    "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                    "target_normalization_hash": target_normalization_payloads[MFE_HEAD][
+                        "target_normalization_hash"
+                    ],
+                    "internal_target_unit": "atr_units",
+                    "canonical_external_unit": "decimal_return",
+                    "path_target_transform_schema_version": (
+                        ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+                    ),
+                    "path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+                    "path_target_transform_name": PATH_TARGET_TRANSFORM_NONE,
+                    "path_target_transform_status": "none",
+                    "path_target_transform_parameters": {},
+                    "path_target_transform_fit_split": "",
+                    "path_target_inverse_transform": "",
+                    "path_target_inverse_transform_mapping": "",
+                    "path_target_transform_hash": path_transform_payloads[MFE_HEAD][
+                        "path_target_transform_hash"
+                    ],
+                    "path_target_transform_metadata": path_transform_payloads[MFE_HEAD],
                 },
                 MAE_HEAD: {
                     "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+                    "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+                    "path_head_retirement_schema_version": "",
+                    "path_head_retirement_reason": "",
                     "head_name": MAE_HEAD,
                     "external_target_name": "label_bull_mae_10",
-                    "internal_magnitude_target_name": "label_bull_mae_10__adverse_magnitude",
+                    "internal_magnitude_target_name": (
+                        "label_bull_mae_10__adverse_magnitude_atr_units_atr_pct_14"
+                    ),
                     "internal_target_definition": (
-                        "adverse_magnitude_equals_negative_existing_mae"
+                        "adverse_magnitude_equals_negative_existing_mae_divided_by_"
+                        "signal_close_atr_pct_14"
                     ),
                     "estimator_class": type(mae_model or ConstantRegressor(0.015)).__name__,
                     "estimator_loss": "test_constant_magnitude",
                     "estimator_hash": "mae-estimator-hash",
                     "selected_feature_manifest_hash": mae_manifest,
                     "prediction_mapping_version": (PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION),
+                    "target_normalization": target_normalization_payloads[MAE_HEAD],
+                    "target_normalization_schema_version": (
+                        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+                    ),
+                    "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+                    "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+                    "target_normalization_hash": target_normalization_payloads[MAE_HEAD][
+                        "target_normalization_hash"
+                    ],
+                    "internal_target_unit": "atr_units",
+                    "canonical_external_unit": "decimal_return",
+                    "path_target_transform_schema_version": (
+                        ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+                    ),
+                    "path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+                    "path_target_transform_name": PATH_TARGET_TRANSFORM_NONE,
+                    "path_target_transform_status": "none",
+                    "path_target_transform_parameters": {},
+                    "path_target_transform_fit_split": "",
+                    "path_target_inverse_transform": "",
+                    "path_target_inverse_transform_mapping": "",
+                    "path_target_transform_hash": path_transform_payloads[MAE_HEAD][
+                        "path_target_transform_hash"
+                    ],
+                    "path_target_transform_metadata": path_transform_payloads[MAE_HEAD],
                 },
             }
             if include_path_domain_metadata
             else {}
         ),
+        product_class_schema_version=PRODUCT_CLASS_SCHEMA_VERSION,
+        product_class_scope=product_class_scope,
+        product_class_eligible_roles=product_roles,
+        product_class_eligible_symbols=product_symbols,
+        product_class_role_scope_mapping={
+            key: str(value) for key, value in canonical_role_scope_mapping().items()
+        },
+        product_class_role_scope_mapping_hash=product_class_role_mapping_hash,
+        product_class_scope_configuration_hash=product_class_scope_hash,
+        product_class_universe_scope_hash=product_class_universe_scope_hash,
+        product_class_scope_metadata={
+            "schema_version": PRODUCT_CLASS_SCHEMA_VERSION,
+            "scope": product_class_scope,
+            "eligible_roles": list(product_roles),
+            "eligible_symbols": list(product_symbols),
+        },
+        feature_hygiene_metadata=feature_hygiene_metadata
+        or {
+            "schema_version": MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION,
+            "policy_hash": nonfinite_hygiene_policy_hash(),
+            "records": [],
+        },
     )
 
 
@@ -916,11 +1793,147 @@ def _scanner_feature_panel(symbols: tuple[str, ...] = ("AAPL",)) -> pd.DataFrame
             "return_signal": [0.021] * len(symbols),
             "mfe_signal": [0.052] * len(symbols),
             "mae_signal": [0.018] * len(symbols),
+            PATH_TARGET_ATR_FEATURE: [1.0] * len(symbols),
             "dollar_volume": [20_000_000.0] * len(symbols),
             "sector": ["technology"] * len(symbols),
             "market_regime_label": ["mixed"] * len(symbols),
         }
     )
+
+
+def _product_scope_scanner_panel() -> pd.DataFrame:
+    frame = _scanner_feature_panel(("ABC", "SH"))
+    frame["role"] = ["stock", "inverse_etf"]
+    frame["sector"] = ["technology", "inverse_market"]
+    return frame
+
+
+def test_scanner_routes_specialists_only_to_matching_product_scope(tmp_path: Path) -> None:
+    universe = _product_scope_universe()
+    ordinary = _bundle(
+        "ordinary-model",
+        product_class_scope=PRODUCT_CLASS_SCOPE_ORDINARY,
+        product_class_scope_hash="ordinary-scope-hash",
+        product_class_universe_scope_hash="ordinary-universe-scope-hash",
+    )
+    inverse = _bundle(
+        "inverse-model",
+        product_class_scope=PRODUCT_CLASS_SCOPE_INVERSE,
+        product_class_scope_hash="inverse-scope-hash",
+        product_class_universe_scope_hash="inverse-universe-scope-hash",
+    )
+
+    snapshot = run_scanner(
+        _product_scope_scanner_panel(),
+        bundles=(ordinary, inverse),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id=universe.snapshot_id,
+        model_states={"ordinary-model": "CHAMPION", "inverse-model": "CHAMPION"},
+        model_eligibility={"ordinary-model": True, "inverse-model": True},
+        config=ScannerConfig(probability_threshold=0.5),
+        universe=universe,
+    )
+
+    mismatch = snapshot.rows[
+        snapshot.rows["exclusion_reason"]
+        .astype(str)
+        .str.contains(PRODUCT_CLASS_SCOPE_MISMATCH_REASON)
+    ]
+    assert len(mismatch) == 2
+    assert set(mismatch["scanner_routing_result"]) == {PRODUCT_CLASS_SCOPE_MISMATCH_REASON}
+    assert bool(
+        snapshot.rows.loc[
+            (snapshot.rows["model_id"] == "ordinary-model") & (snapshot.rows["ticker"] == "ABC"),
+            "product_class_scope_match",
+        ].iloc[0]
+    )
+    assert (
+        snapshot.rows.loc[
+            (snapshot.rows["model_id"] == "inverse-model") & (snapshot.rows["ticker"] == "SH"),
+            "row_product_class_scope",
+        ].iloc[0]
+        == PRODUCT_CLASS_SCOPE_INVERSE
+    )
+    assert (
+        snapshot.rows.loc[
+            (snapshot.rows["model_id"] == "ordinary-model") & (snapshot.rows["ticker"] == "SH"),
+            "candidate_status",
+        ].iloc[0]
+        == "REJECTED"
+    )
+
+
+def test_scanner_identity_includes_product_class_scope_metadata(tmp_path: Path) -> None:
+    universe = _product_scope_universe()
+    ordinary = _bundle(
+        product_class_scope=PRODUCT_CLASS_SCOPE_ORDINARY,
+        product_class_scope_hash="ordinary-scope-hash-a",
+        product_class_universe_scope_hash="ordinary-universe-scope-hash",
+    )
+
+    snapshot = run_scanner(
+        _product_scope_scanner_panel(),
+        bundles=(ordinary,),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id=universe.snapshot_id,
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        universe=universe,
+    )
+
+    with engine_connection(tmp_path / "engine.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT metadata_json FROM scanner_snapshots WHERE scan_id = ?",
+            (snapshot.scan_id,),
+        ).fetchone()
+    metadata = json.loads(row["metadata_json"])
+    identity = metadata["canonical_scan_execution_identity"]
+    assert metadata["scanner_identity_schema_version"] == 12
+    assert metadata["product_class_scope_metadata_hash"]
+    assert metadata["model_feature_nonfinite_hygiene_metadata_hash"]
+    assert identity["product_class_schema_version"] == PRODUCT_CLASS_SCHEMA_VERSION
+    assert identity["product_class_scope_metadata"]["model-a"]["scope"] == (
+        PRODUCT_CLASS_SCOPE_ORDINARY
+    )
+    assert identity["model_feature_nonfinite_hygiene_metadata"]["model-a"]["schema_version"] == (
+        MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION
+    )
+
+
+def test_scanner_identity_changes_when_product_scope_hash_changes(tmp_path: Path) -> None:
+    universe = _product_scope_universe()
+    base_kwargs = {
+        "feature_panel": _product_scope_scanner_panel(),
+        "db_path": tmp_path / "engine.sqlite3",
+        "output_dir": tmp_path / "scanner",
+        "universe_snapshot_id": universe.snapshot_id,
+        "model_states": {"model-a": "CHAMPION"},
+        "model_eligibility": {"model-a": True},
+        "universe": universe,
+    }
+
+    first = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                product_class_scope=PRODUCT_CLASS_SCOPE_ORDINARY,
+                product_class_scope_hash="ordinary-scope-hash-a",
+            ),
+        ),
+    )
+    second = run_scanner(
+        **base_kwargs,
+        bundles=(
+            _bundle(
+                product_class_scope=PRODUCT_CLASS_SCOPE_ORDINARY,
+                product_class_scope_hash="ordinary-scope-hash-b",
+            ),
+        ),
+    )
+
+    assert first.scan_id != second.scan_id
 
 
 def test_predict_bundle_outputs_separate_target_before_stop_probability() -> None:
@@ -929,6 +1942,7 @@ def test_predict_bundle_outputs_separate_target_before_stop_probability() -> Non
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -937,6 +1951,31 @@ def test_predict_bundle_outputs_separate_target_before_stop_probability() -> Non
 
     assert "target_before_stop_probability" in prediction.columns
     assert prediction["target_before_stop_probability"].iloc[0] == pytest.approx(0.75)
+
+
+def test_predict_bundle_sanitizes_nonfinite_features_before_estimators() -> None:
+    bundle = _bundle(
+        classifier=_finite_classifier_pipeline(0.65),
+        target_classifier=_finite_classifier_pipeline(0.70),
+        return_model=_finite_regressor_pipeline(0.02),
+        mfe_model=_finite_regressor_pipeline(0.04),
+        mae_model=_finite_regressor_pipeline(0.015),
+    )
+    frame = _scanner_feature_panel()
+    frame.loc[0, "f1"] = -np.inf
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["calibrated_probability"] == pytest.approx(0.65)
+    assert prediction["target_before_stop_probability"] == pytest.approx(0.70)
+    assert prediction["expected_return"] == pytest.approx(0.02)
+    assert bool(prediction["model_feature_nonfinite_hygiene_warning"])
+    assert prediction["model_feature_invalid_pre_sanitization_count"] >= 1
+    assert prediction["model_feature_invalid_post_sanitization_count"] == 0
+    assert "f1" in str(prediction["model_feature_hygiene_sanitized_columns"])
+    assert prediction["model_feature_nonfinite_hygiene_schema_version"] == (
+        MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION
+    )
 
 
 def test_target_before_stop_classifier_receives_own_selected_columns() -> None:
@@ -1021,6 +2060,7 @@ def test_path_metric_heads_receive_own_selected_columns() -> None:
             "return_signal": [0.031],
             "mfe_signal": [0.064],
             "mae_signal": [0.027],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1044,9 +2084,216 @@ def test_path_metric_heads_receive_own_selected_columns() -> None:
     assert prediction["mae_feature_manifest_hash"] == "mae-manifest"
 
 
+def test_path_targets_train_in_atr_units_without_changing_labels() -> None:
+    labels = pd.Series([0.02, -0.01, 0.04], name="label_bull_forward_return_10")
+    mfe_labels = pd.Series([0.03, 0.00, 0.06], name="label_bull_mfe_10")
+    mae_labels = pd.Series([-0.02, 0.00, -0.05], name="label_bull_mae_10")
+    atr = pd.Series([0.01, 0.02, 0.04], name=PATH_TARGET_ATR_FEATURE)
+
+    return_target = _path_atr_training_target(
+        labels,
+        atr,
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=str(labels.name),
+    )
+    mfe_target = _path_atr_training_target(
+        mfe_labels,
+        atr,
+        head_name=MFE_HEAD,
+        external_target_name=str(mfe_labels.name),
+    )
+    mae_target = _path_atr_training_target(
+        mae_labels,
+        atr,
+        head_name=MAE_HEAD,
+        external_target_name=str(mae_labels.name),
+    )
+
+    assert labels.tolist() == [0.02, -0.01, 0.04]
+    assert mfe_labels.tolist() == [0.03, 0.0, 0.06]
+    assert mae_labels.tolist() == [-0.02, 0.0, -0.05]
+    assert return_target.tolist() == pytest.approx([2.0, -0.5, 1.0])
+    assert mfe_target.tolist() == pytest.approx([3.0, 0.0, 1.5])
+    assert mae_target.tolist() == pytest.approx([2.0, -0.0, 1.25])
+    assert return_target.name == "label_bull_forward_return_10__atr_units_atr_pct_14"
+
+
+def test_predict_bundle_maps_atr_unit_path_predictions_to_canonical_returns() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [0.04],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        expected_return=1.5,
+        mfe_model=ConstantRegressor(2.0),
+        mae_model=ConstantRegressor(1.25),
+    )
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["expected_return_internal_atr_units"] == pytest.approx(1.5)
+    assert prediction["expected_return"] == pytest.approx(0.06)
+    assert prediction["expected_mfe_internal_magnitude_atr_units"] == pytest.approx(2.0)
+    assert prediction["expected_mfe"] == pytest.approx(0.08)
+    assert prediction["expected_mae_internal_magnitude_atr_units"] == pytest.approx(1.25)
+    assert prediction["expected_mae"] == pytest.approx(-0.05)
+    assert bool(prediction["expected_mfe_signed_prediction_invalid"]) is False
+    assert bool(prediction["expected_mae_signed_prediction_invalid"]) is False
+
+
+def test_predict_bundle_uses_frozen_mae_transform_before_canonical_ood() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [1.0],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    transform_metadata = _path_target_transform_metadata(
+        product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+        direction="bull",
+        family="hist_gradient_boosting",
+        head_name=MAE_HEAD,
+        horizon=10,
+        estimator_loss="poisson",
+    )
+    bundle = _bundle(mae_model=ConstantRegressor(float(np.log1p(0.027))))
+    metadata = {head: dict(value) for head, value in bundle.path_domain_metadata.items()}
+    metadata[MAE_HEAD].update(
+        {
+            "path_target_transform_schema_version": ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+            "path_target_transform": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_name": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_status": "active",
+            "path_target_transform_fit_split": "training",
+            "path_target_inverse_transform": "expm1",
+            "path_target_inverse_transform_mapping": (
+                "nonnegative_magnitude = expm1(transformed_prediction)"
+            ),
+            "path_target_transform_hash": transform_metadata["path_target_transform_hash"],
+            "path_target_transform_metadata": transform_metadata,
+        }
+    )
+    transformed_bundle = replace(
+        bundle,
+        family="hist_gradient_boosting",
+        path_domain_metadata=metadata,
+    )
+
+    prediction = predict_bundle(transformed_bundle, frame).iloc[0]
+
+    assert prediction["mae_path_target_transform"] == PATH_TARGET_TRANSFORM_LOG1P
+    assert prediction["expected_mae_transformed"] == pytest.approx(np.log1p(0.027))
+    assert prediction["expected_mae_internal_magnitude"] == pytest.approx(0.027)
+    assert prediction["expected_mae_inverse_transformed_internal_magnitude"] == pytest.approx(0.027)
+    assert prediction["expected_mae"] == pytest.approx(-0.027)
+    assert bool(prediction["expected_mae_out_of_distribution"]) is False
+    assert bool(prediction["expected_mae_signed_prediction_invalid"]) is False
+
+
+def test_prediction_ood_uses_atr_unit_model_space_not_canonical_output() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [4.0],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(expected_return=0.5, return_high=1.0)
+
+    prediction = predict_bundle(bundle, frame).iloc[0]
+
+    assert prediction["expected_return"] == pytest.approx(2.0)
+    assert prediction["expected_return_internal_atr_units"] == pytest.approx(0.5)
+    assert bool(prediction["expected_return_out_of_distribution"]) is False
+
+
+def test_predict_bundle_rejects_missing_atr_for_normalized_path_heads() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+
+    prediction = predict_bundle(_bundle(), frame).iloc[0]
+
+    assert bool(prediction["expected_return_required_feature_missing"]) is True
+    assert bool(prediction["mfe_required_feature_missing"]) is True
+    assert bool(prediction["mae_required_feature_missing"]) is True
+    assert PATH_TARGET_ATR_FEATURE in str(prediction["expected_return_missing_features"])
+    assert PATH_TARGET_ATR_FEATURE in str(prediction["mfe_missing_features"])
+    assert PATH_TARGET_ATR_FEATURE in str(prediction["mae_missing_features"])
+    assert pd.isna(prediction["expected_return"])
+    assert pd.isna(prediction["expected_mfe"])
+    assert pd.isna(prediction["expected_mae"])
+
+
+def test_predict_bundle_marks_retired_logistic_path_heads_without_predicting() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-01-02"]),
+            "symbol": ["AAPL"],
+            "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [1.0],
+            "dollar_volume": [20_000_000.0],
+        }
+    )
+    bundle = _bundle(
+        mfe_model=RetiredPathHeadModel(family="logistic_regression", head_name=MFE_HEAD),
+        mae_model=RetiredPathHeadModel(family="logistic_regression", head_name=MAE_HEAD),
+    )
+    metadata = {head: dict(value) for head, value in bundle.path_domain_metadata.items()}
+    for head in (MFE_HEAD, MAE_HEAD):
+        metadata[head].update(
+            {
+                "path_head_capability_state": (PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR),
+                "path_head_retirement_schema_version": "linear_family_path_head_retirement_v1",
+                "path_head_retirement_reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+                "estimator_class": "RetiredPathHeadModel",
+                "estimator_loss": "not_applicable_retired_path_head",
+            }
+        )
+    retired_bundle = replace(
+        bundle,
+        family="logistic_regression",
+        path_domain_metadata=metadata,
+    )
+
+    prediction = predict_bundle(retired_bundle, frame).iloc[0]
+
+    assert bool(prediction["mfe_path_head_retired"]) is True
+    assert bool(prediction["mae_path_head_retired"]) is True
+    assert prediction["mfe_path_head_retirement_reason"] == LINEAR_PATH_HEAD_RETIREMENT_REASON
+    assert prediction["mae_path_head_retirement_reason"] == LINEAR_PATH_HEAD_RETIREMENT_REASON
+    assert pd.isna(prediction["expected_mfe"])
+    assert pd.isna(prediction["expected_mae"])
+    assert bool(prediction["expected_mfe_magnitude_prediction_invalid"]) is False
+    assert bool(prediction["expected_mfe_signed_prediction_invalid"]) is False
+    assert bool(prediction["expected_mfe_magnitude_domain_valid"]) is False
+    assert bool(prediction["expected_mfe_signed_domain_valid"]) is False
+    assert bool(prediction["expected_mfe_sign_contract_valid"]) is True
+    assert bool(prediction["expected_mae_magnitude_prediction_invalid"]) is False
+    assert bool(prediction["expected_mae_signed_prediction_invalid"]) is False
+    assert bool(prediction["expected_mae_magnitude_domain_valid"]) is False
+    assert bool(prediction["expected_mae_signed_domain_valid"]) is False
+    assert bool(prediction["expected_mae_sign_contract_valid"]) is True
+
+
 @pytest.mark.parametrize(
     "family",
-    ["naive_base_rate", "logistic_regression", "hist_gradient_boosting", "extra_trees"],
+    ["naive_base_rate", "hist_gradient_boosting", "extra_trees"],
 )
 @pytest.mark.parametrize("head", [MFE_HEAD, MAE_HEAD])
 def test_path_magnitude_estimators_emit_nonnegative_magnitudes(
@@ -1068,10 +2315,14 @@ def test_path_magnitude_estimators_emit_nonnegative_magnitudes(
     assert spec.schema_version == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
     assert np.isfinite(prediction).all()
     assert (prediction >= 0.0).all()
-    if family == "logistic_regression":
-        assert spec.estimator_class == "TweedieRegressor"
     if family == "hist_gradient_boosting":
         assert spec.loss == "poisson"
+
+
+@pytest.mark.parametrize("head", [MFE_HEAD, MAE_HEAD])
+def test_logistic_path_magnitude_estimator_factory_refuses_retired_heads(head: str) -> None:
+    with pytest.raises(ValueError, match=LINEAR_PATH_HEAD_RETIREMENT_REASON):
+        build_path_magnitude_estimator(family="logistic_regression", head_name=head, seed=17)
 
 
 def test_predict_bundle_rejects_invalid_magnitude_without_clipping() -> None:
@@ -1080,6 +2331,7 @@ def test_predict_bundle_rejects_invalid_magnitude_without_clipping() -> None:
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1099,9 +2351,12 @@ def test_predict_bundle_rejects_invalid_magnitude_without_clipping() -> None:
 
 def test_path_magnitude_prediction_mapping_uses_no_clipping() -> None:
     source = inspect.getsource(_path_magnitude_prediction)
+    target_source = inspect.getsource(_path_target_prediction)
 
     assert ".clip" not in source
     assert "np.clip" not in source
+    assert ".clip" not in target_source
+    assert "np.clip" not in target_source
 
 
 def test_predict_bundle_marks_missing_path_domain_metadata_for_legacy_artifacts() -> None:
@@ -1110,6 +2365,7 @@ def test_predict_bundle_marks_missing_path_domain_metadata_for_legacy_artifacts(
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [0.05],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1130,6 +2386,7 @@ def test_predict_bundle_flags_missing_path_metric_features_without_substitution(
             "symbol": ["AAPL"],
             "f1": [0.05],
             "target_signal": [0.82],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
         }
     )
@@ -1161,6 +2418,7 @@ def test_scanner_snapshot_is_idempotent_and_contains_residual_attribution(tmp_pa
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1200,6 +2458,7 @@ def test_scanner_rejects_missing_target_before_stop_features_explicitly(tmp_path
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1235,6 +2494,7 @@ def test_scanner_rejects_missing_path_metric_features_explicitly(tmp_path: Path)
             "symbol": ["AAPL"],
             "f1": [2.0],
             "target_signal": [0.75],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1289,6 +2549,105 @@ def test_scanner_rejects_missing_path_domain_metadata_explicitly(tmp_path: Path)
     assert "mae_domain_metadata_missing" in row["exclusion_reason"]
     assert bool(row["mfe_domain_metadata_missing"]) is True
     assert bool(row["mae_domain_metadata_missing"]) is True
+
+
+def test_scanner_rejects_transformed_path_head_with_missing_transform_metadata(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(mae_model=ConstantRegressor(float(np.log1p(0.015))))
+    metadata = {head: dict(value) for head, value in bundle.path_domain_metadata.items()}
+    metadata[MAE_HEAD].update(
+        {
+            "path_target_transform_schema_version": ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+            "path_target_transform": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_name": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_status": "active",
+            "path_target_transform_fit_split": "training",
+            "path_target_inverse_transform": "expm1",
+            "path_target_inverse_transform_mapping": (
+                "nonnegative_magnitude = expm1(transformed_prediction)"
+            ),
+            "path_target_transform_hash": "transform-hash-without-metadata",
+        }
+    )
+    metadata[MAE_HEAD].pop("path_target_transform_metadata", None)
+    bundle = replace(bundle, family="hist_gradient_boosting", path_domain_metadata=metadata)
+
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(bundle,),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert "path_target_transform_metadata_missing" in row["exclusion_reason"]
+    assert bool(row["mae_path_target_transform_metadata_missing"]) is True
+    assert bool(row["expected_mae_path_target_transform_metadata_missing"]) is True
+
+
+def test_scanner_rejects_retired_logistic_path_heads_explicitly(tmp_path: Path) -> None:
+    bundle = _bundle(
+        model_id="model-a",
+        mfe_model=RetiredPathHeadModel(family="logistic_regression", head_name=MFE_HEAD),
+        mae_model=RetiredPathHeadModel(family="logistic_regression", head_name=MAE_HEAD),
+    )
+    metadata = {head: dict(value) for head, value in bundle.path_domain_metadata.items()}
+    for head in (MFE_HEAD, MAE_HEAD):
+        metadata[head].update(
+            {
+                "path_head_capability_state": (PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR),
+                "path_head_retirement_schema_version": "linear_family_path_head_retirement_v1",
+                "path_head_retirement_reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+                "estimator_class": "RetiredPathHeadModel",
+                "estimator_loss": "not_applicable_retired_path_head",
+            }
+        )
+    retired_bundle = replace(
+        bundle,
+        family="logistic_regression",
+        path_domain_metadata=metadata,
+    )
+
+    snapshot = run_scanner(
+        _scanner_feature_panel(),
+        bundles=(retired_bundle,),
+        db_path=tmp_path / "engine.sqlite3",
+        output_dir=tmp_path / "scanner",
+        universe_snapshot_id="u",
+        model_states={"model-a": "CHAMPION"},
+        model_eligibility={"model-a": True},
+        config=ScannerConfig(probability_threshold=0.5),
+    )
+
+    row = snapshot.rows.iloc[0]
+    assert row["candidate_status"] == "REJECTED"
+    assert f"mfe_{LINEAR_PATH_HEAD_RETIREMENT_REASON}" in row["exclusion_reason"]
+    assert f"mae_{LINEAR_PATH_HEAD_RETIREMENT_REASON}" in row["exclusion_reason"]
+    assert "mfe_magnitude_prediction_invalid" not in row["exclusion_reason"]
+    assert "mae_magnitude_prediction_invalid" not in row["exclusion_reason"]
+    assert "mfe_prediction_sign_contract_failed" not in row["exclusion_reason"]
+    assert "mae_prediction_sign_contract_failed" not in row["exclusion_reason"]
+    assert "nonfinite_prediction" not in row["exclusion_reason"]
+    assert row["mfe_path_head_capability_state"] == (
+        PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    assert row["mae_path_head_capability_state"] == (
+        PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    assert bool(row["expected_mfe_magnitude_prediction_invalid"]) is False
+    assert bool(row["expected_mfe_signed_prediction_invalid"]) is False
+    assert bool(row["expected_mfe_magnitude_domain_valid"]) is False
+    assert bool(row["expected_mfe_signed_domain_valid"]) is False
+    assert bool(row["expected_mae_magnitude_prediction_invalid"]) is False
+    assert bool(row["expected_mae_signed_prediction_invalid"]) is False
+    assert bool(row["expected_mae_magnitude_domain_valid"]) is False
+    assert bool(row["expected_mae_signed_domain_valid"]) is False
 
 
 def test_scanner_rejects_invalid_path_magnitude_predictions_explicitly(tmp_path: Path) -> None:
@@ -1375,6 +2734,7 @@ def test_scanner_rejects_promoted_model_without_gate_eligibility(tmp_path: Path)
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1404,6 +2764,7 @@ def test_scanner_eligibility_uses_persisted_temporal_fold_gates(tmp_path: Path) 
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1472,6 +2833,7 @@ def test_scanner_applies_persisted_expected_return_threshold(tmp_path: Path) -> 
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1500,6 +2862,7 @@ def test_scanner_applies_persisted_target_before_stop_threshold(tmp_path: Path) 
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1529,6 +2892,7 @@ def test_scanner_threshold_equality_passes_and_runtime_can_only_tighten(
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [5_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1566,6 +2930,7 @@ def test_scanner_rejects_missing_persisted_selection_policy(tmp_path: Path) -> N
             "Date": pd.to_datetime(["2024-01-02"]),
             "symbol": ["AAPL"],
             "f1": [2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0],
             "dollar_volume": [20_000_000.0],
             "sector": ["technology"],
             "market_regime_label": ["mixed"],
@@ -1647,6 +3012,7 @@ def test_scanner_caps_are_order_independent_for_equal_utility_rows(tmp_path: Pat
             "Date": pd.to_datetime(["2024-01-02"] * 3),
             "symbol": ["C", "A", "B"],
             "f1": [2.0, 2.0, 2.0],
+            PATH_TARGET_ATR_FEATURE: [1.0, 1.0, 1.0],
             "dollar_volume": [20_000_000.0] * 3,
             "sector": ["technology"] * 3,
             "market_regime_label": ["mixed"] * 3,
@@ -1894,6 +3260,67 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
         feature_manifest_hash="features-a",
         model_generation_ids={"model-a": "generation-a"},
     )
+    normalization_bundle = _bundle(policy=SelectionPolicy(per_date_limit=2))
+    screen_metadata = {
+        key: dict(value) for key, value in normalization_bundle.feature_screen_metadata.items()
+    }
+    screen_metadata[EXPECTED_RETURN_HEAD]["target_normalization_hash"] = (
+        "changed-return-target-normalization-hash"
+    )
+    target_normalization = run_scanner(
+        **base_kwargs,
+        bundles=(replace(normalization_bundle, feature_screen_metadata=screen_metadata),),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
+    hygiene_bundle = _bundle(policy=SelectionPolicy(per_date_limit=2))
+    hygiene_metadata = dict(hygiene_bundle.feature_hygiene_metadata)
+    hygiene_metadata["policy_hash"] = "changed-nonfinite-hygiene-policy-hash"
+    feature_hygiene = run_scanner(
+        **base_kwargs,
+        bundles=(replace(hygiene_bundle, feature_hygiene_metadata=hygiene_metadata),),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
+    transform_bundle = _bundle(policy=SelectionPolicy(per_date_limit=2))
+    transform_metadata = {
+        key: dict(value) for key, value in transform_bundle.path_domain_metadata.items()
+    }
+    active_transform = _path_target_transform_metadata(
+        product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+        direction="bull",
+        family="hist_gradient_boosting",
+        head_name=MAE_HEAD,
+        horizon=10,
+        estimator_loss="poisson",
+    )
+    transform_metadata[MAE_HEAD].update(
+        {
+            "path_target_transform_schema_version": ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+            "path_target_transform": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_name": PATH_TARGET_TRANSFORM_LOG1P,
+            "path_target_transform_status": "active",
+            "path_target_transform_fit_split": "training",
+            "path_target_inverse_transform": "expm1",
+            "path_target_transform_hash": active_transform["path_target_transform_hash"],
+            "path_target_transform_metadata": active_transform,
+        }
+    )
+    path_target_transform = run_scanner(
+        **base_kwargs,
+        bundles=(
+            replace(
+                transform_bundle,
+                family="hist_gradient_boosting",
+                path_domain_metadata=transform_metadata,
+            ),
+        ),
+        universe_snapshot_id="u",
+        feature_manifest_hash="features-a",
+        model_generation_ids={"model-a": "generation-a"},
+    )
 
     assert (
         len(
@@ -1909,9 +3336,12 @@ def test_scanner_identity_changes_for_policy_generation_feature_and_universe(
                 calibration_manifest.scan_id,
                 path_manifest.scan_id,
                 path_domain.scan_id,
+                target_normalization.scan_id,
+                feature_hygiene.scan_id,
+                path_target_transform.scan_id,
             }
         )
-        == 11
+        == 14
     )
 
 
@@ -2155,7 +3585,7 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     metadata = json.loads(row["metadata_json"])
 
     assert metadata["final_scan_id"] == snapshot.scan_id
-    assert metadata["scanner_identity_schema_version"] == 7
+    assert metadata["scanner_identity_schema_version"] == 12
     assert metadata["raw_scanner_config_json"]
     assert metadata["raw_scanner_config_hash"]
     assert metadata["effective_model_policy_json"]
@@ -2170,12 +3600,17 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
     assert metadata["path_metric_feature_metadata_hash"]
     assert metadata["path_metric_domain_metadata_json"]
     assert metadata["path_metric_domain_metadata_hash"]
+    assert metadata["model_feature_nonfinite_hygiene_metadata_json"]
+    assert metadata["model_feature_nonfinite_hygiene_metadata_hash"]
     assert metadata["persisted_model_policy_hashes"] == {"model-a": "policy-hash"}
     identity = metadata["canonical_scan_execution_identity"]
     assert identity["prediction_ood_governance_schema_version"] == PREDICTION_OOD_GOVERNANCE_VERSION
     assert identity["feature_manifest_hash"] == "features-a"
     assert identity["model_generation_ids"] == {"model-a": "generation-a"}
     assert identity["model_artifact_hashes"] == {"model-a": "artifact-hash-a"}
+    assert identity["model_feature_nonfinite_hygiene_metadata"]["model-a"]["schema_version"] == (
+        MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION
+    )
     assert identity["model_ood_governance_metadata"]["model-a"]["governance_schema_version"] == (
         PREDICTION_OOD_GOVERNANCE_VERSION
     )
@@ -2197,8 +3632,45 @@ def test_scanner_snapshot_persists_canonical_identity_metadata(tmp_path: Path) -
         == "return-manifest"
     )
     assert (
+        identity["path_metric_feature_metadata"]["model-a"]["expected_return"][
+            "target_normalization_schema_version"
+        ]
+        == PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    )
+    assert (
+        identity["path_metric_feature_metadata"]["model-a"]["expected_return"][
+            "target_normalization_atr_feature_name"
+        ]
+        == PATH_TARGET_ATR_FEATURE
+    )
+    assert (
         identity["path_metric_domain_metadata"]["model-a"]["mae"]["prediction_mapping_version"]
         == PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"]["target_normalization_hash"]
+        == _path_target_normalization_payloads()[MAE_HEAD]["target_normalization_hash"]
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"][
+            "path_target_transform_schema_version"
+        ]
+        == ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"]["path_target_transform"]
+        == PATH_TARGET_TRANSFORM_NONE
+    )
+    assert identity["path_metric_domain_metadata"]["model-a"]["mae"][
+        "path_target_transform_metadata_hash"
+    ]
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mfe"]["path_head_capability_state"]
+        == PATH_HEAD_CAPABILITY_ACTIVE
+    )
+    assert (
+        identity["path_metric_domain_metadata"]["model-a"]["mae"]["path_head_capability_state"]
+        == PATH_HEAD_CAPABILITY_ACTIVE
     )
     assert identity["effective_selection_policies"]["model-a"]["expected_return_threshold"] == 0.001
     assert identity["raw_scanner_config"]["minimum_dollar_volume"] == 5_000_000.0

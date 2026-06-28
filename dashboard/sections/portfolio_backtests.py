@@ -22,6 +22,21 @@ def render_page() -> None:
     if rows.empty:
         streamlit.info("No scanner snapshot is available for portfolio replay.")
         return
+    streamlit.warning("Product-class specialist challenger. Development evidence only.")
+    if {"product_class_scope", "row_product_class_scope"}.issubset(rows.columns):
+        streamlit.subheader("Product-Class Candidate Mix")
+        streamlit.dataframe(
+            display_frame(
+                rows.groupby(
+                    ["product_class_scope", "row_product_class_scope", "candidate_status"],
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="rows")
+            ),
+            width="stretch",
+            hide_index=True,
+        )
     if streamlit.button("Run portfolio replay on latest snapshot"):
         universe = load_engine_universe(root)
         frames = load_universe_frames(root, universe)

@@ -35,6 +35,16 @@ from swing_rsi.engine.calibration_governance import (
     select_tbs_calibrator,
     write_calibration_audit_artifacts,
 )
+from swing_rsi.engine.feature_hygiene import (
+    LEGACY_PRE_NONFINITE_HYGIENE_SCHEMA_VERSION,
+    MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION,
+    FeatureMatrixHygieneAudit,
+    combine_hygiene_audits,
+    legacy_nonfinite_hygiene_metadata,
+    nonfinite_hygiene_policy_hash,
+    sanitize_model_feature_matrix,
+    sanitize_model_feature_matrix_only,
+)
 from swing_rsi.engine.feature_screen import (
     FEATURE_SCREEN_SCHEMA_VERSION,
     PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION,
@@ -69,6 +79,15 @@ from swing_rsi.engine.ood import (
     regression_head_ood_metrics,
 )
 from swing_rsi.engine.portfolio import PortfolioBacktestConfig, backtest_scanner_candidates
+from swing_rsi.engine.product_scope import (
+    PRODUCT_CLASS_SCHEMA_VERSION,
+    PRODUCT_CLASS_SCOPE_POOLED,
+    ProductClassScope,
+    ProductClassScopeDefinition,
+    build_product_class_scope_definitions,
+    filter_frame_for_product_class_scope,
+    product_scope_definition_from_frame,
+)
 from swing_rsi.engine.registry import ModelState, RegisteredModel, make_model_id, register_model
 from swing_rsi.engine.selection import (
     SelectionPolicy,
@@ -79,12 +98,31 @@ from swing_rsi.engine.splits import (
     ChronologicalSplit,
     chronological_train_calibration_holdout_split,
 )
+from swing_rsi.engine.universe import UniverseConfig
 
 TEMPORAL_FOLD_STABILITY_SCHEMA_VERSION = "temporal_fold_stability_v1"
 TEMPORAL_FOLD_STABILITY_REQUESTED_FOLDS = 3
 TEMPORAL_FOLD_STABILITY_THRESHOLD = 0.50
 PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
 PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION = "path_metric_magnitude_sign_mapping_v1"
+PATH_TARGET_NORMALIZATION_SCHEMA_VERSION = "atr_normalized_path_targets_v1"
+PATH_TARGET_ATR_FEATURE = "atr_pct_14"
+PATH_TARGET_PREDICTION_MAPPING_VERSION = "atr_units_to_decimal_return_v1"
+ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION = "robust_path_target_transform_v1"
+LEGACY_UNTRANSFORMED_PATH_TARGET = "legacy_untransformed_path_target"
+PATH_TARGET_TRANSFORM_NONE = "none"
+PATH_TARGET_TRANSFORM_LOG1P = "log1p"
+LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION = "linear_family_path_head_retirement_v1"
+PATH_HEAD_CAPABILITY_ACTIVE = "ACTIVE"
+PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR = "RETIRED_UNSUITABLE_ESTIMATOR"
+LINEAR_PATH_HEAD_RETIREMENT_REASON = "linear_family_path_head_retired_unsuitable_estimator"
+LINEAR_PATH_HEAD_RETIREMENT_FAMILIES = frozenset({"logistic_regression"})
+NONLINEAR_SPECIALIST_MODEL_FAMILIES = ("hist_gradient_boosting", "extra_trees")
+DEFAULT_DISCOVERY_MODEL_FAMILIES = (
+    "logistic_regression",
+    "hist_gradient_boosting",
+    "extra_trees",
+)
 
 
 @dataclass(frozen=True)
@@ -115,6 +153,16 @@ class ModelBundle:
     feature_screen_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
     feature_screen_records: dict[str, tuple[dict[str, object], ...]] = field(default_factory=dict)
     path_domain_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
+    product_class_schema_version: str = PRODUCT_CLASS_SCHEMA_VERSION
+    product_class_scope: ProductClassScope = PRODUCT_CLASS_SCOPE_POOLED
+    product_class_eligible_roles: tuple[str, ...] = ()
+    product_class_eligible_symbols: tuple[str, ...] = ()
+    product_class_role_scope_mapping: dict[str, str] = field(default_factory=dict)
+    product_class_role_scope_mapping_hash: str = ""
+    product_class_scope_configuration_hash: str = ""
+    product_class_universe_scope_hash: str = ""
+    product_class_scope_metadata: dict[str, object] = field(default_factory=dict)
+    feature_hygiene_metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -144,6 +192,9 @@ class DiscoveryConfig:
     selection_per_date_limit: int | None = 5
     selection_minimum_dollar_volume: float | None = 5_000_000.0
     selection_rate_max: float | None = 0.20
+    product_class_scopes: tuple[ProductClassScope, ...] = (PRODUCT_CLASS_SCOPE_POOLED,)
+    model_families: tuple[str, ...] = DEFAULT_DISCOVERY_MODEL_FAMILIES
+    include_naive_controls: bool = True
 
 
 PRIMARY_HEAD = "primary_positive_return"
@@ -192,6 +243,7 @@ class PathMagnitudePrediction:
     nonfinite_count: int
     magnitude_domain_violation_count: int
     signed_domain_violation_count: int
+    transformed_prediction: pd.Series | None = None
 
     @property
     def valid(self) -> bool:
@@ -204,14 +256,45 @@ class PathMagnitudePrediction:
     def diagnostics(self, prefix: str) -> dict[str, float | int | bool]:
         magnitude = pd.to_numeric(self.internal_magnitude, errors="coerce")
         signed = pd.to_numeric(self.canonical_signed, errors="coerce")
-        return {
+        payload: dict[str, float | int | bool] = {
             f"{prefix}_internal_magnitude_prediction_min": _series_min(magnitude),
             f"{prefix}_internal_magnitude_prediction_max": _series_max(magnitude),
+            f"{prefix}_internal_magnitude_atr_unit_prediction_min": _series_min(magnitude),
+            f"{prefix}_internal_magnitude_atr_unit_prediction_max": _series_max(magnitude),
             f"{prefix}_canonical_prediction_min": _series_min(signed),
             f"{prefix}_canonical_prediction_max": _series_max(signed),
             f"{prefix}_prediction_nonfinite_count": self.nonfinite_count,
             f"{prefix}_magnitude_domain_violation_count": (self.magnitude_domain_violation_count),
             f"{prefix}_signed_domain_violation_count": self.signed_domain_violation_count,
+            f"{prefix}_domain_integrity_valid": self.valid,
+        }
+        if self.transformed_prediction is not None:
+            transformed = pd.to_numeric(self.transformed_prediction, errors="coerce")
+            payload[f"{prefix}_transformed_prediction_min"] = _series_min(transformed)
+            payload[f"{prefix}_transformed_prediction_max"] = _series_max(transformed)
+        return payload
+
+
+@dataclass(frozen=True)
+class PathTargetPrediction:
+    internal_atr_units: pd.Series
+    canonical_external: pd.Series
+    atr_values: pd.Series
+    nonfinite_count: int
+
+    @property
+    def valid(self) -> bool:
+        return self.nonfinite_count == 0
+
+    def diagnostics(self, prefix: str) -> dict[str, float | int | bool]:
+        internal = pd.to_numeric(self.internal_atr_units, errors="coerce")
+        canonical = pd.to_numeric(self.canonical_external, errors="coerce")
+        return {
+            f"{prefix}_internal_atr_unit_prediction_min": _series_min(internal),
+            f"{prefix}_internal_atr_unit_prediction_max": _series_max(internal),
+            f"{prefix}_canonical_prediction_min": _series_min(canonical),
+            f"{prefix}_canonical_prediction_max": _series_max(canonical),
+            f"{prefix}_prediction_nonfinite_count": self.nonfinite_count,
             f"{prefix}_domain_integrity_valid": self.valid,
         }
 
@@ -224,6 +307,211 @@ def _series_min(values: pd.Series) -> float:
 def _series_max(values: pd.Series) -> float:
     finite = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
     return float(finite.max()) if not finite.empty else math.nan
+
+
+def _series_distribution(values: pd.Series) -> dict[str, float | int]:
+    numeric = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if numeric.empty:
+        return {
+            "count": 0,
+            "min": math.nan,
+            "p01": math.nan,
+            "p05": math.nan,
+            "p25": math.nan,
+            "median": math.nan,
+            "p75": math.nan,
+            "p95": math.nan,
+            "p99": math.nan,
+            "max": math.nan,
+            "mean": math.nan,
+            "std": math.nan,
+        }
+    quantiles = numeric.quantile([0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99])
+    return {
+        "count": int(numeric.count()),
+        "min": float(numeric.min()),
+        "p01": float(quantiles.loc[0.01]),
+        "p05": float(quantiles.loc[0.05]),
+        "p25": float(quantiles.loc[0.25]),
+        "median": float(quantiles.loc[0.5]),
+        "p75": float(quantiles.loc[0.75]),
+        "p95": float(quantiles.loc[0.95]),
+        "p99": float(quantiles.loc[0.99]),
+        "max": float(numeric.max()),
+        "mean": float(numeric.mean()),
+        "std": float(numeric.std(ddof=1)) if len(numeric) > 1 else 0.0,
+    }
+
+
+def path_target_transform_applies(
+    *,
+    product_scope: str,
+    direction: str,
+    family: str,
+    head_name: str,
+    horizon: int,
+) -> bool:
+    return (
+        product_scope == PRODUCT_CLASS_SCOPE_POOLED
+        and direction == "bull"
+        and family == "hist_gradient_boosting"
+        and head_name == MAE_HEAD
+        and horizon == 10
+    )
+
+
+def _path_target_transform_metadata(
+    *,
+    product_scope: str,
+    direction: str,
+    family: str,
+    head_name: str,
+    horizon: int,
+    estimator_loss: str,
+) -> dict[str, object]:
+    applies = path_target_transform_applies(
+        product_scope=product_scope,
+        direction=direction,
+        family=family,
+        head_name=head_name,
+        horizon=horizon,
+    )
+    transform_name = PATH_TARGET_TRANSFORM_LOG1P if applies else PATH_TARGET_TRANSFORM_NONE
+    payload: dict[str, object] = {
+        "schema_version": ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION,
+        "path_target_transform": transform_name,
+        "transform_name": transform_name,
+        "transform_status": "active" if applies else "none",
+        "transform_parameters": {},
+        "fit_split": "training" if applies else "",
+        "input_domain": "nonnegative_internal_adverse_magnitude" if applies else "",
+        "transformed_domain": "finite_real_log1p_magnitude" if applies else "",
+        "inverse_transform": "expm1" if applies else "",
+        "inverse_transform_mapping": "nonnegative_magnitude = expm1(transformed_prediction)"
+        if applies
+        else "",
+        "monotonic": applies,
+        "applies_to": {
+            "product_class_scope": product_scope,
+            "direction": direction,
+            "family": family,
+            "head_name": head_name,
+            "horizon": int(horizon),
+        },
+        "estimator_loss": estimator_loss,
+        "estimator_loss_reason": (
+            "HistGradientBoosting poisson loss is retained because log1p(y) remains "
+            "nonnegative and the inverse mapping is deterministic."
+            if applies
+            else ""
+        ),
+        "label_contract_changed": False,
+        "ood_governance_changed": False,
+    }
+    payload["path_target_transform_hash"] = configuration_hash(payload)
+    return payload
+
+
+def path_target_transform_metadata_hash(metadata: dict[str, object] | None) -> str:
+    if not metadata:
+        return configuration_hash(
+            {
+                "schema_version": LEGACY_UNTRANSFORMED_PATH_TARGET,
+                "path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+            }
+        )
+    value = metadata.get("path_target_transform_hash")
+    if value:
+        return str(value)
+    return configuration_hash(metadata)
+
+
+def _path_target_transform_from_domain_metadata(
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    transform = metadata.get("path_target_transform_metadata")
+    if isinstance(transform, dict):
+        return dict(transform)
+    schema = str(metadata.get("path_target_transform_schema_version") or "")
+    if schema == ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION:
+        payload: dict[str, object] = {
+            "schema_version": schema,
+            "path_target_transform": str(
+                metadata.get("path_target_transform") or PATH_TARGET_TRANSFORM_NONE
+            ),
+            "transform_name": str(
+                metadata.get("path_target_transform_name")
+                or metadata.get("path_target_transform")
+                or PATH_TARGET_TRANSFORM_NONE
+            ),
+            "transform_status": str(metadata.get("path_target_transform_status") or "none"),
+            "transform_parameters": metadata.get("path_target_transform_parameters") or {},
+            "fit_split": str(metadata.get("path_target_transform_fit_split") or ""),
+            "inverse_transform": str(metadata.get("path_target_inverse_transform") or ""),
+            "inverse_transform_mapping": str(
+                metadata.get("path_target_inverse_transform_mapping") or ""
+            ),
+            "path_target_transform_hash": str(metadata.get("path_target_transform_hash") or ""),
+        }
+        if not payload["path_target_transform_hash"]:
+            payload["path_target_transform_hash"] = configuration_hash(payload)
+        return payload
+    return {
+        "schema_version": LEGACY_UNTRANSFORMED_PATH_TARGET,
+        "path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+        "transform_name": PATH_TARGET_TRANSFORM_NONE,
+        "transform_status": "legacy_untransformed",
+        "transform_parameters": {},
+        "fit_split": "",
+        "inverse_transform": "",
+        "inverse_transform_mapping": "",
+        "path_target_transform_hash": path_target_transform_metadata_hash(None),
+    }
+
+
+def _apply_path_target_transform(
+    target: pd.Series,
+    metadata: dict[str, object],
+) -> pd.Series:
+    transform_name = str(metadata.get("path_target_transform") or PATH_TARGET_TRANSFORM_NONE)
+    numeric = pd.to_numeric(target, errors="coerce").astype(float)
+    if transform_name == PATH_TARGET_TRANSFORM_NONE:
+        return numeric
+    if transform_name == PATH_TARGET_TRANSFORM_LOG1P:
+        if bool((numeric < 0.0).any()):
+            raise ValueError("path_target_transform_negative_input")
+        transformed = pd.Series(np.log1p(numeric.to_numpy(dtype=float)), index=target.index)
+        transformed.name = f"{target.name}__{PATH_TARGET_TRANSFORM_LOG1P}"
+        return transformed
+    raise ValueError(f"Unsupported path target transform: {transform_name}")
+
+
+def _inverse_path_target_transform_prediction(
+    prediction: pd.Series,
+    metadata: dict[str, object],
+) -> pd.Series:
+    transform_name = str(metadata.get("path_target_transform") or PATH_TARGET_TRANSFORM_NONE)
+    numeric = pd.to_numeric(prediction, errors="coerce").astype(float)
+    if transform_name == PATH_TARGET_TRANSFORM_NONE:
+        return numeric
+    if transform_name == PATH_TARGET_TRANSFORM_LOG1P:
+        inverse = pd.Series(np.expm1(numeric.to_numpy(dtype=float)), index=prediction.index)
+        inverse.name = "inverse_transformed_internal_magnitude"
+        return inverse
+    raise ValueError(f"Unsupported path target transform: {transform_name}")
+
+
+def path_target_transform_metadata_missing(metadata: dict[str, object]) -> bool:
+    schema = str(metadata.get("path_target_transform_schema_version") or "")
+    transform_name = str(metadata.get("path_target_transform") or "")
+    if schema != ROBUST_PATH_TARGET_TRANSFORM_SCHEMA_VERSION:
+        return False
+    if transform_name in ("", PATH_TARGET_TRANSFORM_NONE):
+        return False
+    transform = metadata.get("path_target_transform_metadata")
+    if not isinstance(transform, dict):
+        return True
+    return str(transform.get("path_target_transform_hash") or "") == ""
 
 
 def bundle_head_feature_columns(bundle: ModelBundle, head: str) -> tuple[str, ...]:
@@ -258,10 +546,124 @@ def bundle_feature_screen_records(bundle: ModelBundle, head: str) -> tuple[dict[
     return tuple(dict(record) for record in value if isinstance(record, dict))
 
 
+def bundle_feature_hygiene_metadata(bundle: ModelBundle) -> dict[str, object]:
+    metadata = getattr(bundle, "feature_hygiene_metadata", {}) or {}
+    if isinstance(metadata, dict) and metadata:
+        return dict(metadata)
+    return legacy_nonfinite_hygiene_metadata()
+
+
 def bundle_path_domain_metadata(bundle: ModelBundle, head: str) -> dict[str, object]:
     metadata = getattr(bundle, "path_domain_metadata", {}) or {}
     value = metadata.get(head)
-    return dict(value) if isinstance(value, dict) else {}
+    payload = dict(value) if isinstance(value, dict) else {}
+    if payload and "path_target_transform_schema_version" not in payload:
+        transform_metadata = _path_target_transform_from_domain_metadata(payload)
+        payload.update(
+            {
+                "path_target_transform_schema_version": transform_metadata["schema_version"],
+                "path_target_transform": transform_metadata["path_target_transform"],
+                "path_target_transform_name": transform_metadata["transform_name"],
+                "path_target_transform_status": transform_metadata["transform_status"],
+                "path_target_transform_parameters": transform_metadata["transform_parameters"],
+                "path_target_transform_fit_split": transform_metadata["fit_split"],
+                "path_target_inverse_transform": transform_metadata["inverse_transform"],
+                "path_target_inverse_transform_mapping": transform_metadata[
+                    "inverse_transform_mapping"
+                ],
+                "path_target_transform_hash": transform_metadata["path_target_transform_hash"],
+                "path_target_transform_metadata": transform_metadata,
+            }
+        )
+    return payload
+
+
+def bundle_product_class_metadata(bundle: ModelBundle) -> dict[str, object]:
+    metrics = getattr(bundle, "metrics", {}) or {}
+    metadata = getattr(bundle, "product_class_scope_metadata", {}) or {}
+    return {
+        "schema_version": str(
+            getattr(bundle, "product_class_schema_version", "")
+            or metrics.get("product_class_schema_version")
+            or PRODUCT_CLASS_SCHEMA_VERSION
+        ),
+        "scope": str(
+            getattr(bundle, "product_class_scope", "")
+            or metrics.get("product_class_scope")
+            or PRODUCT_CLASS_SCOPE_POOLED
+        ),
+        "eligible_roles": tuple(getattr(bundle, "product_class_eligible_roles", ()) or tuple()),
+        "eligible_symbols": tuple(getattr(bundle, "product_class_eligible_symbols", ()) or tuple()),
+        "role_scope_mapping": dict(getattr(bundle, "product_class_role_scope_mapping", {}) or {}),
+        "role_scope_mapping_hash": str(
+            getattr(bundle, "product_class_role_scope_mapping_hash", "")
+            or metrics.get("product_class_role_scope_mapping_hash")
+            or ""
+        ),
+        "scope_configuration_hash": str(
+            getattr(bundle, "product_class_scope_configuration_hash", "")
+            or metrics.get("product_class_scope_configuration_hash")
+            or ""
+        ),
+        "universe_scope_hash": str(
+            getattr(bundle, "product_class_universe_scope_hash", "")
+            or metrics.get("product_class_universe_scope_hash")
+            or ""
+        ),
+        "scope_metadata": dict(metadata) if isinstance(metadata, dict) else {},
+    }
+
+
+def _target_normalization_metadata_from_screen(
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    if str(metadata.get("target_normalization_schema_version") or "") != (
+        PATH_TARGET_NORMALIZATION_SCHEMA_VERSION
+    ):
+        return {}
+    return {
+        "target_normalization_schema_version": str(
+            metadata.get("target_normalization_schema_version") or ""
+        ),
+        "target_normalization_method": str(metadata.get("target_normalization_method") or ""),
+        "atr_feature_name": str(metadata.get("atr_feature_name") or ""),
+        "external_target_name": str(metadata.get("external_target_name") or ""),
+        "internal_target_name": str(metadata.get("internal_target_name") or ""),
+        "internal_target_unit": str(metadata.get("internal_target_unit") or ""),
+        "canonical_external_unit": str(metadata.get("canonical_external_unit") or ""),
+        "prediction_mapping_version": str(metadata.get("prediction_mapping_version") or ""),
+        "target_normalization_hash": str(metadata.get("target_normalization_hash") or ""),
+    }
+
+
+def _target_normalization_metadata_for_bundle(bundle: ModelBundle, head: str) -> dict[str, object]:
+    screen_metadata = _target_normalization_metadata_from_screen(
+        bundle_feature_screen_metadata(bundle, head)
+    )
+    if screen_metadata:
+        return screen_metadata
+    domain_metadata = bundle_path_domain_metadata(bundle, head)
+    target_normalization = domain_metadata.get("target_normalization")
+    if isinstance(target_normalization, dict):
+        return _target_normalization_metadata_from_screen(target_normalization)
+    return _target_normalization_metadata_from_screen(domain_metadata)
+
+
+def path_head_capability_state(bundle: ModelBundle, head: str) -> str:
+    metadata = bundle_path_domain_metadata(bundle, head)
+    state = str(metadata.get("path_head_capability_state") or "")
+    if state:
+        return state
+    if str(metadata.get("domain_schema_version") or "") == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION:
+        return PATH_HEAD_CAPABILITY_ACTIVE
+    return "UNKNOWN"
+
+
+def path_head_is_retired(bundle: ModelBundle, head: str) -> bool:
+    return (
+        path_head_capability_state(bundle, head)
+        == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
 
 
 def bundle_tbs_calibration_metadata(bundle: ModelBundle) -> dict[str, object]:
@@ -388,6 +790,31 @@ class MeanMagnitudeRegressor(RegressorMixin, BaseEstimator):  # type: ignore[mis
         return np.full(len(frame), self.mean_, dtype=float)
 
 
+class RetiredPathHeadModel(RegressorMixin, BaseEstimator):  # type: ignore[misc]
+    """Explicit placeholder for a required path head retired before estimator fitting."""
+
+    def __init__(
+        self,
+        *,
+        family: str,
+        head_name: str,
+        reason: str = LINEAR_PATH_HEAD_RETIREMENT_REASON,
+    ) -> None:
+        self.family = family
+        self.head_name = head_name
+        self.reason = reason
+        self.capability_state = PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+        self.schema_version = LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION
+
+    def fit(self, frame: pd.DataFrame, target: pd.Series) -> RetiredPathHeadModel:
+        _ = (frame, target)
+        raise RuntimeError(self.reason)
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        _ = frame
+        raise RuntimeError(self.reason)
+
+
 def _model_step(model: Any) -> Any:
     if isinstance(model, Pipeline):
         return model.steps[-1][1]
@@ -507,6 +934,8 @@ def build_path_magnitude_estimator(
     head_name: str,
     seed: int,
 ) -> tuple[Pipeline, PathMagnitudeEstimatorSpec]:
+    if family in LINEAR_PATH_HEAD_RETIREMENT_FAMILIES and head_name in PATH_MAGNITUDE_HEADS:
+        raise ValueError(LINEAR_PATH_HEAD_RETIREMENT_REASON)
     if family == "naive_base_rate":
         estimator = Pipeline(
             [
@@ -679,8 +1108,207 @@ def model_plugins() -> tuple[ModelPlugin, ...]:
     )
 
 
-def _candidate_pipelines(seed: int) -> dict[str, Any]:
-    return {plugin.name: plugin.classifier_factory(seed) for plugin in model_plugins()}
+def _candidate_pipelines(
+    seed: int,
+    *,
+    families: tuple[str, ...] | None = None,
+    include_naive: bool = True,
+) -> dict[str, Any]:
+    requested = set(families or DEFAULT_DISCOVERY_MODEL_FAMILIES)
+    if include_naive:
+        requested.add("naive_base_rate")
+    plugins = {plugin.name: plugin for plugin in model_plugins()}
+    unknown = sorted(requested.difference(plugins))
+    if unknown:
+        raise ValueError(f"Unknown model family requested: {', '.join(unknown)}")
+    return {name: plugins[name].classifier_factory(seed) for name in sorted(requested)}
+
+
+def _scope_definitions_for_discovery(
+    eligible_frame: pd.DataFrame,
+    *,
+    config: DiscoveryConfig,
+    universe: UniverseConfig | None,
+) -> dict[ProductClassScope, ProductClassScopeDefinition]:
+    requested = tuple(config.product_class_scopes or (PRODUCT_CLASS_SCOPE_POOLED,))
+    if universe is not None:
+        return build_product_class_scope_definitions(universe, scopes=requested)
+    if tuple(requested) != (PRODUCT_CLASS_SCOPE_POOLED,):
+        raise ValueError("Specialist product-class discovery requires governed universe metadata")
+    return {
+        PRODUCT_CLASS_SCOPE_POOLED: product_scope_definition_from_frame(
+            eligible_frame,
+            PRODUCT_CLASS_SCOPE_POOLED,
+        )
+    }
+
+
+def _describe_numeric_series(series: pd.Series) -> dict[str, float | int]:
+    values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if values.empty:
+        return {
+            "count": 0,
+            "mean": math.nan,
+            "std": math.nan,
+            "min": math.nan,
+            "q25": math.nan,
+            "median": math.nan,
+            "q75": math.nan,
+            "max": math.nan,
+        }
+    return {
+        "count": len(values),
+        "mean": float(values.mean()),
+        "std": float(values.std(ddof=0)),
+        "min": float(values.min()),
+        "q25": float(values.quantile(0.25)),
+        "median": float(values.median()),
+        "q75": float(values.quantile(0.75)),
+        "max": float(values.max()),
+    }
+
+
+def _classification_distribution(series: pd.Series) -> dict[str, float | int]:
+    values = pd.to_numeric(series, errors="coerce").dropna().astype(int)
+    positives = int((values == 1).sum())
+    negatives = int((values == 0).sum())
+    total = len(values)
+    return {
+        "count": total,
+        "positive": positives,
+        "negative": negatives,
+        "positive_rate": float(positives / total) if total else math.nan,
+    }
+
+
+def _split_distribution_payload(
+    split_name: str,
+    frame: pd.DataFrame,
+    *,
+    target: str,
+    returns: str,
+    mfe: str,
+    mae: str,
+    target_before_stop: str,
+) -> dict[str, object]:
+    return {
+        "split": split_name,
+        "rows": len(frame),
+        "positive_return": _classification_distribution(frame[target])
+        if target in frame.columns
+        else {},
+        "target_before_stop": _classification_distribution(frame[target_before_stop])
+        if target_before_stop in frame.columns
+        else {},
+        "directional_return": _describe_numeric_series(frame[returns])
+        if returns in frame.columns
+        else {},
+        "mfe": _describe_numeric_series(frame[mfe]) if mfe in frame.columns else {},
+        "mae": _describe_numeric_series(frame[mae]) if mae in frame.columns else {},
+    }
+
+
+def _product_class_scope_metric_payload(
+    definition: ProductClassScopeDefinition,
+    *,
+    scoped_frame: pd.DataFrame,
+    train: pd.DataFrame,
+    calibration: pd.DataFrame,
+    holdout: pd.DataFrame,
+    direction: str,
+    horizon: int,
+) -> tuple[dict[str, float | int | str | bool | None], dict[str, object]]:
+    target = f"label_{direction}_positive_return_{horizon}"
+    returns = f"label_{direction}_forward_return_{horizon}"
+    mfe = f"label_{direction}_mfe_{horizon}"
+    mae = f"label_{direction}_mae_{horizon}"
+    target_before_stop = f"label_{direction}_target_before_stop_{horizon}"
+    represented_symbols = (
+        tuple(sorted(str(value) for value in scoped_frame["symbol"].dropna().unique()))
+        if "symbol" in scoped_frame.columns
+        else ()
+    )
+    missing_symbols = tuple(
+        symbol for symbol in definition.eligible_symbols if symbol not in represented_symbols
+    )
+    date_values = pd.to_datetime(scoped_frame["Date"]) if "Date" in scoped_frame.columns else None
+    date_start = _date_label(pd.Timestamp(date_values.min())) if date_values is not None else ""
+    date_end = _date_label(pd.Timestamp(date_values.max())) if date_values is not None else ""
+    target_distributions = [
+        _split_distribution_payload(
+            "train",
+            train,
+            target=target,
+            returns=returns,
+            mfe=mfe,
+            mae=mae,
+            target_before_stop=target_before_stop,
+        ),
+        _split_distribution_payload(
+            "calibration",
+            calibration,
+            target=target,
+            returns=returns,
+            mfe=mfe,
+            mae=mae,
+            target_before_stop=target_before_stop,
+        ),
+        _split_distribution_payload(
+            "development_holdout",
+            holdout,
+            target=target,
+            returns=returns,
+            mfe=mfe,
+            mae=mae,
+            target_before_stop=target_before_stop,
+        ),
+    ]
+    metadata: dict[str, object] = {
+        "schema_version": definition.schema_version,
+        "scope": definition.scope,
+        "direction": direction,
+        "horizon": horizon,
+        "eligible_roles": list(definition.eligible_roles),
+        "eligible_symbols": list(definition.eligible_symbols),
+        "represented_symbols": list(represented_symbols),
+        "missing_symbols": list(missing_symbols),
+        "roles_by_symbol": definition.roles_by_symbol,
+        "role_scope_mapping": definition.role_scope_mapping,
+        "role_scope_mapping_hash": definition.role_scope_mapping_hash,
+        "scope_configuration_hash": definition.scope_configuration_hash,
+        "universe_scope_hash": definition.universe_scope_hash,
+        "row_count": len(scoped_frame),
+        "training_count": len(train),
+        "calibration_count": len(calibration),
+        "development_holdout_count": len(holdout),
+        "date_start": date_start,
+        "date_end": date_end,
+        "target_distributions": target_distributions,
+    }
+    metrics: dict[str, float | int | str | bool | None] = {
+        "product_class_schema_version": definition.schema_version,
+        "product_class_scope": definition.scope,
+        "product_class_scope_configuration_hash": definition.scope_configuration_hash,
+        "product_class_universe_scope_hash": definition.universe_scope_hash,
+        "product_class_role_scope_mapping_hash": definition.role_scope_mapping_hash,
+        "product_class_role_scope_mapping_json": _json_dumps(definition.role_scope_mapping),
+        "product_class_eligible_roles_json": _json_dumps(list(definition.eligible_roles)),
+        "product_class_eligible_symbols_json": _json_dumps(list(definition.eligible_symbols)),
+        "product_class_eligible_symbol_count": len(definition.eligible_symbols),
+        "product_class_represented_symbols_json": _json_dumps(list(represented_symbols)),
+        "product_class_represented_symbol_count": len(represented_symbols),
+        "product_class_missing_symbols_json": _json_dumps(list(missing_symbols)),
+        "product_class_row_count": len(scoped_frame),
+        "product_class_training_count": len(train),
+        "product_class_calibration_count": len(calibration),
+        "product_class_development_holdout_count": len(holdout),
+        "product_class_date_start": date_start,
+        "product_class_date_end": date_end,
+        "product_class_target_distributions_json": _json_dumps(target_distributions),
+        "product_class_scope_metadata_json": _json_dumps(metadata),
+        "product_class_development_evidence_label": "DEVELOPMENT_HOLDOUT_DIAGNOSTIC",
+    }
+    return metrics, metadata
 
 
 def _regressor(seed: int, family: str) -> Pipeline:
@@ -725,6 +1353,7 @@ def _regressor(seed: int, family: str) -> Pipeline:
 
 
 def _positive_class_probability(model: Any, features: pd.DataFrame) -> np.ndarray:
+    features = sanitize_model_feature_matrix_only(features)
     if hasattr(model, "predict_proba"):
         probabilities = model.predict_proba(features)
         return np.asarray(probabilities[:, 1], dtype=float)
@@ -750,6 +1379,35 @@ def _max_drawdown(returns: pd.Series) -> float:
 
 def _json_dumps(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _metadata_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int | np.integer):
+        return int(value)
+    if isinstance(value, float | np.floating):
+        return int(value) if math.isfinite(float(value)) else default
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _metadata_list(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return sorted(value, key=str)
+    return []
+
+
+def _metadata_dict(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
 
 
 def _date_label(value: pd.Timestamp) -> str:
@@ -913,6 +1571,28 @@ def _prediction_sanity_metrics(
     )
 
 
+def _mean_absolute_error_or_nan(target: pd.Series, prediction: pd.Series) -> float:
+    target_values = pd.to_numeric(target, errors="coerce").to_numpy(dtype=float)
+    prediction_values = pd.to_numeric(prediction, errors="coerce").to_numpy(dtype=float)
+    if len(target_values) != len(prediction_values):
+        return math.nan
+    mask = np.isfinite(target_values) & np.isfinite(prediction_values)
+    if not mask.all():
+        return math.nan
+    return float(mean_absolute_error(target_values, prediction_values))
+
+
+def _rmse_or_nan(target: pd.Series, prediction: pd.Series) -> float:
+    target_values = pd.to_numeric(target, errors="coerce").to_numpy(dtype=float)
+    prediction_values = pd.to_numeric(prediction, errors="coerce").to_numpy(dtype=float)
+    if len(target_values) != len(prediction_values):
+        return math.nan
+    mask = np.isfinite(target_values) & np.isfinite(prediction_values)
+    if not mask.all():
+        return math.nan
+    return float(mean_squared_error(target_values, prediction_values) ** 0.5)
+
+
 def _selection_diagnostics(
     *,
     holdout: pd.DataFrame,
@@ -1030,6 +1710,7 @@ def _permutation_importance_summary(
         values = permuted[column].to_numpy(copy=True)
         rng.shuffle(values)
         permuted[column] = values
+        permuted = sanitize_model_feature_matrix_only(permuted)
         raw = _positive_class_probability(classifier, permuted)
         probability = np.asarray(calibrator.predict(raw), dtype=float)
         brier = float(brier_score_loss(holdout[target].astype(int), probability))
@@ -1058,6 +1739,7 @@ def _permutation_importance_by_family(
         values = permuted[column].to_numpy(copy=True)
         rng.shuffle(values)
         permuted[column] = values
+        permuted = sanitize_model_feature_matrix_only(permuted)
         raw = _positive_class_probability(classifier, permuted)
         probability = np.asarray(calibrator.predict(raw), dtype=float)
         delta = float(brier_score_loss(holdout[target].astype(int), probability) - baseline_brier)
@@ -1096,6 +1778,8 @@ def _regression_permutation_importance_by_family(
     baseline_mae: float,
     seed: int,
     prediction_sign: float = 1.0,
+    prediction_scale: pd.Series | None = None,
+    target_transform_metadata: dict[str, object] | None = None,
 ) -> list[dict[str, float | int | str]]:
     rng = np.random.default_rng(seed)
     family_records: dict[str, dict[str, float | int | str]] = {}
@@ -1106,9 +1790,19 @@ def _regression_permutation_importance_by_family(
         values = permuted[column].to_numpy(copy=True)
         rng.shuffle(values)
         permuted[column] = values
+        permuted = sanitize_model_feature_matrix_only(permuted)
+        raw_prediction = pd.Series(
+            np.asarray(regressor.predict(permuted), dtype=float), index=holdout.index
+        )
+        raw_prediction = _inverse_path_target_transform_prediction(
+            raw_prediction,
+            dict(target_transform_metadata or {}),
+        )
+        if prediction_scale is not None:
+            scale = pd.to_numeric(prediction_scale, errors="coerce").reindex(holdout.index)
+            raw_prediction = raw_prediction * scale
         prediction = pd.Series(
-            np.asarray(regressor.predict(permuted), dtype=float) * prediction_sign,
-            index=holdout.index,
+            raw_prediction.to_numpy(dtype=float) * prediction_sign, index=holdout.index
         )
         delta = float(mean_absolute_error(holdout[target], prediction) - baseline_mae)
         if not math.isfinite(delta):
@@ -1243,6 +1937,109 @@ def _path_magnitude_target_name(*, external_target: str, head_name: str) -> str:
     raise ValueError(f"Unsupported path magnitude head: {head_name}")
 
 
+def _path_atr_target_name(*, external_target: str, head_name: str) -> str:
+    if head_name == EXPECTED_RETURN_HEAD:
+        return f"{external_target}__atr_units_{PATH_TARGET_ATR_FEATURE}"
+    if head_name == MFE_HEAD:
+        return f"{external_target}__favorable_magnitude_atr_units_{PATH_TARGET_ATR_FEATURE}"
+    if head_name == MAE_HEAD:
+        return f"{external_target}__adverse_magnitude_atr_units_{PATH_TARGET_ATR_FEATURE}"
+    raise ValueError(f"Unsupported path target head: {head_name}")
+
+
+def _path_atr_values(frame: pd.DataFrame) -> pd.Series:
+    if PATH_TARGET_ATR_FEATURE not in frame.columns:
+        raise ValueError("path_target_atr_feature_missing")
+    values = pd.to_numeric(frame[PATH_TARGET_ATR_FEATURE], errors="coerce")
+    finite = np.isfinite(values.to_numpy(dtype=float, na_value=np.nan))
+    if not bool(finite.all()) or bool((values <= 0.0).any()):
+        raise ValueError("path_target_atr_feature_invalid")
+    return values.astype(float)
+
+
+def _path_atr_training_target(
+    external_target: pd.Series,
+    atr_values: pd.Series,
+    *,
+    head_name: str,
+    external_target_name: str,
+) -> pd.Series:
+    target = pd.to_numeric(external_target, errors="coerce")
+    atr = pd.to_numeric(atr_values, errors="coerce").reindex(target.index)
+    if head_name in {EXPECTED_RETURN_HEAD, MFE_HEAD}:
+        normalized = target / atr
+    elif head_name == MAE_HEAD:
+        normalized = -target / atr
+    else:
+        raise ValueError(f"Unsupported path target head: {head_name}")
+    normalized.name = _path_atr_target_name(
+        external_target=external_target_name,
+        head_name=head_name,
+    )
+    return normalized
+
+
+def _path_target_normalization_hash(
+    *,
+    head_name: str,
+    external_target_name: str,
+    internal_target_name: str,
+    direction: str,
+    horizon: int,
+) -> str:
+    return configuration_hash(
+        {
+            "schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+            "head_name": head_name,
+            "external_target_name": external_target_name,
+            "internal_target_name": internal_target_name,
+            "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+            "direction": direction,
+            "horizon": horizon,
+            "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+        }
+    )
+
+
+def _path_target_normalization_metadata(
+    *,
+    head_name: str,
+    external_target_name: str,
+    internal_target_name: str,
+    direction: str,
+    horizon: int,
+) -> dict[str, object]:
+    return {
+        "target_normalization_schema_version": PATH_TARGET_NORMALIZATION_SCHEMA_VERSION,
+        "head_name": head_name,
+        "target_normalization_method": "divide_by_signal_close_atr_pct_14",
+        "atr_feature_name": PATH_TARGET_ATR_FEATURE,
+        "atr_feature_timing": "signal_date_close_known",
+        "external_target_name": external_target_name,
+        "internal_target_name": internal_target_name,
+        "internal_target_unit": "atr_units",
+        "canonical_external_unit": "decimal_return",
+        "prediction_mapping_version": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+        "target_normalization_hash": _path_target_normalization_hash(
+            head_name=head_name,
+            external_target_name=external_target_name,
+            internal_target_name=internal_target_name,
+            direction=direction,
+            horizon=horizon,
+        ),
+    }
+
+
+def _path_internal_target_definition(head_name: str) -> str:
+    if head_name == EXPECTED_RETURN_HEAD:
+        return "signed_directional_return_divided_by_signal_close_atr_pct_14"
+    if head_name == MFE_HEAD:
+        return "favorable_magnitude_equals_existing_mfe_divided_by_signal_close_atr_pct_14"
+    if head_name == MAE_HEAD:
+        return "adverse_magnitude_equals_negative_existing_mae_divided_by_signal_close_atr_pct_14"
+    raise ValueError(f"Unsupported path target head: {head_name}")
+
+
 def _path_magnitude_target(
     external_target: pd.Series,
     *,
@@ -1295,12 +2092,22 @@ def _path_magnitude_prediction(
     *,
     head_name: str,
     index: pd.Index,
+    atr_values: pd.Series | None = None,
+    target_transform_metadata: dict[str, object] | None = None,
 ) -> PathMagnitudePrediction:
-    magnitude = pd.Series(
+    features = sanitize_model_feature_matrix_only(features)
+    raw_prediction = pd.Series(
         np.asarray(estimator.predict(features), dtype=float),
         index=index,
     )
-    canonical = magnitude if head_name == MFE_HEAD else -magnitude
+    transform_metadata = dict(target_transform_metadata or {})
+    magnitude = _inverse_path_target_transform_prediction(raw_prediction, transform_metadata)
+    if atr_values is not None:
+        atr = pd.to_numeric(atr_values, errors="coerce").reindex(index).astype(float)
+        external_magnitude = magnitude * atr
+    else:
+        external_magnitude = magnitude
+    canonical = external_magnitude if head_name == MFE_HEAD else -external_magnitude
     canonical = pd.Series(np.asarray(canonical, dtype=float), index=index)
     magnitude_values = magnitude.to_numpy(dtype=float, na_value=np.nan)
     signed_values = canonical.to_numpy(dtype=float, na_value=np.nan)
@@ -1319,6 +2126,55 @@ def _path_magnitude_prediction(
         nonfinite_count=nonfinite_count,
         magnitude_domain_violation_count=magnitude_violation,
         signed_domain_violation_count=signed_violation,
+        transformed_prediction=(
+            raw_prediction
+            if str(transform_metadata.get("path_target_transform") or PATH_TARGET_TRANSFORM_NONE)
+            != PATH_TARGET_TRANSFORM_NONE
+            else None
+        ),
+    )
+
+
+def _path_target_prediction(
+    estimator: Any,
+    features: pd.DataFrame,
+    *,
+    atr_values: pd.Series,
+    index: pd.Index,
+) -> PathTargetPrediction:
+    features = sanitize_model_feature_matrix_only(features)
+    internal = pd.Series(
+        np.asarray(estimator.predict(features), dtype=float),
+        index=index,
+    )
+    atr = pd.to_numeric(atr_values, errors="coerce").reindex(index).astype(float)
+    canonical = pd.Series(np.asarray(internal * atr, dtype=float), index=index)
+    internal_values = internal.to_numpy(dtype=float, na_value=np.nan)
+    canonical_values = canonical.to_numpy(dtype=float, na_value=np.nan)
+    nonfinite_count = int((~np.isfinite(internal_values)).sum())
+    nonfinite_count += int((~np.isfinite(canonical_values)).sum())
+    return PathTargetPrediction(
+        internal_atr_units=internal,
+        canonical_external=canonical,
+        atr_values=atr,
+        nonfinite_count=nonfinite_count,
+    )
+
+
+def _should_retire_path_head(family: str, head_name: str) -> bool:
+    return family in LINEAR_PATH_HEAD_RETIREMENT_FAMILIES and head_name in PATH_MAGNITUDE_HEADS
+
+
+def _retired_path_prediction(index: pd.Index, *, head_name: str) -> PathMagnitudePrediction:
+    magnitude = pd.Series(np.full(len(index), math.nan), index=index, dtype=float)
+    canonical = pd.Series(np.full(len(index), math.nan), index=index, dtype=float)
+    return PathMagnitudePrediction(
+        internal_magnitude=magnitude,
+        canonical_signed=canonical,
+        nonfinite_count=int(len(index) * 2),
+        magnitude_domain_violation_count=0,
+        signed_domain_violation_count=0,
+        transformed_prediction=None,
     )
 
 
@@ -1332,15 +2188,35 @@ def _path_domain_metadata(
     selected_feature_manifest_hash: str,
     calibration_prediction: PathMagnitudePrediction,
     holdout_prediction: PathMagnitudePrediction,
+    target_normalization_metadata: dict[str, object] | None = None,
+    target_transform_metadata: dict[str, object] | None = None,
+    transformed_training_target: pd.Series | None = None,
 ) -> dict[str, object]:
     target_values = pd.to_numeric(magnitude_target, errors="coerce")
-    definition = (
-        "favorable_magnitude_equals_existing_mfe"
-        if head_name == MFE_HEAD
-        else "adverse_magnitude_equals_negative_existing_mae"
+    definition = _path_internal_target_definition(head_name)
+    normalization = dict(target_normalization_metadata or {})
+    transform_metadata = dict(
+        target_transform_metadata
+        or _path_target_transform_metadata(
+            product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+            direction="",
+            family=spec.family,
+            head_name=head_name,
+            horizon=0,
+            estimator_loss=spec.loss,
+        )
+    )
+    transformed_target = (
+        pd.to_numeric(transformed_training_target, errors="coerce")
+        if transformed_training_target is not None
+        else target_values
     )
     return {
         "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "path_head_capability_state": PATH_HEAD_CAPABILITY_ACTIVE,
+        "path_head_retirement_schema_version": "",
+        "path_head_retirement_reason": "",
+        "path_head_required_for_promotion": True,
         "head_name": head_name,
         "external_target_name": external_target_name,
         "internal_magnitude_target_name": str(magnitude_target.name),
@@ -1354,12 +2230,167 @@ def _path_domain_metadata(
         "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
         "transformation_chain": (
             f"{external_target_name} -> {magnitude_target.name} -> "
-            f"{spec.estimator_class} -> internal_magnitude_prediction -> canonical_signed_output"
+            f"{spec.estimator_class} -> internal_magnitude_atr_unit_prediction -> "
+            "canonical_signed_decimal_output"
+        ),
+        "target_normalization": normalization,
+        "target_normalization_schema_version": str(
+            normalization.get("target_normalization_schema_version") or ""
+        ),
+        "target_normalization_method": str(normalization.get("target_normalization_method") or ""),
+        "atr_feature_name": str(normalization.get("atr_feature_name") or ""),
+        "target_normalization_hash": str(normalization.get("target_normalization_hash") or ""),
+        "internal_target_unit": str(normalization.get("internal_target_unit") or ""),
+        "canonical_external_unit": str(normalization.get("canonical_external_unit") or ""),
+        "path_target_transform_schema_version": str(transform_metadata.get("schema_version") or ""),
+        "path_target_transform": str(
+            transform_metadata.get("path_target_transform") or PATH_TARGET_TRANSFORM_NONE
+        ),
+        "path_target_transform_name": str(
+            transform_metadata.get("transform_name") or PATH_TARGET_TRANSFORM_NONE
+        ),
+        "path_target_transform_status": str(transform_metadata.get("transform_status") or ""),
+        "path_target_transform_parameters": transform_metadata.get("transform_parameters") or {},
+        "path_target_transform_fit_split": str(transform_metadata.get("fit_split") or ""),
+        "path_target_inverse_transform": str(transform_metadata.get("inverse_transform") or ""),
+        "path_target_inverse_transform_mapping": str(
+            transform_metadata.get("inverse_transform_mapping") or ""
+        ),
+        "path_target_transform_hash": path_target_transform_metadata_hash(transform_metadata),
+        "path_target_transform_metadata": transform_metadata,
+        "training_target_pre_transform_distribution": _series_distribution(target_values),
+        "training_target_post_transform_distribution": _series_distribution(transformed_target),
+        "calibration_transformed_prediction_distribution": _series_distribution(
+            calibration_prediction.transformed_prediction
+            if calibration_prediction.transformed_prediction is not None
+            else pd.Series([], dtype=float)
+        ),
+        "holdout_transformed_prediction_distribution": _series_distribution(
+            holdout_prediction.transformed_prediction
+            if holdout_prediction.transformed_prediction is not None
+            else pd.Series([], dtype=float)
+        ),
+        "calibration_inverse_transformed_magnitude_distribution": _series_distribution(
+            calibration_prediction.internal_magnitude
+        ),
+        "holdout_inverse_transformed_magnitude_distribution": _series_distribution(
+            holdout_prediction.internal_magnitude
+        ),
+        "calibration_canonical_signed_distribution": _series_distribution(
+            calibration_prediction.canonical_signed
+        ),
+        "holdout_canonical_signed_distribution": _series_distribution(
+            holdout_prediction.canonical_signed
         ),
         "training_target_min": _series_min(target_values),
         "training_target_max": _series_max(target_values),
         "training_target_positive_count": int((target_values > 0.0).sum()),
         "convergence_diagnostics": _convergence_diagnostics(estimator),
+        "calibration_domain_diagnostics": calibration_prediction.diagnostics(
+            f"{head_name}_calibration"
+        ),
+        "holdout_domain_diagnostics": holdout_prediction.diagnostics(f"{head_name}_holdout"),
+    }
+
+
+def _retired_path_domain_metadata(
+    *,
+    family: str,
+    head_name: str,
+    external_target_name: str,
+    magnitude_target: pd.Series,
+    selected_feature_manifest_hash: str,
+    calibration_prediction: PathMagnitudePrediction,
+    holdout_prediction: PathMagnitudePrediction,
+    target_normalization_metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    target_values = pd.to_numeric(magnitude_target, errors="coerce")
+    internal_definition = _path_internal_target_definition(head_name)
+    normalization = dict(target_normalization_metadata or {})
+    transform_metadata = _path_target_transform_metadata(
+        product_scope=PRODUCT_CLASS_SCOPE_POOLED,
+        direction="",
+        family=family,
+        head_name=head_name,
+        horizon=0,
+        estimator_loss="not_applicable_retired_path_head",
+    )
+    estimator_payload: dict[str, object] = {
+        "schema_version": LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION,
+        "family": family,
+        "head_name": head_name,
+        "capability_state": PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
+        "reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+    }
+    return {
+        "domain_schema_version": PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION,
+        "path_head_capability_state": PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR,
+        "path_head_retirement_schema_version": LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION,
+        "path_head_retirement_reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+        "path_head_required_for_promotion": True,
+        "head_name": head_name,
+        "external_target_name": external_target_name,
+        "internal_magnitude_target_name": str(magnitude_target.name),
+        "internal_target_definition": internal_definition,
+        "estimator_class": "RetiredPathHeadModel",
+        "estimator_loss": "not_applicable_retired_path_head",
+        "estimator_hyperparameters": estimator_payload,
+        "selected_feature_manifest_hash": selected_feature_manifest_hash,
+        "preprocessing_hash": "",
+        "estimator_hash": configuration_hash(estimator_payload),
+        "prediction_mapping_version": PATH_MAGNITUDE_PREDICTION_MAPPING_VERSION,
+        "transformation_chain": (
+            f"{external_target_name} -> {magnitude_target.name} -> "
+            "RETIRED_UNSUITABLE_ESTIMATOR -> no_prediction"
+        ),
+        "target_normalization": normalization,
+        "target_normalization_schema_version": str(
+            normalization.get("target_normalization_schema_version") or ""
+        ),
+        "target_normalization_method": str(normalization.get("target_normalization_method") or ""),
+        "atr_feature_name": str(normalization.get("atr_feature_name") or ""),
+        "target_normalization_hash": str(normalization.get("target_normalization_hash") or ""),
+        "internal_target_unit": str(normalization.get("internal_target_unit") or ""),
+        "canonical_external_unit": str(normalization.get("canonical_external_unit") or ""),
+        "path_target_transform_schema_version": str(transform_metadata.get("schema_version") or ""),
+        "path_target_transform": PATH_TARGET_TRANSFORM_NONE,
+        "path_target_transform_name": PATH_TARGET_TRANSFORM_NONE,
+        "path_target_transform_status": "none",
+        "path_target_transform_parameters": {},
+        "path_target_transform_fit_split": "",
+        "path_target_inverse_transform": "",
+        "path_target_inverse_transform_mapping": "",
+        "path_target_transform_hash": path_target_transform_metadata_hash(transform_metadata),
+        "path_target_transform_metadata": transform_metadata,
+        "training_target_pre_transform_distribution": _series_distribution(target_values),
+        "training_target_post_transform_distribution": _series_distribution(target_values),
+        "calibration_transformed_prediction_distribution": _series_distribution(
+            pd.Series([], dtype=float)
+        ),
+        "holdout_transformed_prediction_distribution": _series_distribution(
+            pd.Series([], dtype=float)
+        ),
+        "calibration_inverse_transformed_magnitude_distribution": _series_distribution(
+            calibration_prediction.internal_magnitude
+        ),
+        "holdout_inverse_transformed_magnitude_distribution": _series_distribution(
+            holdout_prediction.internal_magnitude
+        ),
+        "calibration_canonical_signed_distribution": _series_distribution(
+            calibration_prediction.canonical_signed
+        ),
+        "holdout_canonical_signed_distribution": _series_distribution(
+            holdout_prediction.canonical_signed
+        ),
+        "training_target_min": _series_min(target_values),
+        "training_target_max": _series_max(target_values),
+        "training_target_positive_count": int((target_values > 0.0).sum()),
+        "convergence_diagnostics": {
+            "estimator_class": "RetiredPathHeadModel",
+            "converged": False,
+            "retired": True,
+            "reason": LINEAR_PATH_HEAD_RETIREMENT_REASON,
+        },
         "calibration_domain_diagnostics": calibration_prediction.diagnostics(
             f"{head_name}_calibration"
         ),
@@ -1384,6 +2415,15 @@ def _path_domain_metric_payload(
     training_positive = metadata.get("training_target_positive_count")
     return {
         f"{prefix}_domain_schema_version": str(metadata.get("domain_schema_version") or ""),
+        f"{prefix}_path_head_capability_state": str(
+            metadata.get("path_head_capability_state") or ""
+        ),
+        f"{prefix}_path_head_retirement_schema_version": str(
+            metadata.get("path_head_retirement_schema_version") or ""
+        ),
+        f"{prefix}_path_head_retirement_reason": str(
+            metadata.get("path_head_retirement_reason") or ""
+        ),
         f"{prefix}_external_target_name": str(metadata.get("external_target_name") or ""),
         f"{prefix}_internal_magnitude_target_name": str(
             metadata.get("internal_magnitude_target_name") or ""
@@ -1400,6 +2440,63 @@ def _path_domain_metric_payload(
         f"{prefix}_magnitude_estimator_hash": str(metadata.get("estimator_hash") or ""),
         f"{prefix}_prediction_mapping_version": str(
             metadata.get("prediction_mapping_version") or ""
+        ),
+        f"{prefix}_target_normalization_schema_version": str(
+            metadata.get("target_normalization_schema_version") or ""
+        ),
+        f"{prefix}_target_normalization_method": str(
+            metadata.get("target_normalization_method") or ""
+        ),
+        f"{prefix}_target_normalization_atr_feature_name": str(
+            metadata.get("atr_feature_name") or ""
+        ),
+        f"{prefix}_target_normalization_hash": str(metadata.get("target_normalization_hash") or ""),
+        f"{prefix}_internal_target_unit": str(metadata.get("internal_target_unit") or ""),
+        f"{prefix}_canonical_external_unit": str(metadata.get("canonical_external_unit") or ""),
+        f"{prefix}_path_target_transform_schema_version": str(
+            metadata.get("path_target_transform_schema_version") or ""
+        ),
+        f"{prefix}_path_target_transform": str(
+            metadata.get("path_target_transform") or PATH_TARGET_TRANSFORM_NONE
+        ),
+        f"{prefix}_path_target_transform_name": str(
+            metadata.get("path_target_transform_name") or PATH_TARGET_TRANSFORM_NONE
+        ),
+        f"{prefix}_path_target_transform_status": str(
+            metadata.get("path_target_transform_status") or ""
+        ),
+        f"{prefix}_path_target_transform_fit_split": str(
+            metadata.get("path_target_transform_fit_split") or ""
+        ),
+        f"{prefix}_path_target_transform_hash": str(
+            metadata.get("path_target_transform_hash") or ""
+        ),
+        f"{prefix}_path_target_inverse_transform": str(
+            metadata.get("path_target_inverse_transform") or ""
+        ),
+        f"{prefix}_path_target_inverse_transform_mapping": str(
+            metadata.get("path_target_inverse_transform_mapping") or ""
+        ),
+        f"{prefix}_path_target_transform_parameters_json": _json_dumps(
+            metadata.get("path_target_transform_parameters") or {}
+        ),
+        f"{prefix}_path_target_transform_metadata_json": _json_dumps(
+            metadata.get("path_target_transform_metadata") or {}
+        ),
+        f"{prefix}_training_target_pre_transform_distribution_json": _json_dumps(
+            metadata.get("training_target_pre_transform_distribution") or {}
+        ),
+        f"{prefix}_training_target_post_transform_distribution_json": _json_dumps(
+            metadata.get("training_target_post_transform_distribution") or {}
+        ),
+        f"{prefix}_holdout_transformed_prediction_distribution_json": _json_dumps(
+            metadata.get("holdout_transformed_prediction_distribution") or {}
+        ),
+        f"{prefix}_holdout_inverse_transformed_magnitude_distribution_json": _json_dumps(
+            metadata.get("holdout_inverse_transformed_magnitude_distribution") or {}
+        ),
+        f"{prefix}_holdout_canonical_signed_distribution_json": _json_dumps(
+            metadata.get("holdout_canonical_signed_distribution") or {}
         ),
         f"{prefix}_magnitude_training_target_min": float(training_min)
         if isinstance(training_min, (int, float))
@@ -1423,6 +2520,35 @@ def _path_domain_metric_payload(
             for key, value in holdout_payload.items()
             if isinstance(value, (float, int, bool)) or value is None
         },
+    }
+
+
+def _path_target_normalization_metric_payload(
+    *,
+    head_name: str,
+    metadata: dict[str, object],
+) -> dict[str, float | int | str | bool | None]:
+    metric_key = PATH_HEAD_TARGET_METRIC_KEYS[head_name]
+    return {
+        f"{metric_key}_target_normalization_schema_version": str(
+            metadata.get("target_normalization_schema_version") or ""
+        ),
+        f"{metric_key}_target_normalization_method": str(
+            metadata.get("target_normalization_method") or ""
+        ),
+        f"{metric_key}_target_normalization_atr_feature_name": str(
+            metadata.get("atr_feature_name") or ""
+        ),
+        f"{metric_key}_target_normalization_hash": str(
+            metadata.get("target_normalization_hash") or ""
+        ),
+        f"{metric_key}_internal_target_name": str(metadata.get("internal_target_name") or ""),
+        f"{metric_key}_internal_target_unit": str(metadata.get("internal_target_unit") or ""),
+        f"{metric_key}_canonical_external_unit": str(metadata.get("canonical_external_unit") or ""),
+        f"{metric_key}_target_prediction_mapping_version": str(
+            metadata.get("prediction_mapping_version") or ""
+        ),
+        f"{metric_key}_target_normalization_metadata_json": _json_dumps(metadata),
     }
 
 
@@ -2182,6 +3308,27 @@ def _build_gate_results(
             evidence="prediction_ood_governance_v2",
         )
         if head in PATH_MAGNITUDE_HEADS:
+            capability_state = str(metrics.get(f"{head}_path_head_capability_state") or "")
+            capability_active = capability_state == PATH_HEAD_CAPABILITY_ACTIVE
+            add(
+                f"{head}_required_path_head_active",
+                f"{head_title} Required Path Head Active",
+                "prediction sanity",
+                f"regression:{head}",
+                f"{head}_path_head_capability_state",
+                PATH_HEAD_CAPABILITY_ACTIVE,
+                "equals",
+                capability_state,
+                _status_from_bool(capability_active),
+                True,
+                f"{head_title} required path head is active."
+                if capability_active
+                else (
+                    f"{head_title} required path head is not active: "
+                    f"{metrics.get(f'{head}_path_head_retirement_reason') or capability_state}."
+                ),
+                evidence=LINEAR_PATH_HEAD_RETIREMENT_SCHEMA_VERSION,
+            )
             schema_valid = (
                 metrics.get(f"{head}_domain_schema_version") == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
             )
@@ -2315,6 +3462,8 @@ def _train_family(
     horizon: int,
     config: DiscoveryConfig,
     calibration_audit_dir: str | Path,
+    product_scope: ProductClassScopeDefinition,
+    scoped_frame: pd.DataFrame,
 ) -> ModelBundle:
     target = f"label_{direction}_positive_return_{horizon}"
     returns = f"label_{direction}_forward_return_{horizon}"
@@ -2322,35 +3471,96 @@ def _train_family(
     mae = f"label_{direction}_mae_{horizon}"
     target_before_stop = f"label_{direction}_target_before_stop_{horizon}"
     required = [target, returns, mfe, mae, target_before_stop]
-    train = split.train.dropna(subset=[*feature_columns, *required]).copy()
-    calibration = split.calibration.dropna(subset=[*feature_columns, *required]).copy()
-    holdout = split.holdout.dropna(subset=[*feature_columns, *required]).copy()
+    path_required = [*required, PATH_TARGET_ATR_FEATURE]
+    hygiene_audits: list[FeatureMatrixHygieneAudit] = []
+
+    def sanitize(
+        matrix: pd.DataFrame,
+        *,
+        split_label: str,
+        stage: str,
+        context: pd.DataFrame,
+    ) -> pd.DataFrame:
+        sanitized, audit = sanitize_model_feature_matrix(
+            matrix,
+            split=split_label,
+            stage=stage,
+            feature_family_by_column=feature_family_by_column,
+            context_frame=context,
+        )
+        hygiene_audits.append(audit)
+        return sanitized
+
+    def sanitized_screen_frame(
+        frame: pd.DataFrame, columns: list[str], *, stage: str
+    ) -> pd.DataFrame:
+        sanitized_features = sanitize(
+            frame[columns],
+            split_label="training",
+            stage=stage,
+            context=frame,
+        )
+        output = frame.copy()
+        for column in columns:
+            output[column] = sanitized_features[column]
+        return output
+
+    train = split.train.dropna(subset=[*feature_columns, *path_required]).copy()
+    calibration = split.calibration.dropna(subset=[*feature_columns, *path_required]).copy()
+    holdout = split.holdout.dropna(subset=[*feature_columns, *path_required]).copy()
     if train.empty or calibration.empty or holdout.empty:
         raise ValueError("Training, calibration, and holdout sets must be nonempty")
-    feature_columns, mutual_information_summary = _mutual_information_screen(
+    primary_screen_train = sanitized_screen_frame(
         train,
+        feature_columns,
+        stage="primary_feature_screening",
+    )
+    feature_columns, mutual_information_summary = _mutual_information_screen(
+        primary_screen_train,
         feature_columns,
         target,
         seed=config.random_seed,
         top_k=config.mutual_information_top_k,
     )
 
-    x_train = train[feature_columns]
+    x_train = sanitize(
+        train[feature_columns],
+        split_label="training",
+        stage="primary_classifier_fit",
+        context=train,
+    )
     y_train = train[target].astype(int)
     if y_train.nunique() < 2:
         raise ValueError("Training target contains only one class")
     classifier.fit(x_train, y_train)
 
-    calibration_raw = _positive_class_probability(classifier, calibration[feature_columns])
+    calibration_primary_features = sanitize(
+        calibration[feature_columns],
+        split_label="calibration",
+        stage="primary_classifier_probability",
+        context=calibration,
+    )
+    calibration_raw = _positive_class_probability(classifier, calibration_primary_features)
     calibrator = IsotonicRegression(out_of_bounds="clip")
     calibrator.fit(calibration_raw, calibration[target].astype(int))
     calibration_probability = np.asarray(calibrator.predict(calibration_raw), dtype=float)
-    holdout_raw = _positive_class_probability(classifier, holdout[feature_columns])
+    holdout_primary_features = sanitize(
+        holdout[feature_columns],
+        split_label="development_holdout",
+        stage="primary_classifier_probability",
+        context=holdout,
+    )
+    holdout_raw = _positive_class_probability(classifier, holdout_primary_features)
     holdout_probability = np.asarray(calibrator.predict(holdout_raw), dtype=float)
 
     target_train = split.train.dropna(subset=required).copy()
-    target_screen = screen_features_for_target(
+    target_screen_train = sanitized_screen_frame(
         target_train,
+        feature_columns,
+        stage="target_before_stop_feature_screening",
+    )
+    target_screen = screen_features_for_target(
+        target_screen_train,
         target_train[target_before_stop],
         target_name=target_before_stop,
         head_name=TARGET_BEFORE_STOP_HEAD,
@@ -2371,9 +3581,21 @@ def _train_family(
     target_y = target_train[target_before_stop].astype(int)
     if target_y.nunique() < 2:
         target_classifier = BaseRateClassifier()
-    target_classifier.fit(target_train[list(target_feature_columns)], target_y)
+    target_train_features = sanitize(
+        target_train[list(target_feature_columns)],
+        split_label="training",
+        stage="target_before_stop_classifier_fit",
+        context=target_train,
+    )
+    target_classifier.fit(target_train_features, target_y)
+    target_calibration_features = sanitize(
+        calibration[list(target_feature_columns)],
+        split_label="calibration",
+        stage="target_before_stop_classifier_probability",
+        context=calibration,
+    )
     target_calibration_raw = _positive_class_probability(
-        target_classifier, calibration[list(target_feature_columns)]
+        target_classifier, target_calibration_features
     )
     target_calibration_selection = select_tbs_calibrator(
         raw_probability=target_calibration_raw,
@@ -2385,9 +3607,13 @@ def _train_family(
     target_calibration_probability = np.asarray(
         target_calibrator.predict(target_calibration_raw), dtype=float
     )
-    target_holdout_raw = _positive_class_probability(
-        target_classifier, holdout[list(target_feature_columns)]
+    target_holdout_features = sanitize(
+        holdout[list(target_feature_columns)],
+        split_label="development_holdout",
+        stage="target_before_stop_classifier_probability",
+        context=holdout,
     )
+    target_holdout_raw = _positive_class_probability(target_classifier, target_holdout_features)
     target_holdout_probability = np.asarray(
         target_calibrator.predict(target_holdout_raw), dtype=float
     )
@@ -2423,21 +3649,94 @@ def _train_family(
 
     plugin_by_name = {plugin.name: plugin for plugin in model_plugins()}
     plugin = plugin_by_name[family]
-    path_screen_train = split.train.dropna(subset=required).copy()
-    mfe_magnitude_train = _path_magnitude_target(
+    path_screen_train = split.train.dropna(subset=path_required).copy()
+    path_feature_screen_train = sanitized_screen_frame(
+        path_screen_train,
+        feature_columns,
+        stage="path_feature_screening",
+    )
+    path_train_atr = _path_atr_values(path_screen_train)
+    calibration_atr = _path_atr_values(calibration)
+    holdout_atr = _path_atr_values(holdout)
+    return_atr_train = _path_atr_training_target(
+        path_screen_train[returns],
+        path_train_atr,
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=returns,
+    )
+    mfe_magnitude_train = _path_atr_training_target(
         path_screen_train[mfe],
+        path_train_atr,
         head_name=MFE_HEAD,
         external_target_name=mfe,
     )
-    mae_magnitude_train = _path_magnitude_target(
+    mae_magnitude_train = _path_atr_training_target(
         path_screen_train[mae],
+        path_train_atr,
         head_name=MAE_HEAD,
         external_target_name=mae,
     )
+    return_atr_calibration = _path_atr_training_target(
+        calibration[returns],
+        calibration_atr,
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=returns,
+    )
+    mfe_atr_calibration = _path_atr_training_target(
+        calibration[mfe],
+        calibration_atr,
+        head_name=MFE_HEAD,
+        external_target_name=mfe,
+    )
+    mae_atr_calibration = _path_atr_training_target(
+        calibration[mae],
+        calibration_atr,
+        head_name=MAE_HEAD,
+        external_target_name=mae,
+    )
+    return_atr_holdout = _path_atr_training_target(
+        holdout[returns],
+        holdout_atr,
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=returns,
+    )
+    mfe_atr_holdout = _path_atr_training_target(
+        holdout[mfe],
+        holdout_atr,
+        head_name=MFE_HEAD,
+        external_target_name=mfe,
+    )
+    mae_atr_holdout = _path_atr_training_target(
+        holdout[mae],
+        holdout_atr,
+        head_name=MAE_HEAD,
+        external_target_name=mae,
+    )
+    return_normalization_metadata = _path_target_normalization_metadata(
+        head_name=EXPECTED_RETURN_HEAD,
+        external_target_name=returns,
+        internal_target_name=str(return_atr_train.name),
+        direction=direction,
+        horizon=horizon,
+    )
+    mfe_normalization_metadata = _path_target_normalization_metadata(
+        head_name=MFE_HEAD,
+        external_target_name=mfe,
+        internal_target_name=str(mfe_magnitude_train.name),
+        direction=direction,
+        horizon=horizon,
+    )
+    mae_normalization_metadata = _path_target_normalization_metadata(
+        head_name=MAE_HEAD,
+        external_target_name=mae,
+        internal_target_name=str(mae_magnitude_train.name),
+        direction=direction,
+        horizon=horizon,
+    )
     return_screen = _screen_path_metric_head(
-        training_frame=path_screen_train,
-        target=path_screen_train[returns],
-        target_name=returns,
+        training_frame=path_feature_screen_train,
+        target=return_atr_train,
+        target_name=str(return_atr_train.name),
         head_name=EXPECTED_RETURN_HEAD,
         direction=direction,
         horizon=horizon,
@@ -2446,7 +3745,7 @@ def _train_family(
         seed_offset=10,
     )
     mfe_screen = _screen_path_metric_head(
-        training_frame=path_screen_train,
+        training_frame=path_feature_screen_train,
         target=mfe_magnitude_train,
         target_name=str(mfe_magnitude_train.name),
         head_name=MFE_HEAD,
@@ -2457,7 +3756,7 @@ def _train_family(
         seed_offset=11,
     )
     mae_screen = _screen_path_metric_head(
-        training_frame=path_screen_train,
+        training_frame=path_feature_screen_train,
         target=mae_magnitude_train,
         target_name=str(mae_magnitude_train.name),
         head_name=MAE_HEAD,
@@ -2471,19 +3770,47 @@ def _train_family(
     mfe_feature_columns = mfe_screen.selected_features
     mae_feature_columns = mae_screen.selected_features
     return_model = plugin.regressor_factory(config.random_seed)
-    mfe_model, mfe_estimator_spec = build_path_magnitude_estimator(
-        family=family,
-        head_name=MFE_HEAD,
-        seed=config.random_seed + 1,
+    mfe_retired = _should_retire_path_head(family, MFE_HEAD)
+    mae_retired = _should_retire_path_head(family, MAE_HEAD)
+    mfe_model: Any
+    mae_model: Any
+    mfe_estimator_spec: PathMagnitudeEstimatorSpec | None = None
+    mae_estimator_spec: PathMagnitudeEstimatorSpec | None = None
+    if mfe_retired:
+        mfe_model = RetiredPathHeadModel(family=family, head_name=MFE_HEAD)
+    else:
+        mfe_model, mfe_estimator_spec = build_path_magnitude_estimator(
+            family=family,
+            head_name=MFE_HEAD,
+            seed=config.random_seed + 1,
+        )
+    if mae_retired:
+        mae_model = RetiredPathHeadModel(family=family, head_name=MAE_HEAD)
+    else:
+        mae_model, mae_estimator_spec = build_path_magnitude_estimator(
+            family=family,
+            head_name=MAE_HEAD,
+            seed=config.random_seed + 2,
+        )
+    return_train_features = sanitize(
+        path_screen_train[list(return_feature_columns)],
+        split_label="training",
+        stage="expected_return_regressor_fit",
+        context=path_screen_train,
     )
-    mae_model, mae_estimator_spec = build_path_magnitude_estimator(
-        family=family,
-        head_name=MAE_HEAD,
-        seed=config.random_seed + 2,
+    return_model.fit(return_train_features, return_atr_train)
+    mfe_train_features = sanitize(
+        path_screen_train[list(mfe_feature_columns)],
+        split_label="training",
+        stage="mfe_regressor_fit",
+        context=path_screen_train,
     )
-    return_model.fit(path_screen_train[list(return_feature_columns)], path_screen_train[returns])
-    mfe_train_features = path_screen_train[list(mfe_feature_columns)]
-    mae_train_features = path_screen_train[list(mae_feature_columns)]
+    mae_train_features = sanitize(
+        path_screen_train[list(mae_feature_columns)],
+        split_label="training",
+        stage="mae_regressor_fit",
+        context=path_screen_train,
+    )
     _validate_path_magnitude_training_target(
         feature_frame=mfe_train_features,
         magnitude_target=mfe_magnitude_train,
@@ -2494,41 +3821,138 @@ def _train_family(
         magnitude_target=mae_magnitude_train,
         head_name=MAE_HEAD,
     )
-    mfe_model.fit(mfe_train_features, mfe_magnitude_train)
-    mae_model.fit(mae_train_features, mae_magnitude_train)
-    calibration_expected_return = pd.Series(
-        return_model.predict(calibration[list(return_feature_columns)]),
+    mfe_target_transform_metadata = _path_target_transform_metadata(
+        product_scope=product_scope.scope,
+        direction=direction,
+        family=family,
+        head_name=MFE_HEAD,
+        horizon=horizon,
+        estimator_loss=(
+            str(mfe_estimator_spec.loss)
+            if mfe_estimator_spec is not None
+            else "not_applicable_retired_path_head"
+        ),
+    )
+    mae_target_transform_metadata = _path_target_transform_metadata(
+        product_scope=product_scope.scope,
+        direction=direction,
+        family=family,
+        head_name=MAE_HEAD,
+        horizon=horizon,
+        estimator_loss=(
+            str(mae_estimator_spec.loss)
+            if mae_estimator_spec is not None
+            else "not_applicable_retired_path_head"
+        ),
+    )
+    mfe_model_target = _apply_path_target_transform(
+        mfe_magnitude_train,
+        mfe_target_transform_metadata,
+    )
+    mae_model_target = _apply_path_target_transform(
+        mae_magnitude_train,
+        mae_target_transform_metadata,
+    )
+    if not mfe_retired:
+        mfe_model.fit(mfe_train_features, mfe_model_target)
+    if not mae_retired:
+        mae_model.fit(mae_train_features, mae_model_target)
+    calibration_return_features = sanitize(
+        calibration[list(return_feature_columns)],
+        split_label="calibration",
+        stage="expected_return_regressor_prediction",
+        context=calibration,
+    )
+    calibration_return_prediction = _path_target_prediction(
+        return_model,
+        calibration_return_features,
+        atr_values=calibration_atr,
         index=calibration.index,
     )
-    calibration_mfe_prediction = _path_magnitude_prediction(
-        mfe_model,
+    calibration_mfe_features = sanitize(
         calibration[list(mfe_feature_columns)],
-        head_name=MFE_HEAD,
-        index=calibration.index,
+        split_label="calibration",
+        stage="mfe_regressor_prediction",
+        context=calibration,
     )
-    calibration_mae_prediction = _path_magnitude_prediction(
-        mae_model,
+    calibration_mfe_prediction = (
+        _retired_path_prediction(calibration.index, head_name=MFE_HEAD)
+        if mfe_retired
+        else _path_magnitude_prediction(
+            mfe_model,
+            calibration_mfe_features,
+            head_name=MFE_HEAD,
+            index=calibration.index,
+            atr_values=calibration_atr,
+            target_transform_metadata=mfe_target_transform_metadata,
+        )
+    )
+    calibration_mae_features = sanitize(
         calibration[list(mae_feature_columns)],
-        head_name=MAE_HEAD,
-        index=calibration.index,
+        split_label="calibration",
+        stage="mae_regressor_prediction",
+        context=calibration,
     )
-    calibration_expected_mfe = calibration_mfe_prediction.canonical_signed
-    calibration_expected_mae = calibration_mae_prediction.canonical_signed
-    expected_return = pd.Series(
-        return_model.predict(holdout[list(return_feature_columns)]),
+    calibration_mae_prediction = (
+        _retired_path_prediction(calibration.index, head_name=MAE_HEAD)
+        if mae_retired
+        else _path_magnitude_prediction(
+            mae_model,
+            calibration_mae_features,
+            head_name=MAE_HEAD,
+            index=calibration.index,
+            atr_values=calibration_atr,
+            target_transform_metadata=mae_target_transform_metadata,
+        )
+    )
+    holdout_return_features = sanitize(
+        holdout[list(return_feature_columns)],
+        split_label="development_holdout",
+        stage="expected_return_regressor_prediction",
+        context=holdout,
+    )
+    holdout_return_prediction = _path_target_prediction(
+        return_model,
+        holdout_return_features,
+        atr_values=holdout_atr,
         index=holdout.index,
     )
-    holdout_mfe_prediction = _path_magnitude_prediction(
-        mfe_model,
+    expected_return = holdout_return_prediction.canonical_external
+    holdout_mfe_features = sanitize(
         holdout[list(mfe_feature_columns)],
-        head_name=MFE_HEAD,
-        index=holdout.index,
+        split_label="development_holdout",
+        stage="mfe_regressor_prediction",
+        context=holdout,
     )
-    holdout_mae_prediction = _path_magnitude_prediction(
-        mae_model,
+    holdout_mfe_prediction = (
+        _retired_path_prediction(holdout.index, head_name=MFE_HEAD)
+        if mfe_retired
+        else _path_magnitude_prediction(
+            mfe_model,
+            holdout_mfe_features,
+            head_name=MFE_HEAD,
+            index=holdout.index,
+            atr_values=holdout_atr,
+            target_transform_metadata=mfe_target_transform_metadata,
+        )
+    )
+    holdout_mae_features = sanitize(
         holdout[list(mae_feature_columns)],
-        head_name=MAE_HEAD,
-        index=holdout.index,
+        split_label="development_holdout",
+        stage="mae_regressor_prediction",
+        context=holdout,
+    )
+    holdout_mae_prediction = (
+        _retired_path_prediction(holdout.index, head_name=MAE_HEAD)
+        if mae_retired
+        else _path_magnitude_prediction(
+            mae_model,
+            holdout_mae_features,
+            head_name=MAE_HEAD,
+            index=holdout.index,
+            atr_values=holdout_atr,
+            target_transform_metadata=mae_target_transform_metadata,
+        )
     )
     expected_mfe = holdout_mfe_prediction.canonical_signed
     expected_mae = holdout_mae_prediction.canonical_signed
@@ -2622,12 +4046,12 @@ def _train_family(
         holdout,
         feature_columns,
     )
-    holdout_mae = float(mean_absolute_error(holdout[returns], expected_return))
-    holdout_rmse = float(mean_squared_error(holdout[returns], expected_return) ** 0.5)
-    holdout_mfe_mae = float(mean_absolute_error(holdout[mfe], expected_mfe))
-    holdout_mfe_rmse = float(mean_squared_error(holdout[mfe], expected_mfe) ** 0.5)
-    holdout_mae_mae = float(mean_absolute_error(holdout[mae], expected_mae))
-    holdout_mae_rmse = float(mean_squared_error(holdout[mae], expected_mae) ** 0.5)
+    holdout_mae = _mean_absolute_error_or_nan(holdout[returns], expected_return)
+    holdout_rmse = _rmse_or_nan(holdout[returns], expected_return)
+    holdout_mfe_mae = _mean_absolute_error_or_nan(holdout[mfe], expected_mfe)
+    holdout_mfe_rmse = _rmse_or_nan(holdout[mfe], expected_mfe)
+    holdout_mae_mae = _mean_absolute_error_or_nan(holdout[mae], expected_mae)
+    holdout_mae_rmse = _rmse_or_nan(holdout[mae], expected_mae)
     path_permutation_by_head = {
         EXPECTED_RETURN_HEAD: _regression_permutation_importance_by_family(
             regressor=return_model,
@@ -2637,8 +4061,11 @@ def _train_family(
             target=returns,
             baseline_mae=holdout_mae,
             seed=config.random_seed + 30,
+            prediction_scale=holdout_atr,
         ),
-        MFE_HEAD: _regression_permutation_importance_by_family(
+        MFE_HEAD: []
+        if mfe_retired
+        else _regression_permutation_importance_by_family(
             regressor=mfe_model,
             holdout=holdout,
             feature_columns=mfe_feature_columns,
@@ -2647,8 +4074,11 @@ def _train_family(
             baseline_mae=holdout_mfe_mae,
             seed=config.random_seed + 31,
             prediction_sign=1.0,
+            prediction_scale=holdout_atr,
         ),
-        MAE_HEAD: _regression_permutation_importance_by_family(
+        MAE_HEAD: []
+        if mae_retired
+        else _regression_permutation_importance_by_family(
             regressor=mae_model,
             holdout=holdout,
             feature_columns=mae_feature_columns,
@@ -2657,6 +4087,8 @@ def _train_family(
             baseline_mae=holdout_mae_mae,
             seed=config.random_seed + 32,
             prediction_sign=-1.0,
+            prediction_scale=holdout_atr,
+            target_transform_metadata=mae_target_transform_metadata,
         ),
     }
     mean_selected_return = (
@@ -2771,11 +4203,11 @@ def _train_family(
             name="return",
             direction=direction,
             horizon=horizon,
-            train_target=train[returns],
-            calibration_target=calibration[returns],
-            holdout_target=holdout[returns],
-            calibration_prediction=calibration_expected_return,
-            holdout_prediction=expected_return,
+            train_target=return_atr_train,
+            calibration_target=return_atr_calibration,
+            holdout_target=return_atr_holdout,
+            calibration_prediction=calibration_return_prediction.internal_atr_units,
+            holdout_prediction=holdout_return_prediction.internal_atr_units,
         )
     )
     prediction_metrics.update(
@@ -2783,11 +4215,11 @@ def _train_family(
             name="mfe",
             direction=direction,
             horizon=horizon,
-            train_target=train[mfe],
-            calibration_target=calibration[mfe],
-            holdout_target=holdout[mfe],
-            calibration_prediction=calibration_expected_mfe,
-            holdout_prediction=expected_mfe,
+            train_target=mfe_magnitude_train,
+            calibration_target=mfe_atr_calibration,
+            holdout_target=mfe_atr_holdout,
+            calibration_prediction=calibration_mfe_prediction.internal_magnitude,
+            holdout_prediction=holdout_mfe_prediction.internal_magnitude,
         )
     )
     prediction_metrics.update(
@@ -2795,13 +4227,36 @@ def _train_family(
             name="mae",
             direction=direction,
             horizon=horizon,
-            train_target=train[mae],
-            calibration_target=calibration[mae],
-            holdout_target=holdout[mae],
-            calibration_prediction=calibration_expected_mae,
-            holdout_prediction=expected_mae,
+            train_target=mae_magnitude_train,
+            calibration_target=mae_atr_calibration,
+            holdout_target=mae_atr_holdout,
+            calibration_prediction=calibration_mae_prediction.internal_magnitude,
+            holdout_prediction=holdout_mae_prediction.internal_magnitude,
         )
     )
+    prediction_metrics.update(
+        {
+            "return_prediction_unit_contract": "decimal_return",
+            "return_prediction_ood_unit_contract": "atr_units",
+            "return_prediction_transform_method": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            "return_prediction_path_metric_sign_valid": holdout_return_prediction.valid
+            and calibration_return_prediction.valid,
+            "mfe_prediction_unit_contract": "decimal_return",
+            "mfe_prediction_ood_unit_contract": "atr_units",
+            "mfe_prediction_transform_method": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            "mfe_prediction_path_metric_sign_valid": bool(
+                calibration_mfe_prediction.valid and holdout_mfe_prediction.valid
+            ),
+            "mae_prediction_unit_contract": "decimal_return",
+            "mae_prediction_ood_unit_contract": "atr_units",
+            "mae_prediction_transform_method": PATH_TARGET_PREDICTION_MAPPING_VERSION,
+            "mae_prediction_path_metric_sign_valid": bool(
+                calibration_mae_prediction.valid and holdout_mae_prediction.valid
+            ),
+        }
+    )
+    prediction_metrics.update(calibration_return_prediction.diagnostics("return_calibration"))
+    prediction_metrics.update(holdout_return_prediction.diagnostics("return_holdout"))
     prediction_metrics.update(
         probability_contract_metrics(
             calibration_probability=calibration_probability,
@@ -2869,17 +4324,24 @@ def _train_family(
             "direction": direction,
             "horizon": horizon,
         },
-        EXPECTED_RETURN_HEAD: return_screen.metadata(),
+        EXPECTED_RETURN_HEAD: {
+            **return_screen.metadata(),
+            **return_normalization_metadata,
+            "external_target_name": returns,
+            "internal_target_definition": _path_internal_target_definition(EXPECTED_RETURN_HEAD),
+        },
         MFE_HEAD: {
             **mfe_screen.metadata(),
+            **mfe_normalization_metadata,
             "external_target_name": mfe,
-            "internal_target_definition": "favorable_magnitude_equals_existing_mfe",
+            "internal_target_definition": _path_internal_target_definition(MFE_HEAD),
             "internal_magnitude_target_name": str(mfe_magnitude_train.name),
         },
         MAE_HEAD: {
             **mae_screen.metadata(),
+            **mae_normalization_metadata,
             "external_target_name": mae,
-            "internal_target_definition": "adverse_magnitude_equals_negative_existing_mae",
+            "internal_target_definition": _path_internal_target_definition(MAE_HEAD),
             "internal_magnitude_target_name": str(mae_magnitude_train.name),
         },
     }
@@ -2890,25 +4352,53 @@ def _train_family(
         MAE_HEAD: tuple(mae_screen.audit_records()),
     }
     path_domain_metadata = {
-        MFE_HEAD: _path_domain_metadata(
+        MFE_HEAD: _retired_path_domain_metadata(
+            family=family,
+            head_name=MFE_HEAD,
+            external_target_name=mfe,
+            magnitude_target=mfe_magnitude_train,
+            selected_feature_manifest_hash=head_feature_manifests[MFE_HEAD],
+            calibration_prediction=calibration_mfe_prediction,
+            holdout_prediction=holdout_mfe_prediction,
+            target_normalization_metadata=mfe_normalization_metadata,
+        )
+        if mfe_retired
+        else _path_domain_metadata(
             head_name=MFE_HEAD,
             external_target_name=mfe,
             magnitude_target=mfe_magnitude_train,
             estimator=mfe_model,
-            spec=mfe_estimator_spec,
+            spec=cast(PathMagnitudeEstimatorSpec, mfe_estimator_spec),
             selected_feature_manifest_hash=head_feature_manifests[MFE_HEAD],
             calibration_prediction=calibration_mfe_prediction,
             holdout_prediction=holdout_mfe_prediction,
+            target_normalization_metadata=mfe_normalization_metadata,
+            target_transform_metadata=mfe_target_transform_metadata,
+            transformed_training_target=mfe_model_target,
         ),
-        MAE_HEAD: _path_domain_metadata(
+        MAE_HEAD: _retired_path_domain_metadata(
+            family=family,
+            head_name=MAE_HEAD,
+            external_target_name=mae,
+            magnitude_target=mae_magnitude_train,
+            selected_feature_manifest_hash=head_feature_manifests[MAE_HEAD],
+            calibration_prediction=calibration_mae_prediction,
+            holdout_prediction=holdout_mae_prediction,
+            target_normalization_metadata=mae_normalization_metadata,
+        )
+        if mae_retired
+        else _path_domain_metadata(
             head_name=MAE_HEAD,
             external_target_name=mae,
             magnitude_target=mae_magnitude_train,
             estimator=mae_model,
-            spec=mae_estimator_spec,
+            spec=cast(PathMagnitudeEstimatorSpec, mae_estimator_spec),
             selected_feature_manifest_hash=head_feature_manifests[MAE_HEAD],
             calibration_prediction=calibration_mae_prediction,
             holdout_prediction=holdout_mae_prediction,
+            target_normalization_metadata=mae_normalization_metadata,
+            target_transform_metadata=mae_target_transform_metadata,
+            transformed_training_target=mae_model_target,
         ),
     }
     portfolio_policy_hash = configuration_hash(asdict(portfolio_config))
@@ -2918,8 +4408,19 @@ def _train_family(
             "discovery": asdict(config),
             "selection_policy": asdict(selection_policy),
             "portfolio_policy": asdict(portfolio_config),
+            "product_class_scope": product_scope.to_jsonable(),
         }
     )
+    product_scope_metrics, product_scope_metadata = _product_class_scope_metric_payload(
+        product_scope,
+        scoped_frame=scoped_frame,
+        train=train,
+        calibration=calibration,
+        holdout=holdout,
+        direction=direction,
+        horizon=horizon,
+    )
+    feature_hygiene_metadata = combine_hygiene_audits(hygiene_audits)
     path_domain_metric_payload: dict[str, float | int | str | bool | None] = {}
     for head_name, metadata in path_domain_metadata.items():
         path_domain_metric_payload.update(
@@ -2928,6 +4429,7 @@ def _train_family(
     path_screen_metric_payload: dict[str, float | int | str | bool | None] = {}
     for head_name, screen in path_screens.items():
         metric_key = PATH_HEAD_TARGET_METRIC_KEYS[head_name]
+        head_metadata = feature_screen_metadata.get(head_name, screen.metadata())
         permutation_by_family = path_permutation_by_head[head_name]
         permutation_top = "; ".join(
             f"{record['family']}={float(record['positive_sum_delta_mae']):.6f}"
@@ -2950,7 +4452,7 @@ def _train_family(
                     screen.selected_feature_families
                 ),
                 f"{metric_key}_selected_feature_scores_json": _json_dumps(screen.selected_scores),
-                f"{metric_key}_feature_screen_metadata_json": _json_dumps(screen.metadata()),
+                f"{metric_key}_feature_screen_metadata_json": _json_dumps(head_metadata),
                 f"{metric_key}_feature_screen_audit_json": _json_dumps(screen.audit_records()),
                 f"{metric_key}_top_25_train_mi_features_json": _json_dumps(
                     _screen_top_features(screen, limit=25)
@@ -2960,6 +4462,12 @@ def _train_family(
                 ),
                 f"{metric_key}_permutation_importance_top": permutation_top,
             }
+        )
+        path_screen_metric_payload.update(
+            _path_target_normalization_metric_payload(
+                head_name=head_name,
+                metadata=head_metadata,
+            )
         )
     metrics: dict[str, float | int | str | bool | None] = {
         "training_samples": len(train),
@@ -2976,6 +4484,41 @@ def _train_family(
         "model_eligible_first_date": _date_label(pd.Timestamp(split.train["Date"].min())),
         "research_start": config.research_start,
         "research_end": _research_end(full_frame, config),
+        "model_feature_nonfinite_hygiene_schema_version": (
+            MODEL_FEATURE_NONFINITE_HYGIENE_SCHEMA_VERSION
+        ),
+        "model_feature_nonfinite_hygiene_policy_hash": nonfinite_hygiene_policy_hash(),
+        "model_feature_nonfinite_hygiene_metadata_json": _json_dumps(feature_hygiene_metadata),
+        "model_feature_nonfinite_hygiene_records_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("records"))
+        ),
+        "model_feature_nonfinite_pre_sanitization_count": (
+            _metadata_int(feature_hygiene_metadata.get("pre_sanitization_nonfinite_count"))
+        ),
+        "model_feature_invalid_pre_sanitization_count": (
+            _metadata_int(feature_hygiene_metadata.get("pre_sanitization_invalid_count"))
+        ),
+        "model_feature_invalid_post_sanitization_count": (
+            _metadata_int(feature_hygiene_metadata.get("post_sanitization_nonfinite_count"))
+        ),
+        "model_feature_post_sanitization_missing_count": (
+            _metadata_int(feature_hygiene_metadata.get("post_sanitization_nan_count"))
+        ),
+        "model_feature_hygiene_affected_columns_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("columns_containing_nonfinite"))
+        ),
+        "model_feature_hygiene_sanitized_columns_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("columns_sanitized"))
+        ),
+        "model_feature_hygiene_affected_feature_families_json": _json_dumps(
+            _metadata_dict(feature_hygiene_metadata.get("affected_feature_families"))
+        ),
+        "model_feature_hygiene_affected_symbols_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("affected_symbols"))
+        ),
+        "model_feature_hygiene_affected_dates_json": _json_dumps(
+            _metadata_list(feature_hygiene_metadata.get("affected_dates"))
+        ),
         "holdout_win_rate": float((selected_returns > 0).mean())
         if not selected_returns.empty
         else math.nan,
@@ -3250,6 +4793,7 @@ def _train_family(
         ),
         "candidate_ledger_rows": len(portfolio.trades),
         "candidate_audit_rows": len(portfolio.candidate_audit),
+        **product_scope_metrics,
         **selection_metrics,
         **portfolio_metrics,
         **prediction_metrics,
@@ -3320,7 +4864,7 @@ def _train_family(
         training_stds=stds,
         training_matrix=x_train.reset_index(drop=True),
         training_labels=train[
-            ["Date", "symbol", returns, mfe, mae, target_before_stop]
+            ["Date", "symbol", returns, mfe, mae, target_before_stop, PATH_TARGET_ATR_FEATURE]
         ].reset_index(drop=True),
         metrics=metrics,
         calibration_metrics=calibration_metrics,
@@ -3330,6 +4874,18 @@ def _train_family(
         feature_screen_metadata=feature_screen_metadata,
         feature_screen_records=feature_screen_records,
         path_domain_metadata=path_domain_metadata,
+        product_class_schema_version=product_scope.schema_version,
+        product_class_scope=product_scope.scope,
+        product_class_eligible_roles=product_scope.eligible_roles,
+        product_class_eligible_symbols=product_scope.eligible_symbols,
+        product_class_role_scope_mapping={
+            key: str(value) for key, value in product_scope.role_scope_mapping.items()
+        },
+        product_class_role_scope_mapping_hash=product_scope.role_scope_mapping_hash,
+        product_class_scope_configuration_hash=product_scope.scope_configuration_hash,
+        product_class_universe_scope_hash=product_scope.universe_scope_hash,
+        product_class_scope_metadata=product_scope_metadata,
+        feature_hygiene_metadata=feature_hygiene_metadata,
     )
     return bundle
 
@@ -3348,6 +4904,26 @@ def load_model_bundle(path: str | Path) -> ModelBundle:
         object.__setattr__(loaded, "feature_screen_records", {})
     if not hasattr(loaded, "path_domain_metadata"):
         object.__setattr__(loaded, "path_domain_metadata", {})
+    if not hasattr(loaded, "product_class_schema_version"):
+        object.__setattr__(loaded, "product_class_schema_version", PRODUCT_CLASS_SCHEMA_VERSION)
+    if not hasattr(loaded, "product_class_scope"):
+        object.__setattr__(loaded, "product_class_scope", PRODUCT_CLASS_SCOPE_POOLED)
+    if not hasattr(loaded, "product_class_eligible_roles"):
+        object.__setattr__(loaded, "product_class_eligible_roles", ())
+    if not hasattr(loaded, "product_class_eligible_symbols"):
+        object.__setattr__(loaded, "product_class_eligible_symbols", ())
+    if not hasattr(loaded, "product_class_role_scope_mapping"):
+        object.__setattr__(loaded, "product_class_role_scope_mapping", {})
+    if not hasattr(loaded, "product_class_role_scope_mapping_hash"):
+        object.__setattr__(loaded, "product_class_role_scope_mapping_hash", "")
+    if not hasattr(loaded, "product_class_scope_configuration_hash"):
+        object.__setattr__(loaded, "product_class_scope_configuration_hash", "")
+    if not hasattr(loaded, "product_class_universe_scope_hash"):
+        object.__setattr__(loaded, "product_class_universe_scope_hash", "")
+    if not hasattr(loaded, "product_class_scope_metadata"):
+        object.__setattr__(loaded, "product_class_scope_metadata", {})
+    if not hasattr(loaded, "feature_hygiene_metadata"):
+        object.__setattr__(loaded, "feature_hygiene_metadata", legacy_nonfinite_hygiene_metadata())
     return loaded
 
 
@@ -3358,6 +4934,64 @@ def save_model_bundle(bundle: ModelBundle, path: str | Path) -> Path:
         raise FileExistsError(output)
     joblib.dump(bundle, output)
     return output
+
+
+def _rejected_model_record(
+    *,
+    model_id: str,
+    horizon: int,
+    direction: str,
+    family: str,
+    universe_snapshot_id: str,
+    feature_manifest_hash: str,
+    raw_manifest_hashes: tuple[str, ...],
+    reason: str,
+    created_at: str,
+    code_root: str | Path | None,
+    product_scope: ProductClassScopeDefinition,
+) -> RegisteredModel:
+    metrics: dict[str, float | int | str | bool | None] = {
+        "product_class_schema_version": product_scope.schema_version,
+        "product_class_scope": product_scope.scope,
+        "product_class_scope_configuration_hash": product_scope.scope_configuration_hash,
+        "product_class_universe_scope_hash": product_scope.universe_scope_hash,
+        "product_class_role_scope_mapping_hash": product_scope.role_scope_mapping_hash,
+        "product_class_eligible_roles_json": _json_dumps(list(product_scope.eligible_roles)),
+        "product_class_eligible_symbols_json": _json_dumps(list(product_scope.eligible_symbols)),
+        "product_class_insufficient_data_reason": reason,
+        "product_class_development_evidence_label": "DEVELOPMENT_HOLDOUT_DIAGNOSTIC",
+    }
+    return RegisteredModel(
+        model_id=model_id,
+        task="swing_direction_probability",
+        horizon=horizon,
+        direction=direction,
+        family=family,
+        state="REJECTED",
+        training_start="n/a",
+        training_end="n/a",
+        validation_start="n/a",
+        validation_end="n/a",
+        holdout_start="n/a",
+        holdout_end="n/a",
+        universe_snapshot_id=universe_snapshot_id,
+        feature_manifest_hash=feature_manifest_hash,
+        raw_manifest_hashes=raw_manifest_hashes,
+        hyperparameters={
+            "reason": reason,
+            "product_class_schema_version": product_scope.schema_version,
+            "product_class_scope": product_scope.scope,
+            "product_class_scope_configuration_hash": product_scope.scope_configuration_hash,
+            "product_class_universe_scope_hash": product_scope.universe_scope_hash,
+        },
+        metrics=metrics,
+        calibration_metrics={},
+        quality_gates={"trainable": False},
+        gate_results=(),
+        artifact_path="",
+        code_commit_hash=current_commit_hash(code_root or Path.cwd()),
+        created_at_utc=created_at,
+    )
 
 
 def discover_models(
@@ -3371,6 +5005,7 @@ def discover_models(
     raw_manifest_hashes: tuple[str, ...] = (),
     config: DiscoveryConfig | None = None,
     code_root: str | Path | None = None,
+    universe: UniverseConfig | None = None,
 ) -> DiscoveryResult:
     config = config or DiscoveryConfig()
     registered: list[RegisteredModel] = []
@@ -3380,40 +5015,65 @@ def discover_models(
         raise ValueError("No eligible modeling rows remain after applying research date bounds")
     research_end = pd.Timestamp(_research_end(frame, config))
     warmup_frame = frame.loc[pd.to_datetime(frame["Date"]) <= research_end].copy()
-    feature_columns = _clean_feature_columns(
+    scope_definitions = _scope_definitions_for_discovery(
         eligible_frame,
-        max_features=config.max_features,
-        correlation_threshold=config.correlation_threshold,
+        config=config,
+        universe=universe,
+    )
+    candidate_pipelines = _candidate_pipelines(
+        config.random_seed,
+        families=config.model_families,
+        include_naive=config.include_naive_controls,
     )
     created_at = datetime.now(UTC).isoformat()
-    for horizon in config.horizons:
-        split = chronological_train_calibration_holdout_split(eligible_frame, horizon=horizon)
-        for direction in config.directions:
-            for family, classifier in _candidate_pipelines(config.random_seed).items():
-                model_id = make_model_id(
-                    task="swing_direction_probability",
+    for scope_name in config.product_class_scopes:
+        product_scope = scope_definitions[scope_name]
+        scoped_frame = filter_frame_for_product_class_scope(eligible_frame, product_scope)
+        for horizon in config.horizons:
+            try:
+                split = chronological_train_calibration_holdout_split(
+                    scoped_frame,
                     horizon=horizon,
-                    direction=direction,
-                    family=family,
-                    universe_snapshot_id=universe_snapshot_id,
-                    feature_manifest_hash=feature_manifest_hash,
-                    created_at_utc=f"{created_at}|{family}|{direction}|{horizon}",
                 )
-                try:
-                    bundle = _train_family(
-                        model_id=model_id,
-                        family=family,
-                        classifier=classifier,
-                        split=split,
-                        full_frame=warmup_frame,
-                        feature_columns=feature_columns,
-                        feature_family_by_column=feature_family_by_column,
-                        direction=direction,
-                        horizon=horizon,
-                        config=config,
-                        calibration_audit_dir=Path(artifact_dir).parent / "calibration",
-                    )
-                except ValueError as exc:
+                feature_columns = _clean_feature_columns(
+                    scoped_frame,
+                    max_features=config.max_features,
+                    correlation_threshold=config.correlation_threshold,
+                )
+            except ValueError as exc:
+                for direction in config.directions:
+                    for family in candidate_pipelines:
+                        model_id = make_model_id(
+                            task="swing_direction_probability",
+                            horizon=horizon,
+                            direction=direction,
+                            family=family,
+                            universe_snapshot_id=universe_snapshot_id,
+                            feature_manifest_hash=feature_manifest_hash,
+                            created_at_utc=(
+                                f"{created_at}|rejected|{product_scope.scope}|"
+                                f"{product_scope.universe_scope_hash}|{family}|{direction}|"
+                                f"{horizon}|{exc}"
+                            ),
+                        )
+                        model = _rejected_model_record(
+                            model_id=model_id,
+                            horizon=horizon,
+                            direction=direction,
+                            family=family,
+                            universe_snapshot_id=universe_snapshot_id,
+                            feature_manifest_hash=feature_manifest_hash,
+                            raw_manifest_hashes=raw_manifest_hashes,
+                            reason=str(exc),
+                            created_at=created_at,
+                            code_root=code_root,
+                            product_scope=product_scope,
+                        )
+                        register_model(db_path, model)
+                        rejected.append(model)
+                continue
+            for direction in config.directions:
+                for family, classifier in candidate_pipelines.items():
                     model_id = make_model_id(
                         task="swing_direction_probability",
                         horizon=horizon,
@@ -3421,105 +5081,145 @@ def discover_models(
                         family=family,
                         universe_snapshot_id=universe_snapshot_id,
                         feature_manifest_hash=feature_manifest_hash,
-                        created_at_utc=f"{created_at}|rejected|{exc}",
+                        created_at_utc=(
+                            f"{created_at}|{product_scope.scope}|"
+                            f"{product_scope.universe_scope_hash}|{family}|{direction}|{horizon}"
+                        ),
                     )
+                    try:
+                        bundle = _train_family(
+                            model_id=model_id,
+                            family=family,
+                            classifier=classifier,
+                            split=split,
+                            full_frame=warmup_frame,
+                            feature_columns=feature_columns,
+                            feature_family_by_column=feature_family_by_column,
+                            direction=direction,
+                            horizon=horizon,
+                            config=config,
+                            calibration_audit_dir=Path(artifact_dir).parent / "calibration",
+                            product_scope=product_scope,
+                            scoped_frame=scoped_frame,
+                        )
+                    except ValueError as exc:
+                        model_id = make_model_id(
+                            task="swing_direction_probability",
+                            horizon=horizon,
+                            direction=direction,
+                            family=family,
+                            universe_snapshot_id=universe_snapshot_id,
+                            feature_manifest_hash=feature_manifest_hash,
+                            created_at_utc=(
+                                f"{created_at}|rejected|{product_scope.scope}|"
+                                f"{product_scope.universe_scope_hash}|{family}|{direction}|"
+                                f"{horizon}|{exc}"
+                            ),
+                        )
+                        model = _rejected_model_record(
+                            model_id=model_id,
+                            horizon=horizon,
+                            direction=direction,
+                            family=family,
+                            universe_snapshot_id=universe_snapshot_id,
+                            feature_manifest_hash=feature_manifest_hash,
+                            raw_manifest_hashes=raw_manifest_hashes,
+                            reason=str(exc),
+                            created_at=created_at,
+                            code_root=code_root,
+                            product_scope=product_scope,
+                        )
+                        register_model(db_path, model)
+                        rejected.append(model)
+                        continue
+
+                    bundle = ModelBundle(
+                        model_id=model_id,
+                        direction=bundle.direction,
+                        horizon=bundle.horizon,
+                        family=bundle.family,
+                        feature_columns=bundle.feature_columns,
+                        feature_family_by_column=bundle.feature_family_by_column,
+                        classifier=bundle.classifier,
+                        calibrator=bundle.calibrator,
+                        target_before_stop_model=bundle.target_before_stop_model,
+                        target_before_stop_calibrator=bundle.target_before_stop_calibrator,
+                        return_model=bundle.return_model,
+                        mfe_model=bundle.mfe_model,
+                        mae_model=bundle.mae_model,
+                        training_medians=bundle.training_medians,
+                        training_means=bundle.training_means,
+                        training_stds=bundle.training_stds,
+                        training_matrix=bundle.training_matrix,
+                        training_labels=bundle.training_labels,
+                        metrics=bundle.metrics,
+                        calibration_metrics=bundle.calibration_metrics,
+                        gate_results=bundle.gate_results,
+                        head_feature_columns=bundle.head_feature_columns,
+                        head_feature_manifests=bundle.head_feature_manifests,
+                        feature_screen_metadata=bundle.feature_screen_metadata,
+                        feature_screen_records=bundle.feature_screen_records,
+                        path_domain_metadata=bundle.path_domain_metadata,
+                        product_class_schema_version=bundle.product_class_schema_version,
+                        product_class_scope=bundle.product_class_scope,
+                        product_class_eligible_roles=bundle.product_class_eligible_roles,
+                        product_class_eligible_symbols=bundle.product_class_eligible_symbols,
+                        product_class_role_scope_mapping=bundle.product_class_role_scope_mapping,
+                        product_class_role_scope_mapping_hash=(
+                            bundle.product_class_role_scope_mapping_hash
+                        ),
+                        product_class_scope_configuration_hash=(
+                            bundle.product_class_scope_configuration_hash
+                        ),
+                        product_class_universe_scope_hash=bundle.product_class_universe_scope_hash,
+                        product_class_scope_metadata=bundle.product_class_scope_metadata,
+                        feature_hygiene_metadata=bundle.feature_hygiene_metadata,
+                    )
+                    artifact_path = Path(artifact_dir) / f"{model_id}.joblib"
+                    save_model_bundle(bundle, artifact_path)
+                    eligibility = promotion_eligibility(bundle.gate_results)
+                    state: ModelState = "CHALLENGER" if eligibility.eligible else "CANDIDATE"
                     model = RegisteredModel(
                         model_id=model_id,
                         task="swing_direction_probability",
                         horizon=horizon,
                         direction=direction,
                         family=family,
-                        state="REJECTED",
-                        training_start="n/a",
-                        training_end="n/a",
-                        validation_start="n/a",
-                        validation_end="n/a",
-                        holdout_start="n/a",
-                        holdout_end="n/a",
+                        state=state,
+                        training_start=split.train_start,
+                        training_end=split.train_end,
+                        validation_start=split.calibration_start,
+                        validation_end=split.calibration_end,
+                        holdout_start=split.holdout_start,
+                        holdout_end=split.holdout_end,
                         universe_snapshot_id=universe_snapshot_id,
                         feature_manifest_hash=feature_manifest_hash,
                         raw_manifest_hashes=raw_manifest_hashes,
-                        hyperparameters={"reason": str(exc)},
-                        metrics={},
-                        calibration_metrics={},
-                        quality_gates={"trainable": False},
-                        gate_results=(),
-                        artifact_path="",
+                        hyperparameters={
+                            "family": family,
+                            "max_features": config.max_features,
+                            "research_start": config.research_start,
+                            "research_end": _research_end(frame, config),
+                            "selection_policy": asdict(selection_policy_from_config(config)),
+                            "portfolio_policy": bundle.metrics.get("portfolio_policy_json"),
+                            "product_class_schema_version": product_scope.schema_version,
+                            "product_class_scope": product_scope.scope,
+                            "product_class_scope_configuration_hash": (
+                                product_scope.scope_configuration_hash
+                            ),
+                            "product_class_universe_scope_hash": (
+                                product_scope.universe_scope_hash
+                            ),
+                        },
+                        metrics=bundle.metrics,
+                        calibration_metrics=bundle.calibration_metrics,
+                        quality_gates=quality_gate_bool_map(bundle.gate_results),
+                        gate_results=bundle.gate_results,
+                        artifact_path=str(artifact_path),
                         code_commit_hash=current_commit_hash(code_root or Path.cwd()),
                         created_at_utc=created_at,
                     )
                     register_model(db_path, model)
-                    rejected.append(model)
-                    continue
-
-                bundle = ModelBundle(
-                    model_id=model_id,
-                    direction=bundle.direction,
-                    horizon=bundle.horizon,
-                    family=bundle.family,
-                    feature_columns=bundle.feature_columns,
-                    feature_family_by_column=bundle.feature_family_by_column,
-                    classifier=bundle.classifier,
-                    calibrator=bundle.calibrator,
-                    target_before_stop_model=bundle.target_before_stop_model,
-                    target_before_stop_calibrator=bundle.target_before_stop_calibrator,
-                    return_model=bundle.return_model,
-                    mfe_model=bundle.mfe_model,
-                    mae_model=bundle.mae_model,
-                    training_medians=bundle.training_medians,
-                    training_means=bundle.training_means,
-                    training_stds=bundle.training_stds,
-                    training_matrix=bundle.training_matrix,
-                    training_labels=bundle.training_labels,
-                    metrics=bundle.metrics,
-                    calibration_metrics=bundle.calibration_metrics,
-                    gate_results=bundle.gate_results,
-                    head_feature_columns=bundle.head_feature_columns,
-                    head_feature_manifests=bundle.head_feature_manifests,
-                    feature_screen_metadata=bundle.feature_screen_metadata,
-                    feature_screen_records=bundle.feature_screen_records,
-                    path_domain_metadata=bundle.path_domain_metadata,
-                )
-                artifact_path = Path(artifact_dir) / f"{model_id}.joblib"
-                save_model_bundle(bundle, artifact_path)
-                eligibility = promotion_eligibility(bundle.gate_results)
-                state: ModelState = "CHALLENGER" if eligibility.eligible else "CANDIDATE"
-                model = RegisteredModel(
-                    model_id=model_id,
-                    task="swing_direction_probability",
-                    horizon=horizon,
-                    direction=direction,
-                    family=family,
-                    state=state,
-                    training_start=split.train_start,
-                    training_end=split.train_end,
-                    validation_start=split.calibration_start,
-                    validation_end=split.calibration_end,
-                    holdout_start=split.holdout_start,
-                    holdout_end=split.holdout_end,
-                    universe_snapshot_id=universe_snapshot_id,
-                    feature_manifest_hash=feature_manifest_hash,
-                    raw_manifest_hashes=raw_manifest_hashes,
-                    hyperparameters={
-                        "family": family,
-                        "max_features": config.max_features,
-                        "research_start": config.research_start,
-                        "research_end": _research_end(frame, config),
-                        "selection_policy": asdict(selection_policy_from_config(config)),
-                        "portfolio_policy": bundle.metrics.get("portfolio_policy_json"),
-                    },
-                    metrics=bundle.metrics,
-                    calibration_metrics=bundle.calibration_metrics,
-                    quality_gates=quality_gate_bool_map(bundle.gate_results),
-                    gate_results=bundle.gate_results,
-                    artifact_path=str(artifact_path),
-                    code_commit_hash=current_commit_hash(code_root or Path.cwd()),
-                    created_at_utc=created_at,
-                )
-                register_model(db_path, model)
-                if state == "CHALLENGER":
-                    registered.append(model)
-                else:
                     registered.append(model)
     best = sorted(
         registered,
@@ -3539,17 +5239,54 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
     expected_return_features = bundle_head_feature_columns(bundle, EXPECTED_RETURN_HEAD)
     mfe_features = bundle_head_feature_columns(bundle, MFE_HEAD)
     mae_features = bundle_head_feature_columns(bundle, MAE_HEAD)
+    runtime_hygiene_audits: list[FeatureMatrixHygieneAudit] = []
+
+    def sanitize_runtime(matrix: pd.DataFrame, *, stage: str) -> pd.DataFrame:
+        sanitized, audit = sanitize_model_feature_matrix(
+            matrix,
+            split="scanner_or_prediction",
+            stage=stage,
+            feature_family_by_column=bundle.feature_family_by_column,
+            context_frame=frame,
+        )
+        runtime_hygiene_audits.append(audit)
+        return sanitized
+
     missing = [column for column in primary_features if column not in frame.columns]
     if missing:
         raise ValueError(f"Feature frame is missing required model columns: {missing[:5]}")
-    x = frame[list(primary_features)]
+    x = sanitize_runtime(
+        frame[list(primary_features)],
+        stage="primary_classifier_prediction",
+    )
     raw = _positive_class_probability(bundle.classifier, x)
     probability = np.asarray(bundle.calibrator.predict(raw), dtype=float)
     output = frame[["Date", "symbol"]].copy()
     output["direction"] = bundle.direction
     output["horizon"] = bundle.horizon
     output["model_id"] = bundle.model_id
+    product_metadata = bundle_product_class_metadata(bundle)
+    product_roles = tuple(cast(tuple[object, ...], product_metadata["eligible_roles"]))
+    product_symbols = tuple(cast(tuple[object, ...], product_metadata["eligible_symbols"]))
+    output["product_class_schema_version"] = str(product_metadata["schema_version"])
+    output["product_class_scope"] = str(product_metadata["scope"])
+    output["product_class_scope_configuration_hash"] = str(
+        product_metadata["scope_configuration_hash"]
+    )
+    output["product_class_universe_scope_hash"] = str(product_metadata["universe_scope_hash"])
+    output["product_class_role_scope_mapping_hash"] = str(
+        product_metadata["role_scope_mapping_hash"]
+    )
+    output["product_class_eligible_roles"] = ";".join(str(value) for value in product_roles)
+    output["product_class_eligible_symbol_count"] = len(product_symbols)
     output["calibrated_probability"] = probability
+    hygiene_metadata = bundle_feature_hygiene_metadata(bundle)
+    output["model_feature_nonfinite_hygiene_schema_version"] = str(
+        hygiene_metadata.get("schema_version") or LEGACY_PRE_NONFINITE_HYGIENE_SCHEMA_VERSION
+    )
+    output["model_feature_nonfinite_hygiene_policy_hash"] = str(
+        hygiene_metadata.get("policy_hash") or ""
+    )
     output["primary_feature_manifest_hash"] = bundle_head_feature_manifest(bundle, PRIMARY_HEAD)
     for head_name, output_prefix in (
         (EXPECTED_RETURN_HEAD, "expected_return"),
@@ -3569,6 +5306,31 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         output[f"{output_prefix}_feature_screen_schema"] = schema
         output[f"{output_prefix}_feature_screen_metadata_missing"] = (
             not bool(metadata) or schema != PATH_METRIC_FEATURE_SCREEN_SCHEMA_VERSION
+        )
+        target_normalization_metadata = _target_normalization_metadata_for_bundle(bundle, head_name)
+        output[f"{output_prefix}_target_normalization_schema_version"] = str(
+            target_normalization_metadata.get("target_normalization_schema_version") or ""
+        )
+        output[f"{output_prefix}_target_normalization_method"] = str(
+            target_normalization_metadata.get("target_normalization_method") or ""
+        )
+        output[f"{output_prefix}_target_normalization_atr_feature_name"] = str(
+            target_normalization_metadata.get("atr_feature_name") or ""
+        )
+        output[f"{output_prefix}_target_normalization_hash"] = str(
+            target_normalization_metadata.get("target_normalization_hash") or ""
+        )
+        output[f"{output_prefix}_target_prediction_mapping_version"] = str(
+            target_normalization_metadata.get("prediction_mapping_version") or ""
+        )
+        output[f"{output_prefix}_internal_target_name"] = str(
+            target_normalization_metadata.get("internal_target_name") or ""
+        )
+        output[f"{output_prefix}_internal_target_unit"] = str(
+            target_normalization_metadata.get("internal_target_unit") or ""
+        )
+        output[f"{output_prefix}_canonical_external_unit"] = str(
+            target_normalization_metadata.get("canonical_external_unit") or ""
         )
     output["target_before_stop_feature_manifest_hash"] = bundle_head_feature_manifest(
         bundle, TARGET_BEFORE_STOP_HEAD
@@ -3608,12 +5370,21 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         output["target_before_stop_raw_probability"] = np.full(len(frame), math.nan)
         output["target_before_stop_probability"] = np.full(len(frame), math.nan)
     else:
-        target_x = frame[list(target_before_stop_features)]
+        target_x = sanitize_runtime(
+            frame[list(target_before_stop_features)],
+            stage="target_before_stop_classifier_prediction",
+        )
         target_raw = _positive_class_probability(bundle.target_before_stop_model, target_x)
         output["target_before_stop_raw_probability"] = np.asarray(target_raw, dtype=float)
         output["target_before_stop_probability"] = np.asarray(
             bundle.target_before_stop_calibrator.predict(target_raw), dtype=float
         )
+
+    path_atr_valid = False
+    if PATH_TARGET_ATR_FEATURE in frame.columns:
+        path_atr_numeric = pd.to_numeric(frame[PATH_TARGET_ATR_FEATURE], errors="coerce")
+        path_atr_values = path_atr_numeric.to_numpy(dtype=float, na_value=np.nan)
+        path_atr_valid = bool(np.isfinite(path_atr_values).all() and (path_atr_values > 0.0).all())
 
     def add_regression_prediction(
         output_column: str,
@@ -3622,7 +5393,10 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         missing_features: list[str],
         domain_metadata: dict[str, object] | None = None,
         domain_prediction: PathMagnitudePrediction | None = None,
+        target_prediction: PathTargetPrediction | None = None,
+        ood_values: np.ndarray | pd.Series | None = None,
     ) -> None:
+        retired_path_head = False
         output[f"{output_column}_required_feature_missing"] = bool(missing_features)
         output[f"{output_column}_missing_features"] = ";".join(missing_features[:10])
         if metric_prefix in {"mfe", "mae"}:
@@ -3632,7 +5406,21 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             domain_schema = str(
                 domain.get("domain_schema_version") or "legacy_unconstrained_path_metric_model"
             )
+            capability_state = str(domain.get("path_head_capability_state") or "")
+            if not capability_state and domain_schema == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION:
+                capability_state = PATH_HEAD_CAPABILITY_ACTIVE
+            retired_path_head = (
+                capability_state == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+            )
             output[f"{metric_prefix}_domain_schema_version"] = domain_schema
+            output[f"{metric_prefix}_path_head_capability_state"] = capability_state
+            output[f"{metric_prefix}_path_head_retirement_schema_version"] = str(
+                domain.get("path_head_retirement_schema_version") or ""
+            )
+            output[f"{metric_prefix}_path_head_retirement_reason"] = str(
+                domain.get("path_head_retirement_reason") or ""
+            )
+            output[f"{metric_prefix}_path_head_retired"] = retired_path_head
             output[f"{metric_prefix}_domain_metadata_missing"] = (
                 domain_schema != PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
             )
@@ -3657,21 +5445,78 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
             output[f"{metric_prefix}_prediction_mapping_version"] = str(
                 domain.get("prediction_mapping_version") or ""
             )
+            transform_metadata = _path_target_transform_from_domain_metadata(domain)
+            output[f"{metric_prefix}_path_target_transform_schema_version"] = str(
+                transform_metadata.get("schema_version") or ""
+            )
+            output[f"{metric_prefix}_path_target_transform"] = str(
+                transform_metadata.get("path_target_transform") or PATH_TARGET_TRANSFORM_NONE
+            )
+            output[f"{metric_prefix}_path_target_transform_name"] = str(
+                transform_metadata.get("transform_name") or PATH_TARGET_TRANSFORM_NONE
+            )
+            output[f"{metric_prefix}_path_target_transform_status"] = str(
+                transform_metadata.get("transform_status") or ""
+            )
+            output[f"{metric_prefix}_path_target_transform_fit_split"] = str(
+                transform_metadata.get("fit_split") or ""
+            )
+            output[f"{metric_prefix}_path_target_transform_hash"] = str(
+                transform_metadata.get("path_target_transform_hash") or ""
+            )
+            output[f"{metric_prefix}_path_target_inverse_transform"] = str(
+                transform_metadata.get("inverse_transform") or ""
+            )
+            output[f"{metric_prefix}_path_target_transform_metadata_missing"] = (
+                path_target_transform_metadata_missing(domain)
+            )
+            output[f"{output_column}_path_target_transform_schema_version"] = output[
+                f"{metric_prefix}_path_target_transform_schema_version"
+            ]
+            output[f"{output_column}_path_target_transform"] = output[
+                f"{metric_prefix}_path_target_transform"
+            ]
+            output[f"{output_column}_path_target_transform_hash"] = output[
+                f"{metric_prefix}_path_target_transform_hash"
+            ]
+            output[f"{output_column}_path_target_transform_metadata_missing"] = output[
+                f"{metric_prefix}_path_target_transform_metadata_missing"
+            ]
         if values is None:
             numeric = np.full(len(frame), math.nan)
         else:
             numeric = np.asarray(values, dtype=float)
         output[output_column] = numeric
-        output[f"{output_column}_raw"] = numeric
-        output[f"{output_column}_transformed"] = numeric
+        if (
+            domain_prediction is not None
+            and domain_prediction.transformed_prediction is not None
+            and metric_prefix in {"mfe", "mae"}
+        ):
+            transformed_numeric = domain_prediction.transformed_prediction.to_numpy(dtype=float)
+        else:
+            transformed_numeric = numeric
+        output[f"{output_column}_raw"] = transformed_numeric
+        output[f"{output_column}_transformed"] = transformed_numeric
         output[f"{output_column}_transform_method"] = str(
             bundle.metrics.get(f"{metric_prefix}_prediction_transform_method") or "none"
         )
+        if target_prediction is not None:
+            output[f"{output_column}_internal_atr_units"] = (
+                target_prediction.internal_atr_units.to_numpy(dtype=float)
+            )
+            output[f"{output_column}_atr_pct_14"] = target_prediction.atr_values.to_numpy(
+                dtype=float
+            )
         low_value = bundle.metrics.get(f"{metric_prefix}_prediction_bound_low_train_q01")
         high_value = bundle.metrics.get(f"{metric_prefix}_prediction_bound_high_train_q99")
+        ood_numeric = (
+            np.asarray(ood_values, dtype=float)
+            if ood_values is not None
+            else np.asarray(numeric, dtype=float)
+        )
         checks = [
             live_ood_check(metrics=bundle.metrics, head=metric_prefix, value=float(value))
-            for value in numeric
+            for value in ood_numeric
         ]
         try:
             if low_value is None or high_value is None:
@@ -3681,7 +5526,7 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         except (TypeError, ValueError):
             legacy_ood = np.full(len(numeric), False)
         else:
-            legacy_ood = (numeric < low) | (numeric > high)
+            legacy_ood = (ood_numeric < low) | (ood_numeric > high)
         output[f"{output_column}_out_of_distribution"] = legacy_ood
         output[f"{output_column}_ood_warning"] = legacy_ood
         output[f"{output_column}_ood_severity"] = [check.severity for check in checks]
@@ -3696,14 +5541,16 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         output[f"{output_column}_ood_metadata_missing"] = [
             check.metadata_missing for check in checks
         ]
-        if metric_prefix == "mfe":
+        if retired_path_head:
+            output[f"{output_column}_sign_contract_valid"] = True
+        elif metric_prefix == "mfe":
             output[f"{output_column}_sign_contract_valid"] = numeric >= 0.0
         elif metric_prefix == "mae":
             output[f"{output_column}_sign_contract_valid"] = numeric <= 0.0
         else:
             output[f"{output_column}_sign_contract_valid"] = True
         if metric_prefix in {"mfe", "mae"}:
-            if domain_prediction is None:
+            if retired_path_head or domain_prediction is None:
                 magnitude = np.full(len(frame), math.nan)
                 magnitude_nonfinite = np.full(len(frame), False)
                 magnitude_violation = np.full(len(frame), False)
@@ -3711,52 +5558,130 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
                 magnitude = domain_prediction.internal_magnitude.to_numpy(dtype=float)
                 magnitude_nonfinite = ~np.isfinite(magnitude)
                 magnitude_violation = np.isfinite(magnitude) & (magnitude < 0.0)
-            signed_nonfinite = ~np.isfinite(numeric)
-            if metric_prefix == "mfe":
+            signed_nonfinite = (
+                np.full(len(frame), False) if retired_path_head else ~np.isfinite(numeric)
+            )
+            if retired_path_head:
+                signed_violation = np.full(len(frame), False)
+            elif metric_prefix == "mfe":
                 signed_violation = np.isfinite(numeric) & (numeric < 0.0)
             else:
                 signed_violation = np.isfinite(numeric) & (numeric > 0.0)
             output[f"{output_column}_internal_magnitude"] = magnitude
+            output[f"{output_column}_inverse_transformed_internal_magnitude"] = magnitude
+            output[f"{output_column}_internal_magnitude_atr_units"] = magnitude
             output[f"{output_column}_magnitude_prediction_invalid"] = (
                 magnitude_nonfinite | magnitude_violation
             )
             output[f"{output_column}_signed_prediction_invalid"] = (
                 signed_nonfinite | signed_violation
             )
-            output[f"{output_column}_magnitude_domain_valid"] = ~(
-                magnitude_nonfinite | magnitude_violation
+            output[f"{output_column}_magnitude_domain_valid"] = (
+                np.full(len(frame), False)
+                if retired_path_head
+                else ~(magnitude_nonfinite | magnitude_violation)
             )
-            output[f"{output_column}_signed_domain_valid"] = ~(signed_nonfinite | signed_violation)
+            output[f"{output_column}_signed_domain_valid"] = (
+                np.full(len(frame), False)
+                if retired_path_head
+                else ~(signed_nonfinite | signed_violation)
+            )
             output[f"{output_column}_magnitude_domain_violation"] = magnitude_violation
             output[f"{output_column}_signed_domain_violation"] = signed_violation
 
+    return_target_normalization = _target_normalization_metadata_for_bundle(
+        bundle, EXPECTED_RETURN_HEAD
+    )
+    return_normalized = bool(return_target_normalization)
+    expected_return_missing_features = [
+        column for column in expected_return_features if column not in frame.columns
+    ]
+    if return_normalized and not path_atr_valid:
+        expected_return_missing_features.append(PATH_TARGET_ATR_FEATURE)
+    expected_return_missing_features = list(dict.fromkeys(expected_return_missing_features))
+    return_prediction: PathTargetPrediction | None = None
+    if expected_return_missing_features:
+        expected_return_values = None
+        expected_return_ood_values = None
+    elif return_normalized:
+        return_features = sanitize_runtime(
+            frame[list(expected_return_features)],
+            stage="expected_return_regressor_prediction",
+        )
+        return_prediction = _path_target_prediction(
+            bundle.return_model,
+            return_features,
+            atr_values=_path_atr_values(frame),
+            index=frame.index,
+        )
+        expected_return_values = return_prediction.canonical_external.to_numpy(dtype=float)
+        expected_return_ood_values = return_prediction.internal_atr_units
+    else:
+        return_features = sanitize_runtime(
+            frame[list(expected_return_features)],
+            stage="expected_return_regressor_prediction",
+        )
+        expected_return_values = bundle.return_model.predict(return_features)
+        expected_return_ood_values = expected_return_values
     add_regression_prediction(
         "expected_return",
         "return",
-        None
-        if any(column not in frame.columns for column in expected_return_features)
-        else bundle.return_model.predict(frame[list(expected_return_features)]),
-        [column for column in expected_return_features if column not in frame.columns],
+        expected_return_values,
+        expected_return_missing_features,
+        target_prediction=return_prediction,
+        ood_values=expected_return_ood_values,
     )
-    mfe_missing_features = [column for column in mfe_features if column not in frame.columns]
+    mfe_target_normalization = _target_normalization_metadata_for_bundle(bundle, MFE_HEAD)
     mfe_domain_metadata = bundle_path_domain_metadata(bundle, MFE_HEAD)
+    mfe_retired = (
+        str(mfe_domain_metadata.get("path_head_capability_state") or "")
+        == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    mfe_missing_features = (
+        [] if mfe_retired else [column for column in mfe_features if column not in frame.columns]
+    )
+    if mfe_target_normalization and not path_atr_valid and not mfe_retired:
+        mfe_missing_features.append(PATH_TARGET_ATR_FEATURE)
+    mfe_missing_features = list(dict.fromkeys(mfe_missing_features))
     mfe_has_domain = (
         str(mfe_domain_metadata.get("domain_schema_version") or "")
         == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
     )
     mfe_domain_prediction: PathMagnitudePrediction | None = None
+    mfe_ood_values: np.ndarray | pd.Series | None
     if mfe_missing_features:
         mfe_values = None
+        mfe_ood_values = None
+    elif mfe_retired:
+        mfe_domain_prediction = _retired_path_prediction(frame.index, head_name=MFE_HEAD)
+        mfe_values = mfe_domain_prediction.canonical_signed.to_numpy(dtype=float)
+        mfe_ood_values = mfe_domain_prediction.internal_magnitude
     elif mfe_has_domain:
+        mfe_prediction_features = sanitize_runtime(
+            frame[list(mfe_features)],
+            stage="mfe_regressor_prediction",
+        )
         mfe_domain_prediction = _path_magnitude_prediction(
             bundle.mfe_model,
-            frame[list(mfe_features)],
+            mfe_prediction_features,
             head_name=MFE_HEAD,
             index=frame.index,
+            atr_values=_path_atr_values(frame) if mfe_target_normalization else None,
+            target_transform_metadata=_path_target_transform_from_domain_metadata(
+                mfe_domain_metadata
+            ),
         )
         mfe_values = mfe_domain_prediction.canonical_signed.to_numpy(dtype=float)
+        mfe_ood_values = (
+            mfe_domain_prediction.internal_magnitude if mfe_target_normalization else mfe_values
+        )
     else:
-        mfe_values = bundle.mfe_model.predict(frame[list(mfe_features)])
+        mfe_prediction_features = sanitize_runtime(
+            frame[list(mfe_features)],
+            stage="mfe_regressor_prediction",
+        )
+        mfe_values = bundle.mfe_model.predict(mfe_prediction_features)
+        mfe_ood_values = mfe_values
     add_regression_prediction(
         "expected_mfe",
         "mfe",
@@ -3764,26 +5689,59 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         mfe_missing_features,
         domain_metadata=mfe_domain_metadata,
         domain_prediction=mfe_domain_prediction,
+        ood_values=mfe_ood_values,
     )
-    mae_missing_features = [column for column in mae_features if column not in frame.columns]
+    mae_target_normalization = _target_normalization_metadata_for_bundle(bundle, MAE_HEAD)
     mae_domain_metadata = bundle_path_domain_metadata(bundle, MAE_HEAD)
+    mae_retired = (
+        str(mae_domain_metadata.get("path_head_capability_state") or "")
+        == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR
+    )
+    mae_missing_features = (
+        [] if mae_retired else [column for column in mae_features if column not in frame.columns]
+    )
+    if mae_target_normalization and not path_atr_valid and not mae_retired:
+        mae_missing_features.append(PATH_TARGET_ATR_FEATURE)
+    mae_missing_features = list(dict.fromkeys(mae_missing_features))
     mae_has_domain = (
         str(mae_domain_metadata.get("domain_schema_version") or "")
         == PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
     )
     mae_domain_prediction: PathMagnitudePrediction | None = None
+    mae_ood_values: np.ndarray | pd.Series | None
     if mae_missing_features:
         mae_values = None
+        mae_ood_values = None
+    elif mae_retired:
+        mae_domain_prediction = _retired_path_prediction(frame.index, head_name=MAE_HEAD)
+        mae_values = mae_domain_prediction.canonical_signed.to_numpy(dtype=float)
+        mae_ood_values = mae_domain_prediction.internal_magnitude
     elif mae_has_domain:
+        mae_prediction_features = sanitize_runtime(
+            frame[list(mae_features)],
+            stage="mae_regressor_prediction",
+        )
         mae_domain_prediction = _path_magnitude_prediction(
             bundle.mae_model,
-            frame[list(mae_features)],
+            mae_prediction_features,
             head_name=MAE_HEAD,
             index=frame.index,
+            atr_values=_path_atr_values(frame) if mae_target_normalization else None,
+            target_transform_metadata=_path_target_transform_from_domain_metadata(
+                mae_domain_metadata
+            ),
         )
         mae_values = mae_domain_prediction.canonical_signed.to_numpy(dtype=float)
+        mae_ood_values = (
+            mae_domain_prediction.internal_magnitude if mae_target_normalization else mae_values
+        )
     else:
-        mae_values = bundle.mae_model.predict(frame[list(mae_features)])
+        mae_prediction_features = sanitize_runtime(
+            frame[list(mae_features)],
+            stage="mae_regressor_prediction",
+        )
+        mae_values = bundle.mae_model.predict(mae_prediction_features)
+        mae_ood_values = mae_values
     add_regression_prediction(
         "expected_mae",
         "mae",
@@ -3791,5 +5749,26 @@ def predict_bundle(bundle: ModelBundle, frame: pd.DataFrame) -> pd.DataFrame:
         mae_missing_features,
         domain_metadata=mae_domain_metadata,
         domain_prediction=mae_domain_prediction,
+        ood_values=mae_ood_values,
     )
+    runtime_hygiene = combine_hygiene_audits(runtime_hygiene_audits)
+    output["model_feature_nonfinite_hygiene_warning"] = bool(
+        runtime_hygiene.get("pre_sanitization_invalid_count") or 0
+    )
+    output["model_feature_invalid_pre_sanitization_count"] = int(
+        _metadata_int(runtime_hygiene.get("pre_sanitization_invalid_count"))
+    )
+    output["model_feature_invalid_post_sanitization_count"] = int(
+        _metadata_int(runtime_hygiene.get("post_sanitization_nonfinite_count"))
+    )
+    output["model_feature_hygiene_sanitized_columns"] = ";".join(
+        str(column) for column in _metadata_list(runtime_hygiene.get("columns_sanitized"))
+    )
+    output["model_feature_hygiene_affected_symbols"] = ";".join(
+        str(symbol) for symbol in _metadata_list(runtime_hygiene.get("affected_symbols"))
+    )
+    output["model_feature_hygiene_affected_dates"] = ";".join(
+        str(date) for date in _metadata_list(runtime_hygiene.get("affected_dates"))
+    )
+    output["model_feature_hygiene_runtime_metadata_json"] = _json_dumps(runtime_hygiene)
     return output

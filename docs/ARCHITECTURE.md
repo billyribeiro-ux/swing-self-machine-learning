@@ -95,19 +95,24 @@ Model drift checks are review signals only. They do not mutate, replace, or prom
 
 The Streamlit dashboard is a local-only presentation layer. It calls reusable Python services under `src/swing_rsi/application/` and does not duplicate market-data, RSI, signal, backtest, research, or walk-forward logic inside dashboard pages.
 
-Dashboard navigation is explicit. `dashboard/app.py` registers the primary Self-Learning Swing Trading Engine sections with `st.navigation` / `st.Page`:
+Dashboard navigation is explicit. `dashboard/app.py` registers the primary Signal-First Trading Research Dashboard sections with `st.navigation` / `st.Page`:
 
-1. Overview
-2. Data and Universe
-3. Discovery Lab
-4. Live Scanner
-5. Candidate Attribution
-6. Portfolio Backtests
-7. Paper Forward Test
-8. Model Registry
-9. Baselines and Legacy RSI
+1. Signal Board
+2. Shadow Forward Test
+3. Model Edge Status
+4. Scanner Results
+5. Candidate Detail
+6. Product-Class Research
+7. Gate Audit
+8. Data and Universe
+9. Reports and Exports
+10. Engine Commands
+11. Legacy Baselines
+12. Developer Diagnostics
 
 Streamlit auto-discovered `dashboard/pages/*.py` page files are not used, because filename-derived labels caused confusing navigation.
+
+The command-center dashboard reads development SQLite, artifacts, reports, raw data, feature data, manifests, and universe configuration through read-only application services for page loads. Mutating actions are restricted to explicit confirmed buttons and command wrappers. The dashboard refuses command execution from the operational worktree, displays the frozen operational run as read-only status, and keeps generated dashboard workbooks and command logs under ignored `reports/dashboard_exports/` and `reports/dashboard_command_logs/`.
 
 The Data and Audit page uses `swing_rsi.application.datasets.structural_audit_frame` for both selected-window and full-raw-file audits. Selected-window metrics and tables are calculated only from the sliced dataframe; raw-file metrics and tables remain visibly separate.
 

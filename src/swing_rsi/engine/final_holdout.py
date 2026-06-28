@@ -44,6 +44,8 @@ FINAL_HOLDOUT_SAMPLE_POLICY_VERSION = "prospective_final_holdout_sample_v1"
 SHADOW_FINAL_HOLDOUT_MODE = "SHADOW_FINAL_HOLDOUT"
 FINAL_HOLDOUT_EVENT_PREFIX = "FINAL_HOLDOUT_"
 PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION = "path_metric_magnitude_domain_v1"
+PATH_HEAD_CAPABILITY_ACTIVE = "ACTIVE"
+PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR = "RETIRED_UNSUITABLE_ESTIMATOR"
 
 RunStatus = Literal[
     "CREATED",
@@ -376,6 +378,12 @@ def _development_gate_blockers(model: RegisteredModel) -> tuple[str, ...]:
     if not model.metrics.get("target_before_stop_calibration_governance_schema"):
         blockers.append("target_before_stop_calibration_governance_missing")
     for prefix in ("mfe", "mae"):
+        capability_state = str(model.metrics.get(f"{prefix}_path_head_capability_state") or "")
+        if capability_state == PATH_HEAD_CAPABILITY_RETIRED_UNSUITABLE_ESTIMATOR:
+            blockers.append(f"{prefix}_path_head_retired_unsuitable_estimator")
+            continue
+        if capability_state != PATH_HEAD_CAPABILITY_ACTIVE:
+            blockers.append(f"{prefix}_path_head_capability_state_missing")
         if model.metrics.get(f"{prefix}_domain_schema_version") != (
             PATH_MAGNITUDE_DOMAIN_SCHEMA_VERSION
         ):
