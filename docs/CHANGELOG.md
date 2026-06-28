@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a Reports and Exports Signal Discovery blocker review panel with read-only summary cards, grouped drilldowns, highest-scoring blocked rows, and AppTest coverage while preserving existing CSV/XLSX blocker exports.
 - Added a read-only Signal Discovery blocker review documenting the latest generation's blocker distribution by reason, product scope, archetype, highest-scoring blocked rows, and TZA-specific evidence without changing gates, thresholds, labels, features, scanner state, or operational state.
 - Added a read-only Signal Discovery blocker report that summarizes latest NO_SIGNAL and rejected rows by blocker reason, hypothesis, archetype, ticker, and product scope, with CLI CSV/JSON export and Reports and Exports workbook support.
 - Added Autonomous Multi-Angle Signal Discovery V1: a versioned `multi_angle_signal_discovery_v1` hypothesis registry, train-only chronological discovery engine, BUY/SELL/NO_SIGNAL/rejected/shadow/research candidate schema, local immutable `signal_discovery_generation` artifacts, CLI status/export commands, Signal Board/Candidate Detail/Reports dashboard integration, and safety tests for label isolation, split discipline, analog chronology, exports, and operational immutability.

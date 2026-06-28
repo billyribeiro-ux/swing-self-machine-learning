@@ -1308,7 +1308,7 @@ def test_complete_engine_snapshot_export_contains_required_sheets(
 def test_reports_and_exports_displays_signal_discovery_generation(
     command_center_root: Path,
 ) -> None:
-    _write_signal_discovery_generation(command_center_root)
+    generation_id = _write_signal_discovery_generation(command_center_root)
 
     frames = signal_discovery_generation_frames(command_center_root)
     blocker_frames = signal_discovery_blocker_frames(command_center_root)
@@ -1317,6 +1317,16 @@ def test_reports_and_exports_displays_signal_discovery_generation(
     _assert_no_streamlit_exceptions(app)
     assert "Signal Discovery Generation" in {subheader.value for subheader in app.subheader}
     assert "Signal Discovery Blockers" in {subheader.value for subheader in app.subheader}
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["Blocker rows"] == "1"
+    assert metrics["NO_SIGNAL rows"] == "1"
+    assert metrics["Rejected rows"] == "0"
+    assert metrics["Distinct tickers"] == "1"
+    assert metrics["Distinct hypotheses"] == "1"
+    assert metrics["Top blocker reason"] == "probability_below_threshold"
+    assert metrics["Latest decision date"] == "Not available"
+    assert metrics["Generation ID"] == generation_id
+    assert any("Read-only blocker review" in caption.value for caption in app.caption)
     assert not frames["candidates"].empty
     assert not blocker_frames["blocker_rows"].empty
     assert not blocker_frames["by_reason"].empty
