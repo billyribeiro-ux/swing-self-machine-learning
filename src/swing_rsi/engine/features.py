@@ -3,8 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal, cast
 
 import numpy as np
@@ -51,6 +55,7 @@ class FeatureBuildResult:
     specs: tuple[FeatureSpec, ...]
     manifest_hash: str
     feature_family_by_column: dict[str, str]
+    regime_cache_report: RegimeKMeansCacheReport | None = None
 
 
 RETURN_WINDOWS = (1, 2, 3, 5, 10, 20, 40, 63, 126, 252)
@@ -58,6 +63,55 @@ TREND_WINDOWS = (10, 20, 50, 100, 200)
 ATR_WINDOWS = (5, 14, 20)
 RSI_LENGTHS = tuple(range(2, 51))
 PRIMARY_BENCHMARKS = ("SPY", "QQQ", "IWM", "DIA")
+REGIME_KMEANS_INPUT_COLUMNS = (
+    "market_regime_trend_score",
+    "market_regime_volatility_score",
+    "breadth_advance_pct",
+    "breadth_dispersion_20",
+)
+REGIME_KMEANS_OUTPUT_COLUMN = "market_regime_cluster_expanding"
+REGIME_KMEANS_MINIMUM_ROWS = 126
+REGIME_KMEANS_N_CLUSTERS = 3
+REGIME_KMEANS_RANDOM_STATE = 42
+REGIME_KMEANS_N_INIT = 10
+REGIME_KMEANS_CACHE_SCHEMA_VERSION = "expanding_kmeans_regime_cache_v1"
+REGIME_KMEANS_FEATURE_BUILDER_VERSION = "features.py:_expanding_kmeans_regime:v1"
+REGIME_KMEANS_DATE_ORDERING = "market_daily_rows_as_received_after_groupby_date_reset_index"
+REGIME_KMEANS_PREPROCESSING_CONFIG = {
+    "scaler": "none",
+    "infinity_policy": "replace_positive_and_negative_infinity_with_nan",
+    "missing_value_policy": "expanding_history_median_then_zero",
+    "date_label_policy": "fit_expanding_prefix_and_take_current_date_label",
+}
+
+
+@dataclass(frozen=True)
+class RegimeKMeansCacheConfig:
+    cache_dir: Path
+    universe_snapshot_id: str
+    force_rebuild: bool = False
+    feature_builder_version: str = REGIME_KMEANS_FEATURE_BUILDER_VERSION
+
+
+@dataclass(frozen=True)
+class RegimeKMeansCacheReport:
+    status: str
+    reason: str
+    cache_path: Path | None
+    cached_dates_reused: int
+    new_dates_computed: int
+    kmeans_fits_avoided: int
+    kmeans_fits_performed: int
+    regime_runtime_seconds: float
+    estimated_speedup: float | None
+    cache_write_succeeded: bool
+    cache_write_error: str | None = None
+
+
+@dataclass(frozen=True)
+class _RegimeKMeansComputation:
+    labels: pd.Series
+    kmeans_fits: int
 
 
 def _spec(
@@ -254,30 +308,350 @@ def _gaussian_mutual_information(correlation: pd.Series) -> pd.Series:
     return pd.Series(values, index=correlation.index)
 
 
-def _expanding_kmeans_regime(market_frame: pd.DataFrame) -> pd.Series:
-    columns = [
-        "market_regime_trend_score",
-        "market_regime_volatility_score",
-        "breadth_advance_pct",
-        "breadth_dispersion_20",
+def _regime_kmeans_parameters() -> dict[str, object]:
+    return {
+        "n_clusters": REGIME_KMEANS_N_CLUSTERS,
+        "random_state": REGIME_KMEANS_RANDOM_STATE,
+        "n_init": REGIME_KMEANS_N_INIT,
+    }
+
+
+def _regime_cache_path(config: RegimeKMeansCacheConfig) -> Path:
+    safe_snapshot = re.sub(r"[^A-Za-z0-9_.-]+", "_", config.universe_snapshot_id)
+    return config.cache_dir / f"{safe_snapshot}_{REGIME_KMEANS_CACHE_SCHEMA_VERSION}.json"
+
+
+def _jsonable_cache_value(value: object) -> object:
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if isinstance(value, np.datetime64):
+        return pd.Timestamp(value).date().isoformat()
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        if math.isnan(number):
+            return None
+        if math.isinf(number):
+            return "Infinity" if number > 0 else "-Infinity"
+        return number
+    if value is None or value is pd.NA or value is pd.NaT:
+        return None
+    return value
+
+
+def _hash_records(records: list[dict[str, object]]) -> str:
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _regime_input_records(market_frame: pd.DataFrame) -> list[dict[str, object]]:
+    input_frame = market_frame[["Date", *REGIME_KMEANS_INPUT_COLUMNS]].copy()
+    input_frame["Date"] = pd.to_datetime(input_frame["Date"]).dt.date.astype(str)
+    records: list[dict[str, object]] = []
+    for raw in input_frame.to_dict(orient="records"):
+        records.append({str(key): _jsonable_cache_value(value) for key, value in raw.items()})
+    return records
+
+
+def _regime_input_hash(market_frame: pd.DataFrame) -> str:
+    return _hash_records(_regime_input_records(market_frame))
+
+
+def _regime_output_frame(labels: pd.Series, market_frame: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Date": pd.to_datetime(market_frame["Date"]).dt.date.astype(str),
+            REGIME_KMEANS_OUTPUT_COLUMN: labels,
+        },
+        index=market_frame.index,
+    )
+
+
+def _regime_output_records(
+    labels: pd.Series, market_frame: pd.DataFrame
+) -> list[dict[str, object]]:
+    output = _regime_output_frame(labels, market_frame)
+    records: list[dict[str, object]] = []
+    for raw in output.to_dict(orient="records"):
+        records.append({str(key): _jsonable_cache_value(value) for key, value in raw.items()})
+    return records
+
+
+def _regime_output_hash(labels: pd.Series, market_frame: pd.DataFrame) -> str:
+    return _hash_records(_regime_output_records(labels, market_frame))
+
+
+def _market_dates(market_frame: pd.DataFrame) -> list[str]:
+    return pd.to_datetime(market_frame["Date"]).dt.date.astype(str).tolist()
+
+
+def _series_from_cache_records(records: list[dict[str, object]], index: pd.Index) -> pd.Series:
+    values = [record.get(REGIME_KMEANS_OUTPUT_COLUMN) for record in records]
+    labels = [
+        math.nan if value is None else float(cast(float | int | str, value)) for value in values
     ]
-    values = market_frame[columns].replace([np.inf, -np.inf], np.nan)
+    return pd.Series(labels, index=index, name=REGIME_KMEANS_OUTPUT_COLUMN)
+
+
+def _write_regime_cache_atomic(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True, allow_nan=False),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def _regime_cache_payload(
+    *,
+    config: RegimeKMeansCacheConfig,
+    market_frame: pd.DataFrame,
+    labels: pd.Series,
+    symbols_covered: tuple[str, ...],
+    creation_timestamp_utc: str | None,
+) -> dict[str, object]:
+    now = datetime.now(UTC).isoformat()
+    input_hash = _regime_input_hash(market_frame)
+    dates = _market_dates(market_frame)
+    records = _regime_output_records(labels, market_frame)
+    return {
+        "schema_version": REGIME_KMEANS_CACHE_SCHEMA_VERSION,
+        "universe_snapshot_id": config.universe_snapshot_id,
+        "regime_input_columns": list(REGIME_KMEANS_INPUT_COLUMNS),
+        "kmeans_parameters": _regime_kmeans_parameters(),
+        "random_seed": REGIME_KMEANS_RANDOM_STATE,
+        "scaler_preprocessing_configuration": REGIME_KMEANS_PREPROCESSING_CONFIG,
+        "minimum_sample_requirement": REGIME_KMEANS_MINIMUM_ROWS,
+        "feature_builder_code_version": config.feature_builder_version,
+        "date_ordering": REGIME_KMEANS_DATE_ORDERING,
+        "input_prefix_hash": input_hash,
+        "full_input_hash": input_hash,
+        "dates_covered": dates,
+        "last_cached_date": dates[-1] if dates else None,
+        "row_count": len(dates),
+        "symbols_covered": list(symbols_covered),
+        "output_column_names": ["Date", REGIME_KMEANS_OUTPUT_COLUMN],
+        "output_dataframe_hash": _regime_output_hash(labels, market_frame),
+        "creation_timestamp_utc": creation_timestamp_utc or now,
+        "update_timestamp_utc": now,
+        "cache_validity_status": "VALID",
+        "records": records,
+    }
+
+
+def _load_regime_cache(
+    *,
+    config: RegimeKMeansCacheConfig,
+    market_frame: pd.DataFrame,
+    symbols_covered: tuple[str, ...],
+) -> tuple[dict[str, object] | None, pd.Series | None, str]:
+    if config.force_rebuild:
+        return None, None, "forced_rebuild"
+    path = _regime_cache_path(config)
+    if not path.exists():
+        return None, None, "cache_missing"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, None, f"cache_corrupt:{exc}"
+    if not isinstance(payload, dict):
+        return None, None, "cache_payload_not_mapping"
+
+    expected_fields: dict[str, object] = {
+        "schema_version": REGIME_KMEANS_CACHE_SCHEMA_VERSION,
+        "universe_snapshot_id": config.universe_snapshot_id,
+        "regime_input_columns": list(REGIME_KMEANS_INPUT_COLUMNS),
+        "kmeans_parameters": _regime_kmeans_parameters(),
+        "random_seed": REGIME_KMEANS_RANDOM_STATE,
+        "scaler_preprocessing_configuration": REGIME_KMEANS_PREPROCESSING_CONFIG,
+        "minimum_sample_requirement": REGIME_KMEANS_MINIMUM_ROWS,
+        "feature_builder_code_version": config.feature_builder_version,
+        "date_ordering": REGIME_KMEANS_DATE_ORDERING,
+        "symbols_covered": list(symbols_covered),
+        "output_column_names": ["Date", REGIME_KMEANS_OUTPUT_COLUMN],
+        "cache_validity_status": "VALID",
+    }
+    for field, expected in expected_fields.items():
+        if payload.get(field) != expected:
+            return None, None, f"{field}_mismatch"
+
+    records = payload.get("records")
+    dates_covered = payload.get("dates_covered")
+    row_count = payload.get("row_count")
+    if not isinstance(records, list) or not isinstance(dates_covered, list):
+        return None, None, "cache_records_missing"
+    if row_count != len(records) or row_count != len(dates_covered):
+        return None, None, "cache_row_count_mismatch"
+
+    current_dates = _market_dates(market_frame)
+    if len(dates_covered) > len(current_dates):
+        return None, None, "cache_longer_than_current_input"
+    if current_dates[: len(dates_covered)] != dates_covered:
+        return None, None, "date_prefix_mismatch"
+
+    prefix = market_frame.iloc[: len(dates_covered)].copy()
+    prefix_hash = _regime_input_hash(prefix)
+    if payload.get("input_prefix_hash") != prefix_hash:
+        return None, None, "input_prefix_hash_mismatch"
+    if payload.get("full_input_hash") != prefix_hash:
+        return None, None, "full_input_hash_mismatch"
+
+    labels = _series_from_cache_records(records, market_frame.index[: len(records)])
+    output_hash = _regime_output_hash(labels, prefix)
+    if payload.get("output_dataframe_hash") != output_hash:
+        return None, None, "output_dataframe_hash_mismatch"
+    if payload.get("last_cached_date") != (dates_covered[-1] if dates_covered else None):
+        return None, None, "last_cached_date_mismatch"
+    return payload, labels, "valid"
+
+
+def _regime_values(market_frame: pd.DataFrame) -> pd.DataFrame:
+    return market_frame[list(REGIME_KMEANS_INPUT_COLUMNS)].replace([np.inf, -np.inf], np.nan)
+
+
+def _compute_expanding_kmeans_regime(
+    market_frame: pd.DataFrame,
+    *,
+    start_position: int = 0,
+    cached_labels: pd.Series | None = None,
+) -> _RegimeKMeansComputation:
+    values = _regime_values(market_frame)
     clusters: list[float] = []
-    minimum_rows = 126
-    for position in range(len(values)):
+    if cached_labels is not None:
+        clusters.extend(float(value) if pd.notna(value) else math.nan for value in cached_labels)
+    fits = 0
+    for position in range(start_position, len(values)):
         history = values.iloc[: position + 1].copy()
-        if len(history) < minimum_rows:
+        if len(history) < REGIME_KMEANS_MINIMUM_ROWS:
             clusters.append(math.nan)
             continue
         medians = history.median(numeric_only=True).fillna(0.0)
         filled = history.fillna(medians)
-        if len(filled.drop_duplicates()) < 3:
+        if len(filled.drop_duplicates()) < REGIME_KMEANS_N_CLUSTERS:
             clusters.append(math.nan)
             continue
-        model = KMeans(n_clusters=3, random_state=42, n_init=10)
+        model = KMeans(
+            n_clusters=REGIME_KMEANS_N_CLUSTERS,
+            random_state=REGIME_KMEANS_RANDOM_STATE,
+            n_init=REGIME_KMEANS_N_INIT,
+        )
         labels = model.fit_predict(filled)
+        fits += 1
         clusters.append(float(labels[-1]))
-    return pd.Series(clusters, index=market_frame.index, name="market_regime_cluster_expanding")
+    series = pd.Series(clusters, index=market_frame.index, name=REGIME_KMEANS_OUTPUT_COLUMN)
+    return _RegimeKMeansComputation(labels=series, kmeans_fits=fits)
+
+
+def _count_expanding_kmeans_fits(market_frame: pd.DataFrame) -> int:
+    values = _regime_values(market_frame)
+    fits = 0
+    for position in range(len(values)):
+        history = values.iloc[: position + 1].copy()
+        if len(history) < REGIME_KMEANS_MINIMUM_ROWS:
+            continue
+        medians = history.median(numeric_only=True).fillna(0.0)
+        filled = history.fillna(medians)
+        if len(filled.drop_duplicates()) < REGIME_KMEANS_N_CLUSTERS:
+            continue
+        fits += 1
+    return fits
+
+
+def _expanding_kmeans_regime(market_frame: pd.DataFrame) -> pd.Series:
+    return _compute_expanding_kmeans_regime(market_frame).labels
+
+
+def _expanding_kmeans_regime_with_cache(
+    market_frame: pd.DataFrame,
+    *,
+    cache_config: RegimeKMeansCacheConfig | None,
+    symbols_covered: tuple[str, ...],
+) -> tuple[pd.Series, RegimeKMeansCacheReport | None]:
+    if cache_config is None:
+        return _expanding_kmeans_regime(market_frame), None
+
+    start_time = time.perf_counter()
+    cache_path = _regime_cache_path(cache_config)
+    cached_payload, cached_labels, cache_reason = _load_regime_cache(
+        config=cache_config,
+        market_frame=market_frame,
+        symbols_covered=symbols_covered,
+    )
+    full_fit_count = _count_expanding_kmeans_fits(market_frame)
+
+    status = "MISS"
+    reason = cache_reason
+    write_succeeded = True
+    write_error: str | None = None
+    creation_timestamp = None
+    cached_dates_reused = 0
+    new_dates_computed = len(market_frame)
+    if cached_payload is None or cached_labels is None:
+        status = "INVALIDATED" if cache_path.exists() or cache_config.force_rebuild else "MISS"
+        total_full = _compute_expanding_kmeans_regime(market_frame)
+        labels = total_full.labels
+        fits_performed = total_full.kmeans_fits
+    elif len(cached_labels) == len(market_frame):
+        status = "HIT"
+        reason = "cache_valid"
+        labels = cached_labels.reindex(market_frame.index)
+        fits_performed = 0
+        cached_dates_reused = len(cached_labels)
+        new_dates_computed = 0
+        creation_timestamp = str(cached_payload.get("creation_timestamp_utc") or "")
+    else:
+        status = "PARTIAL_APPEND"
+        reason = "historical_prefix_valid"
+        start_position = len(cached_labels)
+        appended = _compute_expanding_kmeans_regime(
+            market_frame,
+            start_position=start_position,
+            cached_labels=cached_labels,
+        )
+        labels = appended.labels
+        fits_performed = appended.kmeans_fits
+        cached_dates_reused = len(cached_labels)
+        new_dates_computed = len(market_frame) - len(cached_labels)
+        creation_timestamp = str(cached_payload.get("creation_timestamp_utc") or "")
+
+    if status != "HIT":
+        payload = _regime_cache_payload(
+            config=cache_config,
+            market_frame=market_frame,
+            labels=labels,
+            symbols_covered=symbols_covered,
+            creation_timestamp_utc=creation_timestamp,
+        )
+        try:
+            _write_regime_cache_atomic(cache_path, payload)
+        except OSError as exc:
+            write_succeeded = False
+            write_error = str(exc)
+            reason = f"{reason};cache_write_failed"
+
+    elapsed = time.perf_counter() - start_time
+    fits_avoided = max(0, full_fit_count - fits_performed)
+    estimated_speedup = float(full_fit_count / fits_performed) if fits_performed > 0 else None
+    report = RegimeKMeansCacheReport(
+        status=status,
+        reason=reason,
+        cache_path=cache_path,
+        cached_dates_reused=cached_dates_reused,
+        new_dates_computed=new_dates_computed,
+        kmeans_fits_avoided=fits_avoided,
+        kmeans_fits_performed=fits_performed,
+        regime_runtime_seconds=elapsed,
+        estimated_speedup=estimated_speedup,
+        cache_write_succeeded=write_succeeded,
+        cache_write_error=write_error,
+    )
+    return labels, report
 
 
 def _symbol_features(
@@ -506,7 +880,12 @@ def _symbol_features(
     return result.reset_index().rename(columns={"index": "Date"})
 
 
-def _add_cross_sectional_features(panel: pd.DataFrame, universe: UniverseConfig) -> pd.DataFrame:
+def _add_cross_sectional_features(
+    panel: pd.DataFrame,
+    universe: UniverseConfig,
+    *,
+    regime_cache_config: RegimeKMeansCacheConfig | None = None,
+) -> tuple[pd.DataFrame, RegimeKMeansCacheReport | None]:
     data = panel.copy()
     rank_columns: dict[str, pd.Series] = {}
     for window in (5, 20, 63):
@@ -755,7 +1134,12 @@ def _add_cross_sectional_features(panel: pd.DataFrame, universe: UniverseConfig)
         )
         .reset_index()
     )
-    market_regime_cluster_expanding = _expanding_kmeans_regime(market_daily)
+    symbols_covered = tuple(sorted(str(symbol) for symbol in data["symbol"].dropna().unique()))
+    market_regime_cluster_expanding, regime_cache_report = _expanding_kmeans_regime_with_cache(
+        market_daily,
+        cache_config=regime_cache_config,
+        symbols_covered=symbols_covered,
+    )
     market_daily = pd.concat([market_daily, market_regime_cluster_expanding], axis=1)
     cluster_by_date = market_daily.set_index("Date")["market_regime_cluster_expanding"]
     data = pd.concat(
@@ -772,7 +1156,7 @@ def _add_cross_sectional_features(panel: pd.DataFrame, universe: UniverseConfig)
         ],
         axis=1,
     )
-    return data.sort_values(["Date", "symbol"]).reset_index(drop=True).copy()
+    return data.sort_values(["Date", "symbol"]).reset_index(drop=True).copy(), regime_cache_report
 
 
 def _family_map(columns: list[str]) -> dict[str, str]:
@@ -879,6 +1263,8 @@ def feature_family_map_for_columns(columns: list[str]) -> dict[str, str]:
 def build_feature_panel(
     frames: dict[str, pd.DataFrame],
     universe: UniverseConfig,
+    *,
+    regime_cache_config: RegimeKMeansCacheConfig | None = None,
 ) -> FeatureBuildResult:
     metadata = symbol_metadata(universe)
     rows: list[pd.DataFrame] = []
@@ -893,7 +1279,11 @@ def build_feature_panel(
     panel = (
         pd.concat(rows, ignore_index=True).sort_values(["Date", "symbol"]).reset_index(drop=True)
     )
-    panel = _add_cross_sectional_features(panel, universe)
+    panel, regime_cache_report = _add_cross_sectional_features(
+        panel,
+        universe,
+        regime_cache_config=regime_cache_config,
+    )
     feature_columns = [
         column
         for column in panel.columns
@@ -916,6 +1306,7 @@ def build_feature_panel(
         specs=specs,
         manifest_hash=manifest,
         feature_family_by_column=family_by_column,
+        regime_cache_report=regime_cache_report,
     )
 
 

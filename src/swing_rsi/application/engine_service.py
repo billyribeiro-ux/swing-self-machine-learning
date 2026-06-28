@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from swing_rsi.data.loader import load_ohlcv_csv
 from swing_rsi.engine.drift import DriftReport, build_drift_report
 from swing_rsi.engine.features import (
     FeatureBuildResult,
+    RegimeKMeansCacheConfig,
     build_feature_panel,
     feature_family_map_for_columns,
     numeric_feature_columns,
@@ -200,6 +202,7 @@ def build_autonomous_features(
     root: str | Path,
     *,
     universe_path: str | Path | None = None,
+    rebuild_regime_cache: bool = False,
 ) -> FeaturePipelineResult:
     project_root = Path(root)
     paths = ProjectPaths(project_root)
@@ -208,7 +211,16 @@ def build_autonomous_features(
     frames = load_universe_frames(project_root, universe)
     if not frames:
         raise ValueError("No raw OHLCV files are available for the enabled universe")
-    features = build_feature_panel(frames, universe)
+    force_rebuild = rebuild_regime_cache or os.getenv("SWING_RSI_REBUILD_REGIME_CACHE") == "1"
+    features = build_feature_panel(
+        frames,
+        universe,
+        regime_cache_config=RegimeKMeansCacheConfig(
+            cache_dir=paths.regime_cache,
+            universe_snapshot_id=universe.snapshot_id,
+            force_rebuild=force_rebuild,
+        ),
+    )
     labels = build_label_panel(frames, LabelConfig())
     modeling = merge_features_and_labels(features.frame, labels)
     feature_path = (

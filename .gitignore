@@ -33,6 +33,7 @@ data/signals/*
 !data/signals/.gitkeep
 data/forward_tests/*
 !data/forward_tests/.gitkeep
+data/cache/*
 reports/*
 !reports/.gitkeep
 reports/dashboard_exports/
