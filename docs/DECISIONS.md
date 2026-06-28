@@ -1,5 +1,18 @@
 # Decision Log
 
+## 2026-06-28 — Footprint attribution claims require measured evidence rows
+
+Decision: Candidate Detail footprint language now uses `footprint_attribution_v1`.
+Every footprint claim must render with a measured local evidence row or explicit
+`Evidence unavailable` status. Candidate Detail separates supporting evidence,
+conflicting evidence, historical analog outcomes, and residual/unexplained
+attribution, while Signal Board keeps only a compact footprint summary.
+
+Reason: Generic footprint summaries can sound more certain than the underlying
+scanner artifacts support. Quantified evidence keeps shadow-validation review
+auditable without changing features, labels, model logic, thresholds, gates,
+scanner selection, or paper-forward state.
+
 ## 2026-06-28 — Expanding KMeans regime features use an exact-output cache
 
 Decision: Add `expanding_kmeans_regime_cache_v1` around the existing

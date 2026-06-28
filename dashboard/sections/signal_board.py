@@ -29,6 +29,7 @@ from swing_rsi.application.dashboard_service import (
 SIGNAL_COLUMNS: tuple[str, ...] = (
     "ticker",
     "direction",
+    "footprint_summary",
     "model_display",
     "generation_display",
     "run_display",

@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 import pandas as pd
 
 from swing_rsi.application.datasets import discover_raw_datasets
+from swing_rsi.application.footprint_attribution import signal_board_footprint_summary
 from swing_rsi.config import ProjectPaths
 from swing_rsi.engine.gates import (
     GATE_VALUE_NOT_APPLICABLE,
@@ -960,6 +961,12 @@ def scanner_results_frame(root: str | Path) -> pd.DataFrame:
                 "event_id": _display_value(row.get("event_id")),
                 "event_type": _display_value(row.get("event_type")),
                 "feature_snapshot_hash": _display_value(row.get("feature_snapshot_hash")),
+                "row_product_class_role": _display_value(row.get("row_product_class_role")),
+                "regime": _display_value(row.get("regime")),
+                "horizon": _display_value(row.get("horizon")),
+                "signal_close": _display_value(row.get("signal_close")),
+                "liquidity_score": _display_value(row.get("liquidity_score")),
+                "composite_utility_score": _display_value(row.get("composite_utility_score")),
                 "family": "" if model is None else model.family,
                 "generation": "" if model is None else model.created_at_utc,
                 "edge_status": edge_status,
@@ -973,6 +980,9 @@ def scanner_results_frame(root: str | Path) -> pd.DataFrame:
                     row.get("target_before_stop_probability")
                 ),
                 "top_attribution_category": _display_value(row.get("top_attribution_categories")),
+                "top_confirming_relationships": _display_value(
+                    row.get("top_confirming_relationships")
+                ),
                 "supporting_evidence": _display_value(row.get("supporting_evidence")),
                 "historical_analogs": _display_value(row.get("historical_analogs")),
                 "top_divergences": _display_value(row.get("top_divergences")),
@@ -1039,6 +1049,7 @@ def signal_board_frame(root: str | Path) -> pd.DataFrame:
                 "edge_status": edge_status,
                 "model_id": model_id,
                 "model_display": _model_display(model=model, row=row, model_id=model_id),
+                "footprint_summary": signal_board_footprint_summary(row),
                 "scope": _display_value(row.get("product_class_scope") or _model_scope(model)),
                 "family": "" if model is None else model.family,
                 "horizon": _display_value(

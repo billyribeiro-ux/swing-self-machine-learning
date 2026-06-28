@@ -9,6 +9,10 @@ from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_exports import to_xlsx_bytes
 from swing_rsi.application.dashboard_service import candidate_detail_url, scanner_results_frame
+from swing_rsi.application.footprint_attribution import (
+    FOOTPRINT_DISPLAY_COLUMNS,
+    footprint_evidence_frames,
+)
 
 
 def _json_frame(value: object) -> pd.DataFrame:
@@ -276,6 +280,17 @@ def _plain_english(candidate: pd.Series) -> str:
     return "This candidate is shown for model review. Attribution is evidence, not causal proof."
 
 
+def _footprint_summary_text(summary: pd.DataFrame) -> str:
+    if summary.empty:
+        return "Footprint evidence is unavailable. Review measured evidence rows below."
+    row = summary.iloc[0]
+    return (
+        f"{row.get('ticker', 'Candidate')} {row.get('direction', '')}: "
+        f"{row.get('summary', '')} "
+        "This is model evidence for shadow validation, not live actionable guidance."
+    ).strip()
+
+
 def render_page() -> None:
     streamlit = st()
     root = repository_root()
@@ -303,12 +318,15 @@ def render_page() -> None:
     identifiers = _raw_identifier_frame(candidate, dict(streamlit.query_params))
     deep_link = _candidate_detail_deep_link(identifiers)
     deep_link_export = _deep_link_frame(deep_link)
+    footprint = footprint_evidence_frames(root, candidate)
     summary = _summary_frame(candidate)
     checks = _checks_frame(candidate)
     attribution = _attribution_frame(candidate)
-    analogs = _json_frame(candidate.get("historical_analogs", ""))
+    analogs = footprint.historical_analogs
     feature_snapshot = pd.DataFrame([candidate.to_dict()])
     risk = _risk_frame(candidate)
+
+    streamlit.info(_footprint_summary_text(footprint.summary))
 
     streamlit.subheader("Full Raw Identifiers")
     with streamlit.expander("Full Raw Identifier Copy Block", expanded=False):
@@ -316,6 +334,47 @@ def render_page() -> None:
         streamlit.code(_identifier_copy_text(identifiers), language="text")
         streamlit.caption("Candidate Detail deep link")
         streamlit.code(deep_link, language="text")
+
+    streamlit.subheader("Footprint Evidence Table")
+    streamlit.dataframe(
+        footprint.evidence[FOOTPRINT_DISPLAY_COLUMNS],
+        width="stretch",
+        hide_index=True,
+    )
+    render_table_downloads(
+        footprint.summary,
+        basename="candidate_detail_footprint_summary",
+        label="footprint_summary",
+    )
+    render_table_downloads(
+        footprint.evidence,
+        basename="candidate_detail_footprint_evidence",
+        label="footprint_evidence",
+    )
+
+    streamlit.subheader("Supporting Evidence")
+    streamlit.dataframe(
+        footprint.supporting_evidence[FOOTPRINT_DISPLAY_COLUMNS],
+        width="stretch",
+        hide_index=True,
+    )
+    render_table_downloads(
+        footprint.supporting_evidence,
+        basename="candidate_detail_supporting_evidence",
+        label="supporting_evidence",
+    )
+
+    streamlit.subheader("Conflicting Evidence")
+    streamlit.dataframe(
+        footprint.conflicting_evidence[FOOTPRINT_DISPLAY_COLUMNS],
+        width="stretch",
+        hide_index=True,
+    )
+    render_table_downloads(
+        footprint.conflicting_evidence,
+        basename="candidate_detail_conflicting_evidence",
+        label="conflicting_evidence",
+    )
 
     streamlit.subheader("Signal Summary")
     streamlit.dataframe(display_frame(summary), width="stretch", hide_index=True)
@@ -333,12 +392,28 @@ def render_page() -> None:
     if analogs.empty:
         streamlit.info("No historical analog records are available for this candidate.")
     else:
-        streamlit.dataframe(display_frame(analogs), width="stretch", hide_index=True)
+        streamlit.dataframe(analogs, width="stretch", hide_index=True)
+    render_table_downloads(
+        analogs,
+        basename="candidate_detail_historical_analogs",
+        label="historical_analogs",
+    )
+
+    streamlit.subheader("Residual / Unexplained")
+    streamlit.dataframe(
+        display_frame(footprint.residual_unexplained),
+        width="stretch",
+        hide_index=True,
+    )
+    render_table_downloads(
+        footprint.residual_unexplained,
+        basename="candidate_detail_residual_unexplained",
+        label="residual_unexplained",
+    )
 
     render_table_downloads(
         attribution, basename="candidate_detail_attribution", label="attribution"
     )
-    render_table_downloads(analogs, basename="candidate_detail_analogs", label="analogs")
     render_table_downloads(
         feature_snapshot,
         basename="candidate_detail_feature_snapshot",
@@ -360,8 +435,13 @@ def render_page() -> None:
             {
                 "raw_identifiers": identifiers,
                 "deep_link": deep_link_export,
+                "footprint_summary": footprint.summary,
+                "footprint_evidence": footprint.evidence,
+                "supporting_evidence": footprint.supporting_evidence,
+                "conflicting_evidence": footprint.conflicting_evidence,
+                "historical_analogs": analogs,
+                "residual_unexplained": footprint.residual_unexplained,
                 "attribution": attribution,
-                "analogs": analogs,
                 "feature_snapshot": feature_snapshot,
             }
         ),

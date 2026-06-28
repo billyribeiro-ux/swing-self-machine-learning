@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Footprint Attribution V1 evidence quantification in Candidate Detail, including measured footprint tables, supporting/conflicting evidence, analog outcomes, residual/unexplained attribution, compact Signal Board footprint summaries, and CSV/XLSX footprint export sheets.
 - Added a Candidate Detail deep-link copy block and `deep_link` workbook sheet built from full raw scan/model/run/event identifiers.
 - Added a Candidate Detail `Full Raw Identifiers` copy block and `raw_identifiers` workbook sheet so full scan/model/run/event identifiers remain easy to audit after Signal Board friendly formatting.
 - Added friendly Signal Board display identifiers for models, generations, shadow runs, and events while preserving full raw IDs in Candidate Detail links and CSV/XLSX exports.

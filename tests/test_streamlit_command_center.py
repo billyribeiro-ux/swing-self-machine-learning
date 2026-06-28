@@ -40,6 +40,10 @@ from swing_rsi.application.dashboard_service import (
     signal_board_frame,
     signal_board_metrics,
 )
+from swing_rsi.application.footprint_attribution import (
+    EVIDENCE_UNAVAILABLE,
+    footprint_evidence_frames,
+)
 from swing_rsi.data.loader import save_ohlcv_csv
 from swing_rsi.engine.gates import make_gate
 from swing_rsi.engine.registry import RegisteredModel, register_model
@@ -616,13 +620,17 @@ def test_signal_board_visible_table_uses_friendly_ids_but_exports_raw_ids(
     visible_shadow = visible.loc[visible["Ticker"].astype(str) == "DEMO2"].iloc[0]
 
     assert "Model" in visible.columns
+    assert "Footprint Summary" in visible.columns
     assert "Generation" in visible.columns
     assert "Run" in visible.columns
     assert "Event" in visible.columns
+    assert "Footprint Evidence" not in visible.columns
+    assert "Value" not in visible.columns
     assert "Model Id" not in visible.columns
     assert "Run Id" not in visible.columns
     assert "Event Id" not in visible.columns
     assert visible_shadow["Model"] == "POOL Bull HGB 10D · model-d"
+    assert visible_shadow["Footprint Summary"] == "Model evidence footprint"
     assert visible_shadow["Generation"] == "Gen 2026-06-27 12:00"
     assert visible_shadow["Run"] == "Dev Shadow Run · run-demo"
     assert visible_shadow["Event"] == "Pending Entry · pending-"
@@ -710,7 +718,13 @@ def test_signal_board_detail_links_preselect_candidate_detail(
     assert app.selectbox[2].label == "Model ID"
     assert app.selectbox[2].value == "model-demo"
     assert any(success.value == "Opened from Signal Board selection." for success in app.success)
-    assert any(subheader.value == "Full Raw Identifiers" for subheader in app.subheader)
+    subheaders = {subheader.value for subheader in app.subheader}
+    assert "Full Raw Identifiers" in subheaders
+    assert "Footprint Evidence Table" in subheaders
+    assert "Supporting Evidence" in subheaders
+    assert "Conflicting Evidence" in subheaders
+    assert "Historical Analogs" in subheaders
+    assert "Residual / Unexplained" in subheaders
 
 
 def test_candidate_detail_raw_identifier_copy_block_and_exports(
@@ -764,6 +778,208 @@ def test_candidate_detail_raw_identifier_copy_block_and_exports(
         for row in range(2, workbook["raw_identifiers"].max_row + 1)
     ]
     assert "pending-demo2-event" in workbook_values
+
+
+def _write_tza_footprint_fixture(root: Path) -> pd.Series:
+    feature_dir = root / "data" / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    config_dir = root / "configs" / "universe"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "core.yaml").write_text(
+        """
+name: footprint-test
+provider: fmp
+default_start: "2020-01-01"
+symbols:
+  - symbol: TZA
+    enabled: true
+    role: leveraged_inverse_etf
+  - symbol: RWM
+    enabled: true
+    role: inverse_etf
+  - symbol: IWM
+    enabled: true
+    role: broad_market_etf
+  - symbol: SPY
+    enabled: true
+    role: broad_market_etf
+  - symbol: QQQ
+    enabled: true
+    role: broad_market_etf
+  - symbol: DIA
+    enabled: true
+    role: broad_market_etf
+relationships:
+  - source: IWM
+    related: [RWM, TZA]
+""",
+        encoding="utf-8",
+    )
+    date = pd.Timestamp("2026-06-26")
+    rows = [
+        {
+            "Date": date,
+            "symbol": "TZA",
+            "return_1": 0.031,
+            "return_5": 0.082,
+            "return_10": 0.121,
+            "return_20": 0.184,
+            "momentum_20_percentile_252": 0.92,
+            "relative_volume_20": 1.44,
+            "range_percentile_63": 0.81,
+            "iwm_return_5": -0.024,
+            "iwm_return_20": -0.071,
+            "spy_return_5": -0.011,
+            "spy_return_20": -0.032,
+            "qqq_return_5": -0.015,
+            "qqq_return_20": -0.041,
+            "dia_return_5": -0.006,
+            "dia_return_20": -0.019,
+            "relative_return_vs_spy_20": 0.216,
+            "relative_return_vs_qqq_20": 0.225,
+            "relative_return_vs_iwm_20": 0.255,
+            "relative_return_vs_dia_20": 0.203,
+            "relationship_corr_iwm_tza_63": -0.94,
+            "relationship_divergence_iwm_tza_5": 0.018,
+            "relationship_mutual_info_iwm_tza_63": 2.12,
+            "inverse_confirmation_iwm_tza_63": 0.94,
+            "relationship_breakdown_iwm_tza_63": 0.0,
+            "atr_pct_14": 0.071,
+            "realized_vol_20": 0.046,
+            "volatility_expansion_20_63": 1.23,
+            "market_regime_label": "uptrend_high_vol",
+            "regime_conditioned_return_20": 0.028,
+        },
+        {
+            "Date": date,
+            "symbol": "RWM",
+            "return_20": 0.052,
+        },
+        {
+            "Date": date,
+            "symbol": "IWM",
+            "return_20": -0.071,
+        },
+        {
+            "Date": date,
+            "symbol": "SPY",
+            "return_20": -0.032,
+        },
+        {
+            "Date": date,
+            "symbol": "QQQ",
+            "return_20": -0.041,
+        },
+        {
+            "Date": date,
+            "symbol": "DIA",
+            "return_20": -0.019,
+        },
+    ]
+    pd.DataFrame(rows).to_parquet(feature_dir / "footprint_features.parquet", index=False)
+    analogs = [
+        {
+            "Date": "2024-05-01T00:00:00",
+            "symbol": "TZA",
+            "scope": "POOLED",
+            "regime": "uptrend_high_vol",
+            "distance": 1.25,
+            "label_bull_forward_return_10": 0.071,
+            "label_bull_mfe_10": 0.119,
+            "label_bull_mae_10": -0.041,
+            "label_bull_target_before_stop_10": 1.0,
+        },
+        {
+            "Date": "2024-05-02T00:00:00",
+            "symbol": "RWM",
+            "scope": "POOLED",
+            "regime": "uptrend_high_vol",
+            "distance": 1.75,
+            "label_bull_forward_return_10": -0.014,
+            "label_bull_mfe_10": 0.033,
+            "label_bull_mae_10": -0.052,
+            "label_bull_target_before_stop_10": 0.0,
+        },
+    ]
+    return pd.Series(
+        {
+            "ticker": "TZA",
+            "direction": "Bullish",
+            "as_of_date": "2026-06-26",
+            "status": "PENDING ENTRY",
+            "scope": "POOLED",
+            "regime": "uptrend_high_vol",
+            "rejection_reason": "model_not_promoted",
+            "historical_analogs": json.dumps(analogs),
+            "top_divergences": "relationship_divergence_iwm_tza_5 abnormal at 1.80%",
+            "top_attribution_category": (
+                "inverse_leveraged:35.0%; relationship_graph:25.0%; "
+                "regime:20.0%; residual/unexplained:20.0%"
+            ),
+        }
+    )
+
+
+def test_footprint_evidence_quantifies_tza_shadow_candidate(tmp_path: Path) -> None:
+    candidate = _write_tza_footprint_fixture(tmp_path)
+    frames = footprint_evidence_frames(tmp_path, candidate)
+    evidence = frames.evidence
+
+    assert not evidence.empty
+    assert evidence["Claim"].str.strip().ne("").all()
+    assert evidence["Evidence"].astype(str).str.strip().ne("").all()
+    assert set(evidence["Missing Data Status"]).issubset({"available", EVIDENCE_UNAVAILABLE})
+    inverse = evidence.loc[evidence["Category"] == "Expanding inverse ETF strength"]
+    assert not inverse.empty
+    assert "return_5" in set(inverse["Feature"])
+    assert inverse.loc[inverse["Feature"] == "return_5", "Value"].iloc[0] == "8.20%"
+    relationship = evidence.loc[evidence["Feature"] == "relationship_corr_iwm_tza_63"].iloc[0]
+    assert relationship["Value"] == "-0.9400"
+    assert relationship["Evidence Type"] == "supportive"
+    assert not frames.conflicting_evidence.empty
+    assert not frames.residual_unexplained.empty
+
+
+def test_footprint_analogs_conflicts_residual_and_exports(tmp_path: Path) -> None:
+    candidate = _write_tza_footprint_fixture(tmp_path)
+    frames = footprint_evidence_frames(tmp_path, candidate)
+    workbook = openpyxl.load_workbook(
+        BytesIO(
+            to_xlsx_bytes(
+                {
+                    "footprint_summary": frames.summary,
+                    "footprint_evidence": frames.evidence,
+                    "supporting_evidence": frames.supporting_evidence,
+                    "conflicting_evidence": frames.conflicting_evidence,
+                    "historical_analogs": frames.historical_analogs,
+                    "residual_unexplained": frames.residual_unexplained,
+                }
+            )
+        )
+    )
+
+    assert set(
+        [
+            "footprint_summary",
+            "footprint_evidence",
+            "supporting_evidence",
+            "conflicting_evidence",
+            "historical_analogs",
+            "residual_unexplained",
+        ]
+    ).issubset(set(workbook.sheetnames))
+    assert {
+        "analog_date",
+        "symbol",
+        "similarity",
+        "forward_return",
+        "MFE",
+        "MAE",
+        "target_before_stop_result",
+    }.issubset(frames.historical_analogs.columns)
+    assert "target before stop" in set(frames.historical_analogs["target_before_stop_result"])
+    assert frames.conflicting_evidence["Category"].eq("Conflicting evidence").any()
+    assert frames.residual_unexplained["score"].iloc[0] == "20.00%"
 
 
 def test_complete_engine_snapshot_export_contains_required_sheets(

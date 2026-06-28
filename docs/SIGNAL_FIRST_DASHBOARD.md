@@ -117,6 +117,15 @@ same section also displays a copyable `/candidate-detail?...` deep link built
 from the full raw identifiers. The Candidate Detail workbook includes the same
 fields on a `raw_identifiers` sheet and the URL on a `deep_link` sheet.
 
+Candidate Detail also includes quantified footprint evidence. Every footprint
+claim must have a measured evidence row or explicit `Evidence unavailable`
+status. The evidence tables show category, claim, metric, value, window,
+percentile/rank when available, comparison instrument, supporting feature,
+evidence type, strength, and missing-data status. The dashboard separates
+supporting evidence, conflicting evidence, historical analog outcomes, and
+residual/unexplained attribution. Signal Board stays compact and shows only a
+short footprint summary.
+
 ## Signal Board Regime Cache Status
 
 Signal Board shows compact Regime KMeans Cache cards near the top status-card
@@ -193,6 +202,15 @@ contents or authenticated URLs.
 Developer Diagnostics adds Regime KMeans Cache CSV and XLSX exports. The XLSX
 workbook contains `summary`, `metadata`, `input_columns`, and `kmeans_config`
 sheets.
+
+Candidate Detail workbook exports include measured footprint sheets:
+
+- `footprint_summary`
+- `footprint_evidence`
+- `supporting_evidence`
+- `conflicting_evidence`
+- `historical_analogs`
+- `residual_unexplained`
 
 ## Command Behavior
 
