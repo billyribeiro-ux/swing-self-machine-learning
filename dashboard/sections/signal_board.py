@@ -28,8 +28,14 @@ from swing_rsi.application.dashboard_service import (
 
 SIGNAL_COLUMNS: tuple[str, ...] = (
     "ticker",
+    "action",
     "direction",
+    "archetype",
+    "signal_score",
     "footprint_summary",
+    "top_support",
+    "top_conflict",
+    "historical_analog_support",
     "model_display",
     "generation_display",
     "run_display",
@@ -70,10 +76,13 @@ def _filtered(frame: pd.DataFrame) -> pd.DataFrame:
     direction = columns[2].multiselect("Direction", _options(frame, "direction"))
     model = columns[3].multiselect("Model", _options(frame, "model_id"))
     columns = streamlit.columns(4)
-    scope = columns[0].multiselect("Scope", _options(frame, "scope"))
-    status = columns[1].multiselect("Status", _options(frame, "signal_status"))
-    rejection = columns[2].multiselect("Rejection reason", _options(frame, "rejection_reason"))
-    lifecycle = columns[3].multiselect(
+    action = columns[0].multiselect("Action", _options(frame, "action"))
+    archetype = columns[1].multiselect("Archetype", _options(frame, "archetype"))
+    scope = columns[2].multiselect("Scope", _options(frame, "scope"))
+    status = columns[3].multiselect("Status", _options(frame, "signal_status"))
+    columns = streamlit.columns(2)
+    rejection = columns[0].multiselect("Rejection reason", _options(frame, "rejection_reason"))
+    lifecycle = columns[1].multiselect(
         "Pending/open/closed",
         _options(frame, "next_required_event"),
     )
@@ -83,6 +92,8 @@ def _filtered(frame: pd.DataFrame) -> pd.DataFrame:
         ("ticker", ticker),
         ("direction", direction),
         ("model_id", model),
+        ("action", action),
+        ("archetype", archetype),
         ("scope", scope),
         ("signal_status", status),
         ("rejection_reason", rejection),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from dashboard.ui.components import render_page_guidance, render_page_header, repository_root, st
@@ -7,6 +9,7 @@ from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_exports import save_xlsx_report
 from swing_rsi.application.dashboard_service import (
+    candidate_detail_url,
     final_holdout_runs_frame,
     gate_audit_frame,
     model_registry_frame,
@@ -16,6 +19,29 @@ from swing_rsi.application.dashboard_service import (
     save_complete_engine_snapshot,
     scanner_rows_frame,
     scanner_snapshot_list_frame,
+    signal_discovery_blocker_frames,
+    signal_discovery_generation_frames,
+)
+
+BLOCKER_TOP_ROW_COLUMNS: tuple[str, ...] = (
+    "as_of_date",
+    "ticker",
+    "product_class_scope",
+    "action",
+    "candidate_status",
+    "blocker_reason",
+    "model_id",
+    "hypothesis_id",
+    "archetype",
+    "signal_score",
+    "direction_probability",
+    "target_before_stop_probability",
+    "expected_return",
+    "expected_mfe",
+    "expected_mae",
+    "ood_feature_rate",
+    "next_required_event",
+    "open_url",
 )
 
 
@@ -26,6 +52,137 @@ def _feature_families_from_models() -> pd.DataFrame:
             if "feature" in key and ("count" in key or "famil" in key):
                 rows.append({"model_id": model.model_id, "metric": key, "value": value})
     return pd.DataFrame(rows)
+
+
+def _display_count(value: object) -> str:
+    try:
+        if pd.isna(value):
+            return "Not available"
+    except (TypeError, ValueError):
+        pass
+    try:
+        return f"{int(float(value)):,}"
+    except (TypeError, ValueError):
+        return "Not available"
+
+
+def _display_text(value: object) -> str:
+    try:
+        if pd.isna(value):
+            return "Not available"
+    except (TypeError, ValueError):
+        pass
+    text = str(value or "").strip()
+    return text if text else "Not available"
+
+
+def _summary_row(frame: pd.DataFrame) -> dict[str, object]:
+    if frame.empty:
+        return {}
+    return frame.iloc[0].to_dict()
+
+
+def _top_blocker_rows(blockers: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
+    if blockers.empty:
+        return blockers.copy()
+    frame = blockers.copy()
+    frame["open_url"] = [
+        candidate_detail_url(
+            scan_id=row.get("generation_id", ""),
+            ticker=row.get("ticker", ""),
+            model_id=row.get("model_id", ""),
+            direction=row.get("direction", ""),
+            status=row.get("candidate_status", ""),
+        )
+        for _, row in frame.iterrows()
+    ]
+    if "signal_score" in frame.columns:
+        frame = frame.sort_values("signal_score", ascending=False, na_position="last")
+    columns = [column for column in BLOCKER_TOP_ROW_COLUMNS if column in frame.columns]
+    return frame[columns].head(limit).reset_index(drop=True)
+
+
+def _display_top_blocker_rows(blockers: pd.DataFrame) -> pd.DataFrame:
+    display = display_frame(_top_blocker_rows(blockers)).rename(columns={"Open Url": "Open"})
+    return display
+
+
+def _render_signal_discovery_blockers(root: Path) -> None:
+    streamlit = st()
+    blocker_frames = signal_discovery_blocker_frames(root)
+    blocker_sheets = {name: frame for name, frame in blocker_frames.items() if not frame.empty}
+    blockers = blocker_sheets.get("blocker_rows", pd.DataFrame())
+
+    streamlit.subheader("Signal Discovery Blockers")
+    if not blocker_sheets or blockers.empty:
+        streamlit.info("No NO_SIGNAL or rejected signal discovery blockers are available locally.")
+        return
+
+    summary = _summary_row(blocker_sheets.get("summary", pd.DataFrame()))
+    streamlit.caption(
+        "Read-only blocker review for the latest signal discovery generation. This panel reads "
+        "local generation artifacts only and does not run discovery, scanner, or FMP updates."
+    )
+    streamlit.metric("Blocker rows", _display_count(summary.get("blocker_rows")))
+    metrics = streamlit.columns(7)
+    cards = {
+        "NO_SIGNAL rows": _display_count(summary.get("no_signal_rows")),
+        "Rejected rows": _display_count(summary.get("rejected_rows")),
+        "Distinct tickers": _display_count(summary.get("distinct_tickers")),
+        "Distinct hypotheses": _display_count(summary.get("distinct_hypotheses")),
+        "Top blocker reason": _display_text(summary.get("top_blocker_reason")),
+        "Latest decision date": _display_text(summary.get("latest_decision_date")),
+        "Generation ID": _display_text(summary.get("generation_id")),
+    }
+    for index, (label, value) in enumerate(cards.items()):
+        metrics[index].metric(label, value)
+
+    tabs = streamlit.tabs(
+        [
+            "By reason",
+            "By hypothesis",
+            "By archetype",
+            "By ticker",
+            "By scope",
+            "Top blocked rows",
+        ]
+    )
+    grouped_frames = [
+        ("by_reason", tabs[0]),
+        ("by_hypothesis", tabs[1]),
+        ("by_archetype", tabs[2]),
+        ("by_ticker", tabs[3]),
+        ("by_scope", tabs[4]),
+    ]
+    for name, tab in grouped_frames:
+        with tab:
+            frame = blocker_sheets.get(name, pd.DataFrame())
+            if frame.empty:
+                streamlit.info("Not available")
+            else:
+                streamlit.dataframe(display_frame(frame.head(50)), width="stretch", hide_index=True)
+    with tabs[5]:
+        top_blockers = _display_top_blocker_rows(blockers)
+        column_config = {}
+        if "Open" in top_blockers.columns:
+            column_config["Open"] = streamlit.column_config.LinkColumn(
+                "Open",
+                display_text="Open detail",
+            )
+        streamlit.dataframe(
+            top_blockers,
+            width="stretch",
+            hide_index=True,
+            column_config=column_config,
+        )
+
+    if streamlit.button("Create signal discovery blocker workbook"):
+        output = save_xlsx_report(
+            root,
+            "signal_discovery_blockers.xlsx",
+            blocker_sheets,
+        )
+        streamlit.success(f"Saved {output.relative_to(root)}")
 
 
 def render_page() -> None:
@@ -80,6 +237,45 @@ def render_page() -> None:
             },
         )
         streamlit.success(f"Saved {output.relative_to(root)}")
+
+    discovery_frames = signal_discovery_generation_frames(root)
+    discovery_sheets = {
+        name: frame
+        for name, frame in discovery_frames.items()
+        if name
+        in {
+            "summary",
+            "metadata",
+            "hypotheses",
+            "candidates",
+            "selected_candidates",
+            "no_signal",
+            "rejected",
+            "footprint_evidence",
+            "historical_analogs",
+            "score_components",
+            "gate_results",
+        }
+        and not frame.empty
+    }
+    streamlit.subheader("Signal Discovery Generation")
+    if discovery_sheets:
+        streamlit.dataframe(
+            display_frame(discovery_sheets.get("summary", pd.DataFrame())),
+            width="stretch",
+            hide_index=True,
+        )
+        if streamlit.button("Create signal discovery generation workbook"):
+            output = save_xlsx_report(
+                root,
+                "signal_discovery_generation.xlsx",
+                discovery_sheets,
+            )
+            streamlit.success(f"Saved {output.relative_to(root)}")
+    else:
+        streamlit.info("No signal discovery generation is available locally.")
+
+    _render_signal_discovery_blockers(root)
 
     models = registered_models_readonly(root)
     if models:

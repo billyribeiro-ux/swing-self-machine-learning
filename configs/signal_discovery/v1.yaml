@@ -1,0 +1,40 @@
+schema_version: multi_angle_signal_discovery_v1
+enabled_hypotheses:
+  - trend_continuation_buy_10d
+  - trend_continuation_sell_10d
+  - reversal_buy_5d
+  - reversal_sell_5d
+  - breakout_buy_10d
+  - breakdown_sell_10d
+  - pullback_continuation_buy_10d
+  - pullback_continuation_sell_10d
+  - risk_off_buy_inverse_10d
+  - sector_rotation_buy_20d
+  - volatility_expansion_sell_5d
+  - volatility_compression_release_buy_10d
+  - breadth_deterioration_sell_10d
+  - failed_breakdown_buy_5d
+  - failed_breakout_sell_5d
+horizons: [3, 5, 10, 20]
+product_scopes: [POOLED, ORDINARY, INVERSE, LEVERAGED_LONG, LEVERAGED_INVERSE]
+model_families: [hist_gradient_boosting, extra_trees]
+minimum_training_samples: 200
+minimum_calibration_samples: 80
+minimum_holdout_samples: 80
+max_selected_features: 48
+analog_count: 5
+candidate_cap_per_hypothesis: 12
+random_seed: 42
+research_start: "2016-06-20"
+research_end:
+costs:
+  round_trip_bps: 5.0
+ood_policy:
+  reference: prediction_ood_governance_v2
+  feature_rate_limit: 0.20
+selection_policy:
+  reference: signal_discovery_policy_v1
+  probability: 0.55
+  target_before_stop: 0.50
+  expected_return: 0.001
+  signal_score: 0.55

@@ -1,5 +1,22 @@
 # Decision Log
 
+## 2026-06-28 — Discovery uses typed multi-angle signal hypotheses
+
+Decision: Add `multi_angle_signal_discovery_v1` as a separate discovery layer
+from the existing target-before-stop model path. V1 defines typed signal
+archetypes and `SignalHypothesisSpec` objects, trains only on chronological
+training rows, calibrates only on calibration rows, evaluates on development
+holdout rows, and persists immutable `signal_discovery_generation` artifacts
+under ignored `artifacts/signal_discovery/`. The layer can emit BUY, SELL,
+NO_SIGNAL, rejected, shadow-only, and research-only rows, but no row is live
+actionable without a promoted model and all existing live gates.
+
+Reason: The scanner infrastructure was exploring one narrow model path. A
+self-learning scanner needs governed discovery lenses across trend, reversal,
+breakout, pullback, risk-on/risk-off, sector rotation, volatility, breadth, and
+failed-move footprints while preserving label separation, OOD governance,
+promotion policy, and prospective final-holdout boundaries.
+
 ## 2026-06-28 — Footprint attribution claims require measured evidence rows
 
 Decision: Candidate Detail footprint language now uses `footprint_attribution_v1`.

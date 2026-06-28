@@ -68,6 +68,10 @@ class FootprintFrames:
 
 
 def footprint_evidence_frames(root: str | Path, candidate: pd.Series) -> FootprintFrames:
+    artifact_frames = _signal_discovery_artifact_frames(candidate)
+    if artifact_frames is not None:
+        return artifact_frames
+
     project_root = Path(root)
     feature_frame = _latest_feature_frame(project_root)
     as_of = _candidate_date(candidate)
@@ -112,6 +116,77 @@ def footprint_evidence_frames(root: str | Path, candidate: pd.Series) -> Footpri
             columns=FOOTPRINT_EVIDENCE_COLUMNS,
         )
     summary = _summary_frame(candidate, evidence)
+    return FootprintFrames(
+        summary=summary,
+        evidence=evidence,
+        supporting_evidence=supporting,
+        conflicting_evidence=conflicting,
+        historical_analogs=analogs,
+        residual_unexplained=residual,
+    )
+
+
+def _signal_discovery_artifact_frames(candidate: pd.Series) -> FootprintFrames | None:
+    raw_evidence = _clean(candidate.get("footprint_evidence_json"))
+    if not raw_evidence:
+        return None
+    try:
+        payload = json.loads(raw_evidence)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list):
+        return None
+    rows = [row for row in payload if isinstance(row, dict)]
+    if not rows:
+        return None
+    evidence = pd.DataFrame(rows)
+    for column in FOOTPRINT_EVIDENCE_COLUMNS:
+        if column not in evidence.columns:
+            evidence[column] = NOT_AVAILABLE
+    evidence = evidence[FOOTPRINT_EVIDENCE_COLUMNS]
+    supporting = _evidence_subset(evidence, "supportive", "supporting")
+    conflicting = _evidence_subset(evidence, "conflicting", "conflicting")
+    if conflicting.empty:
+        conflicting = pd.DataFrame(
+            [
+                _row(
+                    category="Conflicting evidence",
+                    claim="Top conflicts are not available in signal discovery evidence.",
+                    evidence=EVIDENCE_UNAVAILABLE,
+                    value=EVIDENCE_UNAVAILABLE,
+                    feature="top_conflict",
+                    evidence_type="neutral",
+                    strength="Unavailable",
+                    missing=EVIDENCE_UNAVAILABLE,
+                )
+            ],
+            columns=FOOTPRINT_EVIDENCE_COLUMNS,
+        )
+    analogs = _historical_analog_frame(candidate)
+    residual = evidence.loc[evidence["Category"].astype(str).eq("Residual / unexplained")].copy()
+    if residual.empty:
+        residual = _residual_frame(candidate)
+    else:
+        residual = residual.rename(columns={"Value": "score", "Evidence": "reason"})
+        for column in ("score", "reason"):
+            if column not in residual.columns:
+                residual[column] = NOT_AVAILABLE
+        residual = residual[["score", "reason"]].head(1)
+    summary = pd.DataFrame(
+        [
+            {
+                "ticker": _clean(candidate.get("ticker")),
+                "direction": _clean(candidate.get("direction")),
+                "summary": _clean(candidate.get("footprint_summary"))
+                or "Signal discovery footprint evidence.",
+                "supporting_items": len(supporting),
+                "conflicting_items": len(conflicting),
+                "missing_items": int(
+                    evidence["Missing Data Status"].astype(str).eq(EVIDENCE_UNAVAILABLE).sum()
+                ),
+            }
+        ]
+    )
     return FootprintFrames(
         summary=summary,
         evidence=evidence,
