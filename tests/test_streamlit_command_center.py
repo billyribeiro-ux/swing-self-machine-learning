@@ -10,6 +10,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 import pytest
+from dashboard.sections.signal_board import _display_section as signal_board_display_section
 
 from swing_rsi.application.dashboard_exports import (
     normalize_table_for_export,
@@ -581,6 +582,13 @@ def test_signal_first_tables_label_live_shadow_and_missing_paths(
     assert "SHADOW ONLY" in set(board["live_shadow_rejected_classification"])
     shadow = board.loc[board["ticker"].astype(str) == "DEMO2"].iloc[0]
     assert shadow["signal_status"] == "PENDING ENTRY"
+    assert shadow["model_display"] == "POOL Bull HGB 10D · model-d"
+    assert shadow["generation_display"] == "Gen 2026-06-27 12:00"
+    assert shadow["run_display"] == "Dev Shadow Run · run-demo"
+    assert shadow["event_display"] == "Pending Entry · pending-"
+    assert shadow["model_id"] == "model-demo"
+    assert shadow["run_id"] == "run-demo"
+    assert shadow["event_id"] == "pending-demo2-event"
     assert shadow["expected_mfe"] == "Not available"
     assert shadow["expected_mae"] == "Not available"
     assert shadow["next_required_event"] == "Pending entry waits for next session open."
@@ -592,6 +600,41 @@ def test_signal_first_tables_label_live_shadow_and_missing_paths(
     assert "Trade signal" not in joined
     rejected = scanner.loc[scanner["candidate_classification"].astype(str) == "REJECTED"]
     assert not rejected.empty
+
+
+def test_signal_board_visible_table_uses_friendly_ids_but_exports_raw_ids(
+    command_center_root: Path,
+) -> None:
+    board = signal_board_frame(command_center_root)
+    visible = signal_board_display_section(board)
+    visible_shadow = visible.loc[visible["Ticker"].astype(str) == "DEMO2"].iloc[0]
+
+    assert "Model" in visible.columns
+    assert "Generation" in visible.columns
+    assert "Run" in visible.columns
+    assert "Event" in visible.columns
+    assert "Model Id" not in visible.columns
+    assert "Run Id" not in visible.columns
+    assert "Event Id" not in visible.columns
+    assert visible_shadow["Model"] == "POOL Bull HGB 10D · model-d"
+    assert visible_shadow["Generation"] == "Gen 2026-06-27 12:00"
+    assert visible_shadow["Run"] == "Dev Shadow Run · run-demo"
+    assert visible_shadow["Event"] == "Pending Entry · pending-"
+
+    csv_bytes = to_csv_bytes(board)
+    xlsx_bytes = to_xlsx_bytes({"signal_board": board})
+    workbook = openpyxl.load_workbook(BytesIO(xlsx_bytes))
+    headers = [cell.value for cell in workbook["signal_board"][1]]
+
+    assert b"model_id" in csv_bytes
+    assert b"model-demo" in csv_bytes
+    assert b"run_id" in csv_bytes
+    assert b"run-demo" in csv_bytes
+    assert b"event_id" in csv_bytes
+    assert b"pending-demo2-event" in csv_bytes
+    assert "model_id" in headers
+    assert "run_id" in headers
+    assert "event_id" in headers
 
 
 def test_signal_board_default_sections_keep_shadow_and_pending_visible(

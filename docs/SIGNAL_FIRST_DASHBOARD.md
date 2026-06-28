@@ -98,6 +98,18 @@ Detail with `run_id`, `event_id`, `scan_id`, `ticker`, `model_id`, `direction`,
 and `status` where available. Candidate Detail uses those parameters as
 selectbox defaults.
 
+Signal Board uses friendly display identifiers in the visible table:
+
+- model: product scope, direction, model family, horizon, and short model ID;
+- generation: timestamp rounded to minute precision;
+- run: development shadow run label plus short run ID;
+- event: lifecycle label plus short event ID.
+
+The full raw `model_id`, generation timestamp, `run_id`, and `event_id` remain
+in Candidate Detail routing and CSV/XLSX exports. The friendly labels are
+display-only and do not alter scanner identity, event identity, model identity,
+or export audit fields.
+
 ## Signal Board Regime Cache Status
 
 Signal Board shows compact Regime KMeans Cache cards near the top status-card

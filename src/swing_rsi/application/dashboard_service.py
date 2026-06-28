@@ -382,6 +382,107 @@ def _clean_text(value: object) -> str:
     return str(value).strip()
 
 
+def _short_identifier(value: object, *, length: int) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    return text[:length]
+
+
+def _scope_label(value: object) -> str:
+    text = _clean_text(value).upper()
+    labels = {
+        "ORDINARY": "ORD",
+        "POOLED": "POOL",
+        "INVERSE": "INV",
+        "LEVERAGED_LONG": "LEV",
+        "LEVERAGED_INVERSE": "LEV INV",
+    }
+    if text in labels:
+        return labels[text]
+    return text.replace("_", " ") if text else ""
+
+
+def _direction_label(value: object) -> str:
+    text = _clean_text(value).lower()
+    if text.startswith("bull"):
+        return "Bull"
+    if text.startswith("bear"):
+        return "Bear"
+    return text.title() if text else ""
+
+
+def _family_label(value: object) -> str:
+    text = _clean_text(value).lower()
+    labels = {
+        "hist_gradient_boosting": "HGB",
+        "extra_trees": "XT",
+        "logistic_regression": "LOG",
+        "naive_base_rate": "BASE",
+    }
+    if text in labels:
+        return labels[text]
+    parts = [part for part in text.replace("-", "_").split("_") if part]
+    if not parts:
+        return ""
+    initials = "".join(part[0].upper() for part in parts)
+    return initials[:4]
+
+
+def _horizon_label(value: object) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    try:
+        horizon = int(float(text))
+    except ValueError:
+        return text
+    return f"{horizon}D"
+
+
+def _model_display(
+    *,
+    model: RegisteredModel | None,
+    row: pd.Series,
+    model_id: object,
+) -> str:
+    short_id = _short_identifier(model_id, length=7)
+    if not short_id:
+        return NOT_AVAILABLE
+    scope = _scope_label(row.get("product_class_scope") or _model_scope(model))
+    direction = _direction_label(row.get("direction") or ("" if model is None else model.direction))
+    family = _family_label(row.get("family") or ("" if model is None else model.family))
+    horizon = _horizon_label(row.get("horizon") or ("" if model is None else model.horizon))
+    prefix = " ".join(part for part in (scope, direction, family, horizon) if part)
+    return f"{prefix} · {short_id}" if prefix else short_id
+
+
+def _generation_display(value: object) -> str:
+    text = _clean_text(value)
+    if not text:
+        return NOT_AVAILABLE
+    try:
+        timestamp = pd.Timestamp(text)
+    except (TypeError, ValueError):
+        return f"Gen {_short_identifier(text, length=16)}"
+    if pd.isna(timestamp):
+        return NOT_AVAILABLE
+    return f"Gen {timestamp.strftime('%Y-%m-%d %H:%M')}"
+
+
+def _run_display(value: object) -> str:
+    short_id = _short_identifier(value, length=8)
+    return f"Dev Shadow Run · {short_id}" if short_id else NOT_AVAILABLE
+
+
+def _event_display(*, signal_status: object, event_id: object) -> str:
+    short_id = _short_identifier(event_id, length=8)
+    if not short_id:
+        return NOT_AVAILABLE
+    status = _clean_text(signal_status).replace("_", " ").lower().title()
+    return f"{status or 'Event'} · {short_id}"
+
+
 def candidate_detail_url(
     *,
     scan_id: object,
@@ -914,22 +1015,33 @@ def signal_board_frame(root: str | Path) -> pd.DataFrame:
             _event_payload_value(linked_event, "run_id"),
             row.get("run_id"),
         )
+        generation = _display_value(
+            row.get("generation_id") or ("" if model is None else model.created_at_utc)
+        )
         records.append(
             {
                 "ticker": _display_value(row.get("ticker")),
                 "direction": _display_value(row.get("direction")),
                 "scan_id": _display_value(row.get("scan_id")),
                 "run_id": _display_value(run_id),
+                "run_display": _run_display(run_id),
                 "event_id": _display_value(event_id),
+                "event_display": _event_display(
+                    signal_status=signal_status,
+                    event_id=event_id,
+                ),
                 "signal_status": signal_status,
                 "live_shadow_rejected_classification": classification,
                 "edge_status": edge_status,
                 "model_id": model_id,
+                "model_display": _model_display(model=model, row=row, model_id=model_id),
                 "scope": _display_value(row.get("product_class_scope") or _model_scope(model)),
                 "family": "" if model is None else model.family,
-                "generation": _display_value(
-                    row.get("generation_id") or ("" if model is None else model.created_at_utc)
+                "horizon": _display_value(
+                    row.get("horizon") or ("" if model is None else model.horizon)
                 ),
+                "generation": generation,
+                "generation_display": _generation_display(generation),
                 "as_of_date": _display_value(row.get("as_of_date")),
                 "entry_rule": _display_value(
                     _event_payload_value(pending, "entry_rule", "paper_entry_rule")

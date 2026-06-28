@@ -29,10 +29,10 @@ from swing_rsi.application.dashboard_service import (
 SIGNAL_COLUMNS: tuple[str, ...] = (
     "ticker",
     "direction",
-    "model_id",
-    "generation",
-    "run_id",
-    "event_id",
+    "model_display",
+    "generation_display",
+    "run_display",
+    "event_display",
     "edge_status",
     "signal_status",
     "live_shadow_rejected_classification",
@@ -100,7 +100,15 @@ def _section_frame(frame: pd.DataFrame, mask: pd.Series) -> pd.DataFrame:
 
 def _display_section(frame: pd.DataFrame) -> pd.DataFrame:
     columns = [column for column in SIGNAL_COLUMNS if column in frame.columns]
-    display = display_frame(frame[columns]).rename(columns={"Open Url": "Open"})
+    display = display_frame(frame[columns]).rename(
+        columns={
+            "Model Display": "Model",
+            "Generation Display": "Generation",
+            "Run Display": "Run",
+            "Event Display": "Event",
+            "Open Url": "Open",
+        }
+    )
     return display
 
 

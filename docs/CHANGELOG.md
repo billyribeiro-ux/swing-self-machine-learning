@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added friendly Signal Board display identifiers for models, generations, shadow runs, and events while preserving full raw IDs in Candidate Detail links and CSV/XLSX exports.
 - Fixed Regime KMeans Cache dashboard visibility after the Signal-First refactor: Signal Board now shows compact cache status cards, Developer Diagnostics keeps detailed cache metadata with CSV/XLSX exports, and page load remains read-only.
 - Added Regime KMeans Cache diagnostics to the Streamlit dashboard: Signal Board now shows compact cache status cards, Developer Diagnostics shows detailed cache metadata with CSV/XLSX exports, and `build-features` records latest-run cache telemetry under ignored `data/cache/regime/`.
 - Added Exact Expanding KMeans Regime Cache V1 for `build-features`: the feature builder now atomically caches exact per-date expanding KMeans regime labels under ignored `data/cache/regime/`, validates all frozen inputs before reuse, supports `--rebuild-regime-cache` / `SWING_RSI_REBUILD_REGIME_CACHE=1`, and reports cache status, fits avoided, fits performed, and regime runtime without changing the feature manifest.
