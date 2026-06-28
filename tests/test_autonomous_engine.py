@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
+import warnings
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from pandas.errors import PerformanceWarning
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -20,6 +23,8 @@ from swing_rsi.engine.feature_hygiene import (
     nonfinite_hygiene_policy_hash,
 )
 from swing_rsi.engine.features import (
+    _add_cross_sectional_features,
+    _symbol_features,
     build_feature_panel,
     numeric_feature_columns,
     reject_label_columns,
@@ -711,6 +716,67 @@ def test_feature_registry_covers_generated_columns_and_relationship_regime_featu
     assert feature_columns <= spec_names
     assert any(column.startswith("relationship_mutual_info_spy_sqqq") for column in feature_columns)
     assert "market_regime_cluster_expanding" in feature_columns
+
+
+def test_feature_builder_emits_no_fragmentation_warning() -> None:
+    frames = _frames()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PerformanceWarning)
+        result = build_feature_panel(frames, _universe())
+
+    frame = result.frame
+    assert len(frame) == 520 * 4
+    assert not any(str(column).startswith("label_") for column in frame.columns)
+    numeric = frame.select_dtypes(include="number")
+    assert not np.isinf(numeric.to_numpy()).any()
+    assert not numeric.drop(columns=["is_benchmark"], errors="ignore").isna().all().any()
+    labels = build_label_panel(frames, LabelConfig(horizons=(10,)))
+    modeling = frame.merge(labels, on=["Date", "symbol"], how="inner")
+    assert len(labels) == 520 * 4
+    assert len(modeling) == 520 * 4
+
+
+def test_feature_hot_paths_avoid_repeated_dataframe_insert_mutation() -> None:
+    symbol_source = inspect.getsource(_symbol_features)
+    cross_section_source = inspect.getsource(_add_cross_sectional_features)
+
+    assert ".insert(" not in symbol_source
+    assert ".insert(" not in cross_section_source
+    assert 'result["' not in symbol_source
+    assert not re.search(r"data\[[^\]]+\]\s*=(?!=)", cross_section_source)
+
+
+def test_batched_feature_builder_preserves_representative_values() -> None:
+    result = build_feature_panel(_frames(), _universe())
+    frame = result.frame
+    aapl = frame.loc[frame["symbol"] == "AAPL"].iloc[-1]
+
+    expected_values = {
+        "return_5": 0.002231568908813042,
+        "return_20": -0.06416930057336723,
+        "cci_20": -41.751053259949416,
+        "mfi_14": 50.98271001849856,
+        "plus_di_14": 8.32334889090449,
+        "minus_di_14": 14.141467296684063,
+        "adx_14": 28.28214591368054,
+        "regime_conditioned_return_20": 0.002149521571030157,
+        "relationship_corr_spy_sqqq_63": 0.2198046417958433,
+        "relative_return_vs_spy_20": -0.037132167543322825,
+        "sector_return_20": 0.040842023812473593,
+        "relative_return_vs_sector_20": -0.10501132438584082,
+    }
+    for column, expected in expected_values.items():
+        assert float(aapl[column]) == pytest.approx(expected, abs=1e-12)
+
+    assert aapl["Date"] == pd.Timestamp("2019-12-30")
+    assert aapl["symbol"] == "AAPL"
+    assert aapl["role"] == "stock"
+    assert aapl["sector"] == "technology"
+    assert aapl["sector_proxy"] == "XLK"
+    assert aapl["is_benchmark"] == 0.0
+    assert (
+        result.manifest_hash == "e0cc2fce506e6d7d97f6cdcb449ef6f911cadc5dab9e0473e73181c10975357b"
+    )
 
 
 def test_label_engine_uses_next_open_and_separates_label_columns(

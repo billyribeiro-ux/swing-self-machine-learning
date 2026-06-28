@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Batched feature-builder column construction to eliminate pandas DataFrame fragmentation warnings during `build-features` while preserving feature rows, label rows, modeling rows, feature values, column order, and the feature manifest hash.
 - Normalized dashboard/report export tables before CSV/XLSX/Arrow serialization so mixed diagnostic columns such as `Value` no longer fail with PyArrow `Expected bytes, got numpy.int64`, while genuine numeric/date columns remain typed and secrets stay redacted.
 - Fixed Signal Board default visibility so zero-live states still show shadow/paper rows, pending entries, open/closed shadow positions, and section-level row counts while rejected/research candidates stay collapsed until explicitly enabled.
 - Added row-level Signal Board links that open Candidate Detail with the matching scan ID, ticker, model ID, and direction preselected through query parameters.
