@@ -33,6 +33,7 @@ from swing_rsi.engine.registry import RegisteredModel
 from swing_rsi.engine.registry import _row_to_model as registry_row_to_model
 from swing_rsi.engine.signal_discovery import (
     load_signal_discovery_frames,
+    signal_discovery_blocked_analog_frames,
     signal_discovery_blocker_report_frames,
 )
 from swing_rsi.engine.universe import UniverseConfig, load_universe_config, universe_to_frame_rows
@@ -903,8 +904,14 @@ def _why_shadow_only(classification: str, lifecycle_status: str) -> str:
     return NOT_AVAILABLE
 
 
-def signal_discovery_generation_frames(root: str | Path) -> dict[str, pd.DataFrame]:
-    return load_signal_discovery_frames(root)
+def signal_discovery_generation_frames(
+    root: str | Path, *, include_blocked_analogs: bool = False
+) -> dict[str, pd.DataFrame]:
+    frames = load_signal_discovery_frames(root)
+    if include_blocked_analogs:
+        blocked_frames = signal_discovery_blocked_analog_frames(root)
+        frames.update(blocked_frames)
+    return frames
 
 
 def signal_discovery_summary_frame(root: str | Path) -> pd.DataFrame:
@@ -928,11 +935,52 @@ def _records_json_by_signal(frame: pd.DataFrame) -> dict[str, str]:
     return records
 
 
+def _single_record_json_by_signal(frame: pd.DataFrame) -> dict[str, str]:
+    if frame.empty or "target_signal_id" not in frame.columns:
+        return {}
+    records: dict[str, str] = {}
+    for _, row in frame.iterrows():
+        records[str(row.get("target_signal_id", ""))] = json.dumps(row.to_dict(), default=str)
+    return records
+
+
+def _blocked_analog_support_by_signal(summary: pd.DataFrame) -> dict[str, str]:
+    if summary.empty or "target_signal_id" not in summary.columns:
+        return {}
+    output: dict[str, str] = {}
+    for _, row in summary.iterrows():
+        signal_id = str(row.get("target_signal_id", ""))
+        label = _display_value(row.get("analog_support_label"))
+        count = _display_value(row.get("analog_count"))
+        average = _display_value(row.get("average_forward_return"))
+        output[signal_id] = (
+            f"{label} blocked-row analog support from {count} analogs; "
+            f"average forward return {average}; explanatory only."
+        )
+    return output
+
+
 def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
     frames = signal_discovery_generation_frames(root)
     candidates = frames.get("candidates", pd.DataFrame())
     if candidates.empty:
         return pd.DataFrame()
+    blocked_frames = signal_discovery_blocked_analog_frames(root)
+    blocked_analogs_by_signal = _records_json_by_signal(
+        blocked_frames.get("blocked_row_analogs", pd.DataFrame()).rename(
+            columns={"target_signal_id": "signal_id"}
+        )
+    )
+    blocked_summary = blocked_frames.get("blocked_row_analog_summary", pd.DataFrame())
+    blocked_summary_by_signal = _single_record_json_by_signal(blocked_summary)
+    blocked_support_by_signal = _blocked_analog_support_by_signal(blocked_summary)
+    blocked_footprint_by_signal = (
+        blocked_summary.set_index("target_signal_id")["analog_footprint_summary"]
+        .astype(str)
+        .to_dict()
+        if not blocked_summary.empty and "target_signal_id" in blocked_summary.columns
+        else {}
+    )
     analogs_by_signal = _records_json_by_signal(frames.get("historical_analogs", pd.DataFrame()))
     evidence_by_signal = _records_json_by_signal(frames.get("footprint_evidence", pd.DataFrame()))
     rows: list[dict[str, object]] = []
@@ -941,7 +989,17 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
         decision = _clean_text(row.get("decision"))
         candidate_status = _clean_text(row.get("candidate_status")) or RESEARCH_ONLY
         historical_analogs = analogs_by_signal.get(
+            signal_id,
+            blocked_analogs_by_signal.get(
+                signal_id,
+                _display_value(row.get("historical_analog_support")),
+            ),
+        )
+        analog_support = blocked_support_by_signal.get(
             signal_id, _display_value(row.get("historical_analog_support"))
+        )
+        footprint_summary = blocked_footprint_by_signal.get(
+            signal_id, _display_value(row.get("footprint_summary"))
         )
         rows.append(
             {
@@ -982,9 +1040,10 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
                 "top_divergences": _display_value(row.get("top_conflict")),
                 "top_support": _display_value(row.get("top_support")),
                 "top_conflict": _display_value(row.get("top_conflict")),
-                "historical_analog_support": _display_value(row.get("historical_analog_support")),
+                "historical_analog_support": analog_support,
+                "blocked_row_analog_summary": blocked_summary_by_signal.get(signal_id, ""),
                 "footprint_evidence_json": evidence_by_signal.get(signal_id, ""),
-                "footprint_summary": _display_value(row.get("footprint_summary")),
+                "footprint_summary": footprint_summary,
                 "rejection_reason": _display_value(
                     row.get("rejection_reason") or row.get("no_signal_reason")
                 ),

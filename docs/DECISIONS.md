@@ -1,5 +1,24 @@
 # Decision Log
 
+## 2026-06-28 — Blocked research rows get read-only historical analog diagnostics
+
+Decision: Add `blocked_row_analogs` and `blocked_row_analog_summary` as
+read-only diagnostic exports for top multi-angle signal discovery rows blocked
+by probability, target-before-stop, or OOD policy. The diagnostic reads existing
+generation artifacts and the local modeling parquet, uses each row's matching
+hypothesis feature set, excludes `label_` columns from distance calculations,
+uses only rows strictly before the target date, prefers same-product-scope
+analogs, and labels cross-scope fallback rows. Analog outcomes remain
+explanatory only and cannot change signal status, selection, thresholds, gates,
+OOD governance, labels, promotion, scanner state, paper-forward events, model
+artifacts, or SQLite state.
+
+Reason: The latest signal discovery generation selected no BUY or SELL/SHORT
+candidates, leaving selected-candidate `historical_analogs` empty even though
+high-scoring blocked research rows existed. Reviewers need similar historical
+footprints for research triage without weakening governance or creating live
+signals.
+
 ## 2026-06-28 — Discovery uses typed multi-angle signal hypotheses
 
 Decision: Add `multi_angle_signal_discovery_v1` as a separate discovery layer

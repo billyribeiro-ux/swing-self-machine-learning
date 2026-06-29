@@ -15,6 +15,21 @@ from swing_rsi.application.footprint_attribution import (
     missing_evidence_audit_frame,
 )
 
+BLOCKED_ANALOG_TABLE_COLUMNS = [
+    "analog_rank",
+    "analog_date",
+    "ticker",
+    "scope",
+    "archetype",
+    "similarity",
+    "forward_return",
+    "MFE",
+    "MAE",
+    "target_before_stop_result",
+    "same_product_scope",
+    "same_archetype",
+]
+
 
 def _json_frame(value: object) -> pd.DataFrame:
     if not isinstance(value, str) or not value.strip():
@@ -264,6 +279,41 @@ def _risk_frame(candidate: pd.Series) -> pd.DataFrame:
     return pd.DataFrame([{"risk": label, "value": str(value)} for label, value in fields])
 
 
+def _blocked_row_analog_summary_frame(candidate: pd.Series) -> pd.DataFrame:
+    raw = candidate.get("blocked_row_analog_summary", "")
+    if not isinstance(raw, str) or not raw.strip():
+        return pd.DataFrame()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return pd.DataFrame()
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    return pd.DataFrame([payload])
+
+
+def _blocked_analog_table(analogs: pd.DataFrame) -> pd.DataFrame:
+    if analogs.empty:
+        return pd.DataFrame(columns=BLOCKED_ANALOG_TABLE_COLUMNS)
+    output = analogs.copy()
+    if "ticker" not in output.columns and "symbol" in output.columns:
+        output["ticker"] = output["symbol"]
+    for column in BLOCKED_ANALOG_TABLE_COLUMNS:
+        if column not in output.columns:
+            output[column] = "Not available"
+    return output[BLOCKED_ANALOG_TABLE_COLUMNS]
+
+
+def _metric_percent(value: object) -> str:
+    try:
+        numeric = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "Not available"
+    if pd.isna(numeric):
+        return "Not available"
+    return f"{numeric:.2%}"
+
+
 def _signal_score_frame(candidate: pd.Series) -> pd.DataFrame:
     fields = (
         ("action", "Action"),
@@ -381,6 +431,7 @@ def render_page() -> None:
     checks = _checks_frame(candidate)
     attribution = _attribution_frame(candidate)
     analogs = footprint.historical_analogs
+    blocked_analog_summary = _blocked_row_analog_summary_frame(candidate)
     feature_snapshot = pd.DataFrame([candidate.to_dict()])
     risk = _risk_frame(candidate)
 
@@ -450,11 +501,53 @@ def render_page() -> None:
     streamlit.subheader("Risk")
     streamlit.dataframe(display_frame(risk), width="stretch", hide_index=True)
 
-    streamlit.subheader("Historical Analogs")
-    if analogs.empty:
-        streamlit.info("No historical analog records are available for this candidate.")
+    if not blocked_analog_summary.empty:
+        blocked_summary_row = blocked_analog_summary.iloc[0]
+        streamlit.subheader("Historical Analogs for Blocked Row")
+        streamlit.warning(
+            "Historical analogs are explanatory only and do not override model gates."
+        )
+        metric_columns = streamlit.columns(6)
+        metric_cards = [
+            ("analog count", str(blocked_summary_row.get("analog_count", "Not available"))),
+            (
+                "average forward return",
+                _metric_percent(blocked_summary_row.get("average_forward_return")),
+            ),
+            (
+                "target-before-stop hit rate",
+                _metric_percent(blocked_summary_row.get("target_before_stop_hit_rate")),
+            ),
+            ("average MFE", _metric_percent(blocked_summary_row.get("average_MFE"))),
+            ("worst MAE", _metric_percent(blocked_summary_row.get("worst_MAE"))),
+            (
+                "analog support label",
+                str(blocked_summary_row.get("analog_support_label", "Not available")),
+            ),
+        ]
+        for index, (label, value) in enumerate(metric_cards):
+            metric_columns[index].metric(label, value)
+        blocked_table = _blocked_analog_table(analogs)
+        if blocked_table.empty:
+            streamlit.info("No blocked-row analog records are available for this candidate.")
+        else:
+            streamlit.dataframe(display_frame(blocked_table), width="stretch", hide_index=True)
+        render_table_downloads(
+            blocked_table,
+            basename="candidate_detail_blocked_row_analogs",
+            label="blocked_row_analogs",
+        )
+        render_table_downloads(
+            blocked_analog_summary,
+            basename="candidate_detail_blocked_row_analog_summary",
+            label="blocked_row_analog_summary",
+        )
     else:
-        streamlit.dataframe(analogs, width="stretch", hide_index=True)
+        streamlit.subheader("Historical Analogs")
+        if analogs.empty:
+            streamlit.info("No historical analog records are available for this candidate.")
+        else:
+            streamlit.dataframe(analogs, width="stretch", hide_index=True)
     render_table_downloads(
         analogs,
         basename="candidate_detail_historical_analogs",
@@ -502,6 +595,8 @@ def render_page() -> None:
                 "supporting_evidence": footprint.supporting_evidence,
                 "conflicting_evidence": footprint.conflicting_evidence,
                 "historical_analogs": analogs,
+                "blocked_row_analogs": _blocked_analog_table(analogs),
+                "blocked_row_analog_summary": blocked_analog_summary,
                 "residual_unexplained": footprint.residual_unexplained,
                 "signal_score_breakdown": signal_score,
                 "attribution": attribution,

@@ -19,6 +19,7 @@ from swing_rsi.engine.signal_discovery import (
     export_signal_discovery_generation,
     load_signal_discovery_frames,
     run_signal_discovery,
+    signal_discovery_blocked_analog_frames,
     signal_discovery_blocker_report_frames,
 )
 
@@ -187,6 +188,173 @@ def _write_feature_data(root: Path, *, db_marker: bool = False) -> None:
     modeling.to_parquet(feature_dir / "universehash_testfeatures_modeling.parquet", index=False)
 
 
+def _write_blocked_analog_fixture(root: Path) -> None:
+    feature_dir = root / "data" / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    generation_id = "signal_discovery_20260628T193012+0000_fixture"
+    generation_dir = root / "artifacts" / "signal_discovery" / generation_id
+    generation_dir.mkdir(parents=True, exist_ok=True)
+    labels = {
+        "directional_return": "label_bull_forward_return_20",
+        "positive_return": "label_bull_positive_return_20",
+        "mfe": "label_bull_mfe_20",
+        "mae": "label_bull_mae_20",
+        "target_before_stop": "label_bull_target_before_stop_20",
+        "time_to_target": "label_bull_time_to_target_20",
+        "time_to_stop": "label_bull_time_to_stop_20",
+        "label_end_date": "label_end_date_20",
+    }
+    selected_features = ["feature_a", "feature_b", "label_bull_forward_return_20"]
+    target_payload = json.dumps({"feature_a": 0.0, "feature_b": 0.0})
+    candidates = pd.DataFrame(
+        [
+            {
+                "signal_id": "target-tza",
+                "generation_id": generation_id,
+                "as_of_date": "2026-06-26",
+                "ticker": "TZA",
+                "symbol": "TZA",
+                "direction": "Bullish",
+                "action": "NO SIGNAL",
+                "decision": "NO_SIGNAL",
+                "candidate_status": "RESEARCH_ONLY",
+                "archetype": "Sector Rotation",
+                "archetype_id": "sector_rotation",
+                "hypothesis_id": "sector_rotation_buy_20d",
+                "model_id": "sector_rotation_buy_20d:extra_trees",
+                "model_family": "extra_trees",
+                "scope": "LEVERAGED_INVERSE",
+                "product_class_scope": "LEVERAGED_INVERSE",
+                "selected_feature_values_json": target_payload,
+                "signal_score": 0.90,
+                "no_signal_reason": "target_before_stop_probability_below_threshold",
+                "rejection_reason": "",
+            },
+            {
+                "signal_id": "target-soxs",
+                "generation_id": generation_id,
+                "as_of_date": "2026-06-26",
+                "ticker": "SOXS",
+                "symbol": "SOXS",
+                "direction": "Bullish",
+                "action": "BUY",
+                "decision": "REJECTED_BY_OOD",
+                "candidate_status": "REJECTED_BY_OOD",
+                "archetype": "Sector Rotation",
+                "archetype_id": "sector_rotation",
+                "hypothesis_id": "sector_rotation_buy_20d",
+                "model_id": "sector_rotation_buy_20d:extra_trees",
+                "model_family": "extra_trees",
+                "scope": "LEVERAGED_INVERSE",
+                "product_class_scope": "LEVERAGED_INVERSE",
+                "selected_feature_values_json": json.dumps({"feature_a": 0.02, "feature_b": 0.01}),
+                "signal_score": 0.80,
+                "no_signal_reason": "",
+                "rejection_reason": "ood_feature_rate_above_limit",
+            },
+            {
+                "signal_id": "target-prob",
+                "generation_id": generation_id,
+                "as_of_date": "2026-06-26",
+                "ticker": "AAA",
+                "symbol": "AAA",
+                "direction": "Bullish",
+                "action": "NO SIGNAL",
+                "decision": "NO_SIGNAL",
+                "candidate_status": "RESEARCH_ONLY",
+                "archetype": "Sector Rotation",
+                "archetype_id": "sector_rotation",
+                "hypothesis_id": "sector_rotation_buy_20d",
+                "model_id": "sector_rotation_buy_20d:extra_trees",
+                "model_family": "extra_trees",
+                "scope": "ORDINARY",
+                "product_class_scope": "ORDINARY",
+                "selected_feature_values_json": json.dumps({"feature_a": 0.03, "feature_b": 0.02}),
+                "signal_score": 0.70,
+                "no_signal_reason": "probability_below_threshold",
+                "rejection_reason": "",
+            },
+        ]
+    )
+    hypotheses = pd.DataFrame(
+        [
+            {
+                "generation_id": generation_id,
+                "hypothesis_id": "sector_rotation_buy_20d",
+                "archetype": "Sector Rotation",
+                "direction": "BUY",
+                "horizon": 20,
+                "family": "extra_trees",
+                "status": "CANDIDATE",
+                "outcome_labels": json.dumps(labels, sort_keys=True),
+                "selected_features": json.dumps(selected_features),
+            }
+        ]
+    )
+    modeling_rows = [
+        ("2026-06-22", "TZA", "leveraged_inverse_etf", 0.01, 0.00, 0.04, 0.09, -0.02, 1),
+        ("2026-06-19", "SQQQ", "leveraged_inverse_etf", 0.30, 0.25, -0.02, 0.03, -0.05, 0),
+        ("2026-06-18", "AAA", "stock", 0.00, 0.00, 0.03, 0.06, -0.01, 1),
+        ("2026-06-17", "BBB", "stock", 0.04, 0.02, -0.01, 0.02, -0.04, 0),
+        ("2026-06-26", "TZA", "leveraged_inverse_etf", 0.00, 0.00, 0.99, 1.20, -0.90, 1),
+        ("2026-06-29", "SOXS", "leveraged_inverse_etf", 0.02, 0.01, 0.88, 1.10, -0.80, 1),
+    ]
+    modeling = pd.DataFrame(
+        [
+            {
+                "Date": date,
+                "symbol": symbol,
+                "role": role,
+                "feature_a": feature_a,
+                "feature_b": feature_b,
+                "market_regime_cluster_expanding": "fixture",
+                "label_bull_forward_return_20": forward_return,
+                "label_bull_positive_return_20": int(forward_return > 0.0),
+                "label_bull_mfe_20": mfe,
+                "label_bull_mae_20": mae,
+                "label_bull_target_before_stop_20": tbs,
+                "label_bull_time_to_target_20": 5,
+                "label_bull_time_to_stop_20": 8,
+                "label_end_date_20": "2026-07-24",
+            }
+            for (
+                date,
+                symbol,
+                role,
+                feature_a,
+                feature_b,
+                forward_return,
+                mfe,
+                mae,
+                tbs,
+            ) in modeling_rows
+        ]
+    )
+    pd.DataFrame([{"generation_id": generation_id}]).to_csv(
+        generation_dir / "summary.csv", index=False
+    )
+    hypotheses.to_csv(generation_dir / "hypotheses.csv", index=False)
+    candidates.to_csv(generation_dir / "candidates.csv", index=False)
+    candidates.loc[candidates["decision"].eq("NO_SIGNAL")].to_csv(
+        generation_dir / "no_signal.csv", index=False
+    )
+    candidates.loc[candidates["decision"].str.startswith("REJECTED")].to_csv(
+        generation_dir / "rejected.csv", index=False
+    )
+    pd.DataFrame().to_csv(generation_dir / "selected_candidates.csv", index=False)
+    pd.DataFrame().to_csv(generation_dir / "footprint_evidence.csv", index=False)
+    pd.DataFrame().to_csv(generation_dir / "historical_analogs.csv", index=False)
+    pd.DataFrame().to_csv(generation_dir / "score_components.csv", index=False)
+    pd.DataFrame().to_csv(generation_dir / "gate_results.csv", index=False)
+    (generation_dir / "metadata.json").write_text(
+        json.dumps({"generation_id": generation_id}, sort_keys=True), encoding="utf-8"
+    )
+    (generation_dir.parent / "latest.json").write_text(
+        json.dumps({"generation_id": generation_id}, sort_keys=True), encoding="utf-8"
+    )
+    modeling.to_parquet(feature_dir / "fixturehash_blockedanalog_modeling.parquet", index=False)
+
+
 @pytest.fixture()
 def signal_discovery_root(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "dev"
@@ -293,6 +461,7 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
     written = export_signal_discovery_generation(root, generation="latest", output=output_dir)
     written_names = {path.name for path in written}
     frames = load_signal_discovery_frames(root)
+    blocked_frames = signal_discovery_blocked_analog_frames(root)
     workbook = openpyxl.load_workbook(
         BytesIO(
             to_xlsx_bytes(
@@ -304,12 +473,16 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
                     "rejected_rows": frames["rejected"],
                     "footprint_evidence": frames["footprint_evidence"],
                     "historical_analogs": frames["historical_analogs"],
+                    "blocked_row_analogs": blocked_frames["blocked_row_analogs"],
+                    "blocked_row_analog_summary": blocked_frames["blocked_row_analog_summary"],
                 }
             )
         )
     )
 
     assert "candidates.csv" in written_names
+    assert "blocked_row_analogs.csv" in written_names
+    assert "blocked_row_analog_summary.csv" in written_names
     assert "metadata.json" in written_names
     assert {
         "signal_discovery_summary",
@@ -319,6 +492,8 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
         "rejected_rows",
         "footprint_evidence",
         "historical_analogs",
+        "blocked_row_analogs",
+        "blocked_row_analog_summary",
     }.issubset(set(workbook.sheetnames))
 
 
@@ -371,6 +546,83 @@ def test_signal_discovery_blocker_report_summarizes_reasons_and_groups(
         "by_archetype",
         "by_ticker",
         "by_scope",
+    }.issubset(set(workbook.sheetnames))
+
+
+def test_blocked_row_analogs_are_chronological_scope_labeled_and_explanatory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "blocked"
+    _write_blocked_analog_fixture(root)
+    artifact = root / "artifacts" / "models" / "model.joblib"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("do-not-touch", encoding="utf-8")
+    operational = tmp_path / "operational"
+    operational.mkdir()
+    marker = operational / "state-marker.txt"
+    marker.write_text("operational-untouched", encoding="utf-8")
+
+    def fail_download(*_: object, **__: object) -> None:
+        raise AssertionError("Blocked-row analog diagnostics attempted an FMP request")
+
+    monkeypatch.setattr("swing_rsi.data.loader.download_daily", fail_download)
+    before_artifact = artifact.read_text(encoding="utf-8")
+    before_marker = marker.read_text(encoding="utf-8")
+
+    frames = signal_discovery_blocked_analog_frames(root, analog_count=4)
+    analogs = frames["blocked_row_analogs"]
+    summary = frames["blocked_row_analog_summary"]
+    tza_analogs = analogs.loc[analogs["target_ticker"].eq("TZA")]
+    tza_summary = summary.loc[summary["target_ticker"].eq("TZA")].iloc[0]
+
+    assert len(tza_analogs) == 4
+    assert pd.to_datetime(tza_analogs["analog_date"]).lt(pd.Timestamp("2026-06-26")).all()
+    assert "2026-06-26" not in set(tza_analogs["analog_date"].astype(str))
+    assert "2026-06-29" not in set(analogs["analog_date"].astype(str))
+    assert tza_analogs.iloc[0]["analog_ticker"] == "TZA"
+    assert tza_analogs.head(2)["same_product_scope"].eq(True).all()
+    assert "cross_scope_fallback" in set(tza_analogs["analog_pool"])
+    assert tza_analogs["outcome_labels_used_for_explanation_only"].eq(True).all()
+    assert tza_summary["same_scope_analog_count"] == 2
+    assert math.isclose(float(tza_summary["average_forward_return"]), 0.01)
+    assert math.isclose(float(tza_summary["average_MFE"]), 0.05)
+    assert math.isclose(float(tza_summary["average_MAE"]), -0.03)
+    assert math.isclose(float(tza_summary["target_before_stop_hit_rate"]), 0.5)
+    assert tza_summary["analog_support_label"] == "MIXED"
+    assert "explanatory only" in str(tza_summary["analog_footprint_summary"])
+    assert set(summary.loc[summary["target_ticker"].eq("SOXS"), "key_caution"]) == {
+        "OOD target row"
+    }
+    assert set(summary["target_status"]) <= {"RESEARCH_ONLY", "REJECTED_BY_OOD"}
+    assert artifact.read_text(encoding="utf-8") == before_artifact
+    assert marker.read_text(encoding="utf-8") == before_marker
+
+
+def test_blocked_row_analog_exports_include_csv_and_workbook_sheets(tmp_path: Path) -> None:
+    root = tmp_path / "blocked_export"
+    _write_blocked_analog_fixture(root)
+
+    output = tmp_path / "export"
+    written = export_signal_discovery_generation(root, generation="latest", output=output)
+    names = {path.name for path in written}
+    frames = signal_discovery_blocked_analog_frames(root)
+    workbook = openpyxl.load_workbook(
+        BytesIO(
+            to_xlsx_bytes(
+                {
+                    "blocked_row_analogs": frames["blocked_row_analogs"],
+                    "blocked_row_analog_summary": frames["blocked_row_analog_summary"],
+                }
+            )
+        )
+    )
+
+    assert "blocked_row_analogs.csv" in names
+    assert "blocked_row_analog_summary.csv" in names
+    assert {
+        "blocked_row_analogs",
+        "blocked_row_analog_summary",
     }.issubset(set(workbook.sheetnames))
 
 

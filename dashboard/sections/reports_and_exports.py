@@ -238,7 +238,7 @@ def render_page() -> None:
         )
         streamlit.success(f"Saved {output.relative_to(root)}")
 
-    discovery_frames = signal_discovery_generation_frames(root)
+    discovery_frames = signal_discovery_generation_frames(root, include_blocked_analogs=True)
     discovery_sheets = {
         name: frame
         for name, frame in discovery_frames.items()
@@ -253,6 +253,8 @@ def render_page() -> None:
             "rejected",
             "footprint_evidence",
             "historical_analogs",
+            "blocked_row_analogs",
+            "blocked_row_analog_summary",
             "score_components",
             "gate_results",
         }
