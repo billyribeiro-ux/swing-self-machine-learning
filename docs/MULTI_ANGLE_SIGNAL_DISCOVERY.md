@@ -141,6 +141,15 @@ analog support is explanatory only and cannot change row status, gates,
 thresholds, OOD governance, model promotion, paper-forward events, or scanner
 selection.
 
+Historical Analog Robustness Guard V1 adds depth-aware diagnostics for blocked
+rows. It evaluates top 10, top 25, and top 50 analog sets, persists
+concentration and tail-risk caution flags, and classifies evidence as
+`ROBUST_SUPPORT`, `SUPPORTIVE_BUT_CONCENTRATED`, `MIXED_SUPPORT`,
+`WEAK_SUPPORT`, `INSUFFICIENT_ANALOGS`, `CONCENTRATION_ARTIFACT`, or
+`DECAYS_WITH_DEPTH`. A strong top-10 cluster no longer receives robust-support
+language when support decays with depth or depends on one ticker, year, regime,
+scope, or local event cluster.
+
 ## Artifacts
 
 Generation artifacts are written under ignored local paths:
@@ -164,6 +173,10 @@ Core files:
 - `historical_analogs.csv`
 - `blocked_row_analogs.csv` when exported
 - `blocked_row_analog_summary.csv` when exported
+- `analog_robustness.csv` when exported
+- `analog_robustness_summary.csv` when exported
+- `analog_depth_comparison.csv` when exported
+- `analog_caution_flags.csv` when exported
 - `score_components.csv`
 - `gate_results.csv`
 
@@ -215,9 +228,15 @@ Signal Board now supports discovery rows with:
 - Top Support
 - Top Conflict
 - Historical Analog Support
+- Analog Status
 - Edge Status
 - Candidate Status
 - Next Required Event
+
+Candidate Detail keeps the original historical analog table and adds blocked-row
+robustness cards for top-10/top-25/top-50 support, robust support label, caution
+flags, concentration summary, depth-decay explanation, and the explanatory-only
+warning.
 
 Candidate Detail shows the signal score breakdown and carries full raw IDs into
 detail links and exports.

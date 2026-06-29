@@ -1,5 +1,26 @@
 # Decision Log
 
+## 2026-06-29 — Historical analog support must be depth-robust
+
+Decision: Add `historical_analog_robustness_v1` as a read-only guard over
+blocked-row historical analog diagnostics. The guard summarizes analog evidence
+at top 10, top 25, and top 50, persists concentration and risk caution flags,
+and classifies support as `ROBUST_SUPPORT`, `SUPPORTIVE_BUT_CONCENTRATED`,
+`MIXED_SUPPORT`, `WEAK_SUPPORT`, `INSUFFICIENT_ANALOGS`,
+`CONCENTRATION_ARTIFACT`, or `DECAYS_WITH_DEPTH`. A top-10 analog cluster is not
+allowed to be described as robust when support decays with depth or depends on
+one ticker, year, regime, scope, or local event cluster. The guard cannot change
+signal status, selection, thresholds, gates, OOD governance, labels, scanner
+state, model artifacts, SQLite state, paper-forward events, or promotion
+eligibility.
+
+Reason: The SOXS 10-day SELL rows in generation
+`signal_discovery_20260628T193012+0000_cf2753a58c47` looked supportive at top
+10, but diagnosis showed the analogs were entirely SOXS from 2026 and degraded
+to mixed support at top 25 and top 50. Research diagnostics need to surface that
+concentration artifact directly instead of overstating clustered nearest-neighbor
+evidence.
+
 ## 2026-06-28 — Blocked research rows get read-only historical analog diagnostics
 
 Decision: Add `blocked_row_analogs` and `blocked_row_analog_summary` as
