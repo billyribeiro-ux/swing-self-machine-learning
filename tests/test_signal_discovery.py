@@ -17,8 +17,10 @@ from swing_rsi.engine.signal_discovery import (
     default_hypothesis_registry,
     export_signal_discovery_blocker_report,
     export_signal_discovery_generation,
+    historical_analog_robustness_frames_from_analogs,
     load_signal_discovery_frames,
     run_signal_discovery,
+    signal_discovery_analog_robustness_frames,
     signal_discovery_blocked_analog_frames,
     signal_discovery_blocker_report_frames,
 )
@@ -355,6 +357,141 @@ def _write_blocked_analog_fixture(root: Path) -> None:
     modeling.to_parquet(feature_dir / "fixturehash_blockedanalog_modeling.parquet", index=False)
 
 
+def _analog_row(
+    rank: int,
+    *,
+    target: str = "target-robust",
+    ticker: str,
+    year: int,
+    day: int,
+    regime: str,
+    forward_return: float,
+    tbs: bool,
+    mae: float = -0.03,
+    same_symbol: bool = False,
+) -> dict[str, object]:
+    return {
+        "target_row_id": target,
+        "target_signal_id": target,
+        "generation_id": "robustness-fixture",
+        "target_as_of_date": "2026-06-26",
+        "target_ticker": "SOXS",
+        "target_direction": "Bearish",
+        "target_archetype": "Breakout / Breakdown",
+        "target_action": "NO SIGNAL",
+        "target_status": "RESEARCH_ONLY",
+        "target_score": 0.70,
+        "target_blocker_reason": "target_before_stop_probability_below_threshold",
+        "target_hypothesis_id": "breakdown_sell_10d",
+        "target_model_id": "breakdown_sell_10d:extra_trees",
+        "target_product_scope": "LEVERAGED_INVERSE",
+        "target_selection_reason": "top_bearish",
+        "analog_rank": rank,
+        "analog_date": f"{year}-01-{day:02d}",
+        "analog_ticker": ticker,
+        "analog_scope": "LEVERAGED_INVERSE",
+        "analog_direction": "Bearish",
+        "analog_archetype": "Breakout / Breakdown",
+        "analog_pool": "same_scope",
+        "similarity_score": max(0.05, 0.90 - rank * 0.01),
+        "distance_score": float(rank),
+        "same_symbol": same_symbol,
+        "same_product_scope": True,
+        "same_archetype": True,
+        "same_direction": True,
+        "market_regime": regime,
+        "forward_return": forward_return,
+        "MFE": max(forward_return + 0.05, 0.01),
+        "MAE": mae,
+        "target_before_stop_result": "target before stop" if tbs else "stop before target",
+        "analog_would_have_passed_current_thresholds": "not_available_existing_artifacts_only",
+        "analog_rejection_reason": "not_available_existing_artifacts_only",
+        "outcome_labels_used_for_explanation_only": True,
+    }
+
+
+def _concentrated_decay_analogs() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for rank in range(1, 11):
+        rows.append(
+            _analog_row(
+                rank,
+                ticker="SOXS",
+                year=2026,
+                day=rank,
+                regime="event_cluster",
+                forward_return=0.12,
+                tbs=True,
+                same_symbol=True,
+            )
+        )
+    for rank in range(11, 51):
+        rows.append(
+            _analog_row(
+                rank,
+                ticker="SOXS" if rank <= 48 else "TZA",
+                year=2025 if rank <= 30 else 2024,
+                day=((rank - 1) % 28) + 1,
+                regime="other_regime",
+                forward_return=-0.08 if rank % 2 else 0.02,
+                tbs=False,
+                mae=-0.25 if rank == 25 else -0.04,
+                same_symbol=rank <= 48,
+            )
+        )
+    return pd.DataFrame(rows)
+
+
+def _diversified_supportive_analogs() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for rank in range(1, 51):
+        rows.append(
+            _analog_row(
+                rank,
+                ticker=f"SYM{rank % 12}",
+                year=2017 + (rank % 8),
+                day=((rank - 1) % 28) + 1,
+                regime=f"regime_{rank % 4}",
+                forward_return=0.04 + (rank % 3) * 0.002,
+                tbs=rank % 4 != 0,
+                mae=-0.025,
+                same_symbol=False,
+            )
+        )
+    return pd.DataFrame(rows)
+
+
+def _diversified_decay_analogs() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for rank in range(1, 11):
+        rows.append(
+            _analog_row(
+                rank,
+                ticker=f"SYM{rank}",
+                year=2016 + rank,
+                day=rank,
+                regime=f"regime_{rank % 5}",
+                forward_return=0.08,
+                tbs=True,
+                same_symbol=False,
+            )
+        )
+    for rank in range(11, 51):
+        rows.append(
+            _analog_row(
+                rank,
+                ticker=f"SYM{rank % 20}",
+                year=2017 + (rank % 8),
+                day=((rank - 1) % 28) + 1,
+                regime=f"regime_{rank % 5}",
+                forward_return=-0.05,
+                tbs=False,
+                same_symbol=False,
+            )
+        )
+    return pd.DataFrame(rows)
+
+
 @pytest.fixture()
 def signal_discovery_root(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "dev"
@@ -383,6 +520,57 @@ def test_hypothesis_registry_loads_required_archetypes_without_privileged_rsi() 
         assert spec.validation_policy["feature_screen_split"] == "training_only"
         assert spec.validation_policy["calibration_split"] == "calibration_only"
         assert spec.validation_policy["holdout_usage"] == "evaluation_only"
+
+
+def test_analog_robustness_classifies_concentrated_top10_decay_as_artifact() -> None:
+    frames = historical_analog_robustness_frames_from_analogs(_concentrated_decay_analogs())
+    robustness = frames["analog_robustness"].iloc[0]
+    flags = set(frames["analog_caution_flags"]["caution_flag"].astype(str))
+
+    assert robustness["original_analog_support_label"] == "SUPPORTIVE"
+    assert robustness["robust_analog_support_label"] == "CONCENTRATION_ARTIFACT"
+    assert bool(robustness["analog_evidence_too_concentrated"]) is True
+    assert "same_symbol_concentration" in flags
+    assert "same_year_concentration" in flags
+    assert "analogs_mostly_same_event_cluster" in flags
+    assert "support_decays_top25" in flags
+    assert "support_decays_top50" in flags
+    assert "tbs_support_decay" in flags
+    assert "high_mae_tail_risk" in flags
+
+
+def test_analog_robustness_classifies_diversified_depth_support_as_robust() -> None:
+    frames = historical_analog_robustness_frames_from_analogs(_diversified_supportive_analogs())
+    robustness = frames["analog_robustness"].iloc[0]
+    flags = set(frames["analog_caution_flags"]["caution_flag"].astype(str))
+
+    assert robustness["original_analog_support_label"] == "SUPPORTIVE"
+    assert robustness["robust_analog_support_label"] == "ROBUST_SUPPORT"
+    assert bool(robustness["analog_evidence_usable_for_research"]) is True
+    assert "same_symbol_concentration" not in flags
+    assert "same_year_concentration" not in flags
+
+
+def test_analog_robustness_classifies_diversified_depth_decay() -> None:
+    frames = historical_analog_robustness_frames_from_analogs(_diversified_decay_analogs())
+    robustness = frames["analog_robustness"].iloc[0]
+    flags = set(frames["analog_caution_flags"]["caution_flag"].astype(str))
+
+    assert robustness["original_analog_support_label"] == "SUPPORTIVE"
+    assert robustness["robust_analog_support_label"] == "DECAYS_WITH_DEPTH"
+    assert "support_decays_top25" in flags
+    assert "support_decays_top50" in flags
+    assert "same_symbol_concentration" not in flags
+
+
+def test_analog_robustness_low_count_is_insufficient() -> None:
+    frame = _diversified_supportive_analogs().head(5)
+    frames = historical_analog_robustness_frames_from_analogs(frame)
+    robustness = frames["analog_robustness"].iloc[0]
+    flags = set(frames["analog_caution_flags"]["caution_flag"].astype(str))
+
+    assert robustness["robust_analog_support_label"] == "INSUFFICIENT_ANALOGS"
+    assert "low_analog_count" in flags
 
 
 def test_signal_discovery_persists_candidates_rejections_scores_and_analogs(
@@ -462,6 +650,7 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
     written_names = {path.name for path in written}
     frames = load_signal_discovery_frames(root)
     blocked_frames = signal_discovery_blocked_analog_frames(root)
+    robustness_frames = signal_discovery_analog_robustness_frames(root)
     workbook = openpyxl.load_workbook(
         BytesIO(
             to_xlsx_bytes(
@@ -475,6 +664,10 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
                     "historical_analogs": frames["historical_analogs"],
                     "blocked_row_analogs": blocked_frames["blocked_row_analogs"],
                     "blocked_row_analog_summary": blocked_frames["blocked_row_analog_summary"],
+                    "analog_robustness": robustness_frames["analog_robustness"],
+                    "analog_robustness_summary": robustness_frames["analog_robustness_summary"],
+                    "analog_depth_comparison": robustness_frames["analog_depth_comparison"],
+                    "analog_caution_flags": robustness_frames["analog_caution_flags"],
                 }
             )
         )
@@ -483,6 +676,10 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
     assert "candidates.csv" in written_names
     assert "blocked_row_analogs.csv" in written_names
     assert "blocked_row_analog_summary.csv" in written_names
+    assert "analog_robustness.csv" in written_names
+    assert "analog_robustness_summary.csv" in written_names
+    assert "analog_depth_comparison.csv" in written_names
+    assert "analog_caution_flags.csv" in written_names
     assert "metadata.json" in written_names
     assert {
         "signal_discovery_summary",
@@ -494,6 +691,10 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
         "historical_analogs",
         "blocked_row_analogs",
         "blocked_row_analog_summary",
+        "analog_robustness",
+        "analog_robustness_summary",
+        "analog_depth_comparison",
+        "analog_caution_flags",
     }.issubset(set(workbook.sheetnames))
 
 
@@ -571,8 +772,11 @@ def test_blocked_row_analogs_are_chronological_scope_labeled_and_explanatory(
     before_marker = marker.read_text(encoding="utf-8")
 
     frames = signal_discovery_blocked_analog_frames(root, analog_count=4)
+    robustness_frames = signal_discovery_analog_robustness_frames(root)
     analogs = frames["blocked_row_analogs"]
     summary = frames["blocked_row_analog_summary"]
+    robustness = robustness_frames["analog_robustness"]
+    depth = robustness_frames["analog_depth_comparison"]
     tza_analogs = analogs.loc[analogs["target_ticker"].eq("TZA")]
     tza_summary = summary.loc[summary["target_ticker"].eq("TZA")].iloc[0]
 
@@ -595,6 +799,20 @@ def test_blocked_row_analogs_are_chronological_scope_labeled_and_explanatory(
         "OOD target row"
     }
     assert set(summary["target_status"]) <= {"RESEARCH_ONLY", "REJECTED_BY_OOD"}
+    assert set(robustness["target_status"]) <= {"RESEARCH_ONLY", "REJECTED_BY_OOD"}
+    assert set(robustness["robust_analog_support_label"]).issubset(
+        {
+            "INSUFFICIENT_ANALOGS",
+            "MIXED_SUPPORT",
+            "CONCENTRATION_ARTIFACT",
+            "DECAYS_WITH_DEPTH",
+            "ROBUST_SUPPORT",
+            "SUPPORTIVE_BUT_CONCENTRATED",
+            "WEAK_SUPPORT",
+        }
+    )
+    assert pd.to_datetime(analogs["analog_date"]).lt(pd.Timestamp("2026-06-26")).all()
+    assert depth["target_signal_id"].isin(set(robustness["target_signal_id"])).all()
     assert artifact.read_text(encoding="utf-8") == before_artifact
     assert marker.read_text(encoding="utf-8") == before_marker
 
@@ -607,12 +825,17 @@ def test_blocked_row_analog_exports_include_csv_and_workbook_sheets(tmp_path: Pa
     written = export_signal_discovery_generation(root, generation="latest", output=output)
     names = {path.name for path in written}
     frames = signal_discovery_blocked_analog_frames(root)
+    robustness_frames = signal_discovery_analog_robustness_frames(root)
     workbook = openpyxl.load_workbook(
         BytesIO(
             to_xlsx_bytes(
                 {
                     "blocked_row_analogs": frames["blocked_row_analogs"],
                     "blocked_row_analog_summary": frames["blocked_row_analog_summary"],
+                    "analog_robustness": robustness_frames["analog_robustness"],
+                    "analog_robustness_summary": robustness_frames["analog_robustness_summary"],
+                    "analog_depth_comparison": robustness_frames["analog_depth_comparison"],
+                    "analog_caution_flags": robustness_frames["analog_caution_flags"],
                 }
             )
         )
@@ -620,9 +843,17 @@ def test_blocked_row_analog_exports_include_csv_and_workbook_sheets(tmp_path: Pa
 
     assert "blocked_row_analogs.csv" in names
     assert "blocked_row_analog_summary.csv" in names
+    assert "analog_robustness.csv" in names
+    assert "analog_robustness_summary.csv" in names
+    assert "analog_depth_comparison.csv" in names
+    assert "analog_caution_flags.csv" in names
     assert {
         "blocked_row_analogs",
         "blocked_row_analog_summary",
+        "analog_robustness",
+        "analog_robustness_summary",
+        "analog_depth_comparison",
+        "analog_caution_flags",
     }.issubset(set(workbook.sheetnames))
 
 
