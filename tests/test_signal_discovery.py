@@ -11,6 +11,8 @@ import pytest
 
 from swing_rsi.application.dashboard_exports import to_xlsx_bytes
 from swing_rsi.engine.signal_discovery import (
+    CALIBRATION_DIAGNOSTIC_THRESHOLDS,
+    MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
     SIGNAL_DISCOVERY_GENERATION_TYPE,
     SIGNAL_DISCOVERY_SCHEMA_VERSION,
     default_archetype_registry,
@@ -579,6 +581,10 @@ def test_signal_discovery_persists_candidates_rejections_scores_and_analogs(
 ) -> None:
     root, config = signal_discovery_root
     before_db = (root / "state" / "engine.sqlite3").read_bytes()
+    model_artifact = root / "artifacts" / "models" / "model.joblib"
+    model_artifact.parent.mkdir(parents=True, exist_ok=True)
+    model_artifact.write_text("model-artifact-do-not-touch", encoding="utf-8")
+    before_model_artifact = model_artifact.read_text(encoding="utf-8")
 
     def fail_download(*_: object, **__: object) -> None:
         raise AssertionError("Signal discovery attempted an FMP request")
@@ -611,12 +617,91 @@ def test_signal_discovery_persists_candidates_rejections_scores_and_analogs(
     assert not frames["footprint_evidence"].empty
     assert "Top conflict" in set(frames["footprint_evidence"]["Category"])
     assert "Residual / unexplained" in set(frames["footprint_evidence"]["Category"])
+    calibration_summary = frames["calibration_summary"]
+    distributions = frames["probability_distributions"]
+    thresholds = frames["diagnostic_thresholds"]
+    buckets = frames["probability_buckets"]
+    row_level = frames["row_level_calibration_audit"]
+    manifest = frames["calibration_artifact_manifest"]
+    assert not calibration_summary.empty
+    assert not distributions.empty
+    assert not thresholds.empty
+    assert not buckets.empty
+    assert not row_level.empty
+    assert not manifest.empty
+    assert (
+        calibration_summary["schema_version"].eq(MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION).all()
+    )
+    evaluated = set(
+        frames["hypotheses"]
+        .loc[
+            frames["hypotheses"]["family"].astype(str).str.len().gt(0), ["hypothesis_id", "family"]
+        ]
+        .itertuples(index=False, name=None)
+    )
+    audited = set(
+        calibration_summary.loc[
+            calibration_summary["model_family"].astype(str).str.len().gt(0),
+            ["hypothesis_id", "model_family"],
+        ].itertuples(index=False, name=None)
+    )
+    assert evaluated.issubset(audited)
+    assert {"raw_tbs", "calibrated_tbs"}.issubset(set(distributions["probability_type"]))
+    assert {
+        "count_ge_030",
+        "count_ge_035",
+        "count_ge_040",
+        "count_ge_045",
+        "count_ge_050",
+        "count_ge_055",
+        "count_ge_060",
+    }.issubset(distributions.columns)
+    assert set(CALIBRATION_DIAGNOSTIC_THRESHOLDS).issubset(set(thresholds["threshold"].round(2)))
+    assert thresholds["diagnostic_only"].eq(True).all()
+    assert thresholds["production_target_before_stop_threshold"].eq(0.10).all()
+    assert set(row_level["schema_version"]) == {MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION}
+    assert "TBS_label" in row_level.columns
+    assert row_level["calibration_artifact_hash"].astype(str).str.len().gt(0).all()
+    assert (
+        pd.to_datetime(row_level["Date"])
+        .le(pd.to_datetime(calibration_summary["calibration_end_date"]).max())
+        .all()
+    )
+    assert (
+        pd.to_datetime(row_level["Date"])
+        .lt(pd.to_datetime(frames["candidates"]["as_of_date"]).max())
+        .all()
+    )
     selected_feature_payloads = frames["hypotheses"]["selected_features"].dropna()
     assert not selected_feature_payloads.empty
     for payload in selected_feature_payloads:
         selected = json.loads(payload)
         assert not any(str(feature).startswith("label_") for feature in selected)
     assert (root / "state" / "engine.sqlite3").read_bytes() == before_db
+    assert model_artifact.read_text(encoding="utf-8") == before_model_artifact
+
+
+def test_signal_discovery_persists_insufficient_calibration_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "insufficient-calibration"
+    _write_universe(root)
+    _write_feature_data(root)
+    config = _write_config(root)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("minimum_training_samples: 120", "minimum_training_samples: 20")
+    text = text.replace("minimum_calibration_samples: 24", "minimum_calibration_samples: 200")
+    text = text.replace("minimum_holdout_samples: 24", "minimum_holdout_samples: 20")
+    config.write_text(text, encoding="utf-8")
+
+    run_signal_discovery(root, config_path=config)
+    frames = load_signal_discovery_frames(root)
+    summary = frames["calibration_summary"]
+
+    assert not summary.empty
+    assert set(summary["status"]) == {"INSUFFICIENT_CALIBRATION_EVIDENCE"}
+    assert set(summary["reason"]) == {"minimum_split_samples_failed"}
+    assert summary["calibration_row_count"].lt(200).all()
+    assert frames["probability_distributions"].empty
+    assert frames["row_level_calibration_audit"].empty
 
 
 def test_signal_discovery_persists_no_signal_rows(tmp_path: Path) -> None:
@@ -668,6 +753,12 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
                     "analog_robustness_summary": robustness_frames["analog_robustness_summary"],
                     "analog_depth_comparison": robustness_frames["analog_depth_comparison"],
                     "analog_caution_flags": robustness_frames["analog_caution_flags"],
+                    "calibration_summary": frames["calibration_summary"],
+                    "probability_distributions": frames["probability_distributions"],
+                    "probability_buckets": frames["probability_buckets"],
+                    "diagnostic_thresholds": frames["diagnostic_thresholds"],
+                    "row_level_calibration_audit": frames["row_level_calibration_audit"],
+                    "calibration_artifact_manifest": frames["calibration_artifact_manifest"],
                 }
             )
         )
@@ -680,6 +771,14 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
     assert "analog_robustness_summary.csv" in written_names
     assert "analog_depth_comparison.csv" in written_names
     assert "analog_caution_flags.csv" in written_names
+    assert "calibration_summary.csv" in written_names
+    assert "calibration_summary.json" in written_names
+    assert "probability_distributions.csv" in written_names
+    assert "probability_buckets.csv" in written_names
+    assert "diagnostic_thresholds.csv" in written_names
+    assert "row_level_calibration_audit.csv" in written_names
+    assert "row_level_calibration_audit.parquet" in written_names
+    assert "calibration_artifact_manifest.json" in written_names
     assert "metadata.json" in written_names
     assert {
         "signal_discovery_summary",
@@ -695,6 +794,12 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
         "analog_robustness_summary",
         "analog_depth_comparison",
         "analog_caution_flags",
+        "calibration_summary",
+        "probability_distributions",
+        "probability_buckets",
+        "diagnostic_thresholds",
+        "row_level_calibration_audit",
+        "calibration_artifact_manifest",
     }.issubset(set(workbook.sheetnames))
 
 
