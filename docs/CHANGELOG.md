@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Multi-Angle Calibration Audit Artifacts V1 for Signal Discovery, persisting calibration-only raw/calibrated TBS probability distributions, diagnostic threshold tables, probability buckets, row-level calibration audits, explicit insufficient-evidence rows, generation metadata hashes, Candidate Detail diagnostics, Reports/Exports downloads, and tests for split isolation, diagnostic-only thresholds, no FMP calls, no SQLite mutation, no model-artifact mutation, and operational immutability.
 - Added Historical Analog Robustness Guard V1 for blocked Signal Discovery rows, with top-10/top-25/top-50 depth comparisons, robust support labels, concentration and tail-risk caution flags, Candidate Detail and Signal Board display, CSV/XLSX exports, and tests proving concentration-artifact, depth-decay, robust-support, immutability, and no-FMP behavior.
 - Added read-only blocked-row historical analog diagnostics for top Signal Discovery blockers, with same-scope analog preference, cross-scope fallback labeling, explanatory-only summary stats, Candidate Detail display, CSV/XLSX exports, and tests proving chronology, label exclusion, no FMP calls, no artifact mutation, and status immutability.
 - Added Candidate Detail links to highest-scoring Signal Discovery blocker rows by carrying raw signal/model identifiers through the blocker report and using the existing Candidate Detail URL contract.

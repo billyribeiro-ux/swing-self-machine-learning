@@ -179,8 +179,23 @@ Core files:
 - `analog_caution_flags.csv` when exported
 - `score_components.csv`
 - `gate_results.csv`
+- `calibration_summary.csv`
+- `calibration_summary.json`
+- `probability_distributions.csv`
+- `probability_buckets.csv`
+- `diagnostic_thresholds.csv`
+- `row_level_calibration_audit.parquet`
+- `row_level_calibration_audit.csv`
+- `calibration_artifact_manifest.json`
 
 Parquet copies are also written for generation-local artifact use.
+
+Calibration audit artifacts use schema
+`multi_angle_calibration_audit_v1`. They are created from the chronological
+calibration slice only and are diagnostic only. They do not change target-before-
+stop thresholds, gates, OOD governance, signal status, model promotion, scanner
+state, paper-forward events, or final-holdout state. See
+`docs/MULTI_ANGLE_CALIBRATION_AUDIT.md`.
 
 ## CLI
 
@@ -233,10 +248,12 @@ Signal Board now supports discovery rows with:
 - Candidate Status
 - Next Required Event
 
-Candidate Detail keeps the original historical analog table and adds blocked-row
+Candidate Detail keeps the original historical analog table, adds blocked-row
 robustness cards for top-10/top-25/top-50 support, robust support label, caution
-flags, concentration summary, depth-decay explanation, and the explanatory-only
-warning.
+flags, concentration summary, depth-decay explanation, and adds calibration
+diagnostics for model TBS probability, same-archetype/scope calibration base
+rates, diagnostic thresholds, and probability buckets. Calibration sections are
+explicitly labeled diagnostic only.
 
 Candidate Detail shows the signal score breakdown and carries full raw IDs into
 detail links and exports.
@@ -244,7 +261,8 @@ detail links and exports.
 Reports and Exports can create a Signal Discovery Generation workbook with
 summary, metadata, hypotheses, candidates, selected candidates, no-signal rows,
 rejected rows, footprint evidence, historical analogs, blocked-row analogs,
-blocked-row analog summaries, score components, and gate results.
+blocked-row analog summaries, score components, gate results, and calibration
+audit frames.
 
 Reports and Exports can also create a Signal Discovery Blockers workbook with:
 
