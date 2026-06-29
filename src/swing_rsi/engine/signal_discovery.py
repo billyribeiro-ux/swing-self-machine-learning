@@ -20,7 +20,13 @@ from sklearn.ensemble import (
 )
 from sklearn.impute import SimpleImputer
 from sklearn.isotonic import IsotonicRegression
-from sklearn.metrics import brier_score_loss, mean_absolute_error, mean_squared_error
+from sklearn.metrics import (
+    average_precision_score,
+    brier_score_loss,
+    mean_absolute_error,
+    mean_squared_error,
+    roc_auc_score,
+)
 
 from swing_rsi.config import ProjectPaths
 from swing_rsi.engine.feature_screen import (
@@ -50,10 +56,12 @@ SIGNAL_DISCOVERY_SCHEMA_VERSION = "multi_angle_signal_discovery_v1"
 SIGNAL_DISCOVERY_GENERATION_TYPE = "signal_discovery_generation"
 SIGNAL_DISCOVERY_BLOCKER_REPORT_SCHEMA_VERSION = "signal_discovery_blocker_report_v1"
 HISTORICAL_ANALOG_ROBUSTNESS_SCHEMA_VERSION = "historical_analog_robustness_v1"
+MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION = "multi_angle_calibration_audit_v1"
 SIGNAL_DISCOVERY_DIR = "signal_discovery"
 DEFAULT_SIGNAL_DISCOVERY_CONFIG = Path("configs/signal_discovery/v1.yaml")
 DEFAULT_BLOCKED_ROW_ANALOG_COUNT = 10
 ANALOG_ROBUSTNESS_DEPTHS = (10, 25, 50)
+CALIBRATION_DIAGNOSTIC_THRESHOLDS = (0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60)
 
 SignalDirection = Literal["BUY", "SELL_SHORT"]
 SignalAction = Literal["BUY", "SELL", "NO SIGNAL"]
@@ -249,6 +257,190 @@ ANALOG_ROBUSTNESS_SUMMARY_COLUMNS = [
     "decays_with_depth_count",
 ]
 
+CALIBRATION_AUDIT_FRAME_NAMES = (
+    "calibration_summary",
+    "probability_distributions",
+    "probability_buckets",
+    "diagnostic_thresholds",
+    "row_level_calibration_audit",
+)
+
+CALIBRATION_SUMMARY_COLUMNS = [
+    "schema_version",
+    "generation_id",
+    "hypothesis_id",
+    "archetype_id",
+    "archetype",
+    "action",
+    "direction",
+    "horizon",
+    "product_scope",
+    "model_family",
+    "model_id",
+    "status",
+    "reason",
+    "calibration_start_date",
+    "calibration_end_date",
+    "calibration_row_count",
+    "positive_tbs_count",
+    "negative_tbs_count",
+    "tbs_base_rate",
+    "target_hit_probability",
+    "stop_hit_probability",
+    "unresolved_probability",
+    "average_forward_return",
+    "average_mfe",
+    "average_mae",
+    "naive_base_rate_brier",
+    "model_brier",
+    "brier_skill",
+    "roc_auc",
+    "pr_auc",
+    "ece",
+    "calibration_slope",
+    "calibration_intercept",
+    "raw_versus_calibrated_rank_correlation",
+    "unique_calibrated_probability_count",
+    "largest_calibrated_plateau_percentage",
+    "realized_tbs_rate_by_decile_json",
+    "selected_calibrator",
+    "calibration_method",
+    "selected_feature_manifest_hash",
+    "calibration_diagnostic_threshold_table_hash",
+    "row_level_calibration_audit_hash",
+    "artifact_hash",
+]
+
+PROBABILITY_DISTRIBUTION_COLUMNS = [
+    "schema_version",
+    "generation_id",
+    "hypothesis_id",
+    "archetype_id",
+    "archetype",
+    "action",
+    "direction",
+    "horizon",
+    "product_scope",
+    "model_family",
+    "model_id",
+    "probability_type",
+    "min",
+    "p01",
+    "p05",
+    "p10",
+    "p25",
+    "median",
+    "p75",
+    "p90",
+    "p95",
+    "p99",
+    "max",
+    "mean",
+    "standard_deviation",
+    "count_ge_030",
+    "count_ge_035",
+    "count_ge_040",
+    "count_ge_045",
+    "count_ge_050",
+    "count_ge_055",
+    "count_ge_060",
+]
+
+PROBABILITY_BUCKET_COLUMNS = [
+    "schema_version",
+    "generation_id",
+    "hypothesis_id",
+    "archetype_id",
+    "archetype",
+    "action",
+    "direction",
+    "horizon",
+    "product_scope",
+    "model_family",
+    "model_id",
+    "bucket_id",
+    "bucket_lower_bound",
+    "bucket_upper_bound",
+    "row_count",
+    "average_raw_probability",
+    "average_calibrated_probability",
+    "observed_tbs_hit_rate",
+    "average_forward_return",
+    "average_mfe",
+    "average_mae",
+    "target_hit_probability",
+    "stop_hit_probability",
+    "unresolved_probability",
+    "average_time_to_target",
+    "average_time_to_stop",
+    "transaction_cost_adjusted_utility",
+]
+
+DIAGNOSTIC_THRESHOLD_COLUMNS = [
+    "schema_version",
+    "generation_id",
+    "hypothesis_id",
+    "archetype_id",
+    "archetype",
+    "action",
+    "direction",
+    "horizon",
+    "product_scope",
+    "model_family",
+    "model_id",
+    "threshold",
+    "qualifying_row_count",
+    "qualifying_row_rate",
+    "observed_tbs_hit_rate",
+    "precision",
+    "recall",
+    "average_forward_return",
+    "median_forward_return",
+    "average_mfe",
+    "average_mae",
+    "worst_mae",
+    "target_hit_probability",
+    "stop_hit_probability",
+    "unresolved_probability",
+    "transaction_cost_adjusted_utility",
+    "symbol_concentration",
+    "year_concentration",
+    "regime_concentration",
+    "diagnostic_only",
+    "production_target_before_stop_threshold",
+]
+
+ROW_LEVEL_CALIBRATION_AUDIT_COLUMNS = [
+    "schema_version",
+    "generation_id",
+    "hypothesis_id",
+    "Date",
+    "symbol",
+    "product_scope",
+    "archetype",
+    "archetype_id",
+    "action",
+    "direction",
+    "horizon",
+    "model_family",
+    "model_id",
+    "raw_probability",
+    "calibrated_probability",
+    "TBS_label",
+    "forward_return",
+    "MFE",
+    "MAE",
+    "target_hit",
+    "stop_hit",
+    "unresolved",
+    "time_to_target",
+    "time_to_stop",
+    "regime",
+    "sector",
+    "selected_feature_manifest_hash",
+    "calibration_artifact_hash",
+]
+
 
 @dataclass(frozen=True)
 class SignalArchetypeSpec:
@@ -343,6 +535,7 @@ class FittedSignalModel:
     mae_regressor: Any
     train_frame: pd.DataFrame
     holdout_metrics: dict[str, object]
+    calibration_audit: dict[str, pd.DataFrame]
 
 
 @dataclass(frozen=True)
@@ -723,6 +916,11 @@ def load_signal_discovery_frames(
         "blocked_row_analog_summary",
         "score_components",
         "gate_results",
+        "calibration_summary",
+        "probability_distributions",
+        "probability_buckets",
+        "diagnostic_thresholds",
+        "row_level_calibration_audit",
         "summary",
     ):
         path = generation_dir / f"{name}.csv"
@@ -739,6 +937,15 @@ def load_signal_discovery_frames(
         frames["metadata"] = pd.DataFrame(
             [{"field": key, "value": value} for key, value in sorted(metadata.items())]
         )
+    manifest_path = generation_dir / "calibration_artifact_manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        files = manifest.get("files", []) if isinstance(manifest, dict) else []
+        frames["calibration_artifact_manifest"] = pd.DataFrame(
+            files if isinstance(files, list) else []
+        )
+    else:
+        frames["calibration_artifact_manifest"] = pd.DataFrame()
     return frames
 
 
@@ -796,6 +1003,11 @@ def run_signal_discovery(
     analog_rows: list[dict[str, object]] = []
     component_rows: list[dict[str, object]] = []
     gate_rows: list[dict[str, object]] = []
+    calibration_summary_rows: list[dict[str, object]] = []
+    probability_distribution_rows: list[dict[str, object]] = []
+    probability_bucket_rows: list[dict[str, object]] = []
+    diagnostic_threshold_rows: list[dict[str, object]] = []
+    row_level_calibration_frames: list[pd.DataFrame] = []
 
     scope_definitions = build_product_class_scope_definitions(
         universe, scopes=config.product_scopes
@@ -821,6 +1033,13 @@ def run_signal_discovery(
         analog_rows.extend(result["analogs"])
         component_rows.extend(result["components"])
         gate_rows.extend(result["gates"])
+        calibration_summary_rows.extend(result["calibration_summary"])
+        probability_distribution_rows.extend(result["probability_distributions"])
+        probability_bucket_rows.extend(result["probability_buckets"])
+        diagnostic_threshold_rows.extend(result["diagnostic_thresholds"])
+        row_level = pd.DataFrame(result["row_level_calibration_audit"])
+        if not row_level.empty:
+            row_level_calibration_frames.append(row_level)
 
     candidates_frame = pd.DataFrame(candidates)
     if not candidates_frame.empty:
@@ -876,6 +1095,29 @@ def run_signal_discovery(
         "historical_analogs": pd.DataFrame(analog_rows),
         "score_components": pd.DataFrame(component_rows),
         "gate_results": pd.DataFrame(gate_rows),
+        "calibration_summary": pd.DataFrame(
+            calibration_summary_rows,
+            columns=CALIBRATION_SUMMARY_COLUMNS,
+        ),
+        "probability_distributions": pd.DataFrame(
+            probability_distribution_rows,
+            columns=PROBABILITY_DISTRIBUTION_COLUMNS,
+        ),
+        "probability_buckets": pd.DataFrame(
+            probability_bucket_rows,
+            columns=PROBABILITY_BUCKET_COLUMNS,
+        ),
+        "diagnostic_thresholds": pd.DataFrame(
+            diagnostic_threshold_rows,
+            columns=DIAGNOSTIC_THRESHOLD_COLUMNS,
+        ),
+        "row_level_calibration_audit": pd.concat(
+            row_level_calibration_frames,
+            ignore_index=True,
+            sort=False,
+        )
+        if row_level_calibration_frames
+        else pd.DataFrame(columns=ROW_LEVEL_CALIBRATION_AUDIT_COLUMNS),
     }
     _write_generation(temp_dir, metadata, frames)
     metadata["artifact_hashes"] = {
@@ -922,6 +1164,16 @@ def export_signal_discovery_generation(
         target = output_dir / source.name
         shutil.copyfile(source, target)
         written.append(target)
+    for name in (
+        "row_level_calibration_audit.parquet",
+        "calibration_summary.json",
+        "calibration_artifact_manifest.json",
+    ):
+        source = generation_dir / name
+        if source.exists():
+            target = output_dir / source.name
+            shutil.copyfile(source, target)
+            written.append(target)
     blocked_frames = signal_discovery_blocked_analog_frames(root, generation=generation)
     for name in ("blocked_row_analogs", "blocked_row_analog_summary"):
         target = output_dir / f"{name}.csv"
@@ -2308,6 +2560,11 @@ def _evaluate_hypothesis(
         or len(split.calibration) < config.minimum_calibration_samples
         or len(split.holdout) < config.minimum_holdout_samples
     ):
+        status = (
+            "INSUFFICIENT_CALIBRATION_EVIDENCE"
+            if len(split.calibration) < config.minimum_calibration_samples
+            else "INSUFFICIENT_SPLIT_EVIDENCE"
+        )
         return {
             "hypotheses": [
                 {
@@ -2325,6 +2582,22 @@ def _evaluate_hypothesis(
             "analogs": [],
             "components": [],
             "gates": gates,
+            "calibration_summary": [
+                _insufficient_calibration_summary_row(
+                    spec,
+                    base_record,
+                    generation_id=generation_id,
+                    family="",
+                    status=status,
+                    reason="minimum_split_samples_failed",
+                    row_count=len(split.calibration),
+                    required_minimum=config.minimum_calibration_samples,
+                )
+            ],
+            "probability_distributions": [],
+            "probability_buckets": [],
+            "diagnostic_thresholds": [],
+            "row_level_calibration_audit": [],
         }
     feature_columns = _candidate_feature_columns(split.train, spec, feature_family_by_column)
     missing_families = [
@@ -2362,14 +2635,21 @@ def _evaluate_hypothesis(
         )
     family_results: list[FittedSignalModel] = []
     hypothesis_rows: list[dict[str, object]] = []
+    calibration_summary_rows: list[dict[str, object]] = []
+    probability_distribution_rows: list[dict[str, object]] = []
+    probability_bucket_rows: list[dict[str, object]] = []
+    diagnostic_threshold_rows: list[dict[str, object]] = []
+    row_level_calibration_rows: list[dict[str, object]] = []
     for family in config.model_families:
         fitted = _fit_family_model(
             family,
             spec,
+            archetype,
             feature_screen,
             split.train,
             split.calibration,
             split.holdout,
+            generation_id=generation_id,
             config=config,
         )
         if fitted is None:
@@ -2385,10 +2665,41 @@ def _evaluate_hypothesis(
                     "train_rows": len(split.train),
                     "calibration_rows": len(split.calibration),
                     "holdout_rows": len(split.holdout),
+                    **_calibration_metadata_fields(
+                        status="MODEL_FIT_FAILED",
+                        row_count=len(split.calibration),
+                        base_rate=math.nan,
+                        artifact_hash="",
+                        threshold_hash="",
+                        row_level_hash="",
+                    ),
                 }
+            )
+            calibration_summary_rows.append(
+                _insufficient_calibration_summary_row(
+                    spec,
+                    base_record,
+                    generation_id=generation_id,
+                    family=family,
+                    status="MODEL_FIT_FAILED",
+                    reason="model_fit_failed",
+                    row_count=len(split.calibration),
+                    required_minimum=config.minimum_calibration_samples,
+                )
             )
             continue
         family_results.append(fitted)
+        calibration_summary = fitted.calibration_audit["calibration_summary"]
+        probability_distributions = fitted.calibration_audit["probability_distributions"]
+        probability_buckets = fitted.calibration_audit["probability_buckets"]
+        diagnostic_thresholds = fitted.calibration_audit["diagnostic_thresholds"]
+        row_level_calibration = fitted.calibration_audit["row_level_calibration_audit"]
+        calibration_summary_rows.extend(_frame_records(calibration_summary))
+        probability_distribution_rows.extend(_frame_records(probability_distributions))
+        probability_bucket_rows.extend(_frame_records(probability_buckets))
+        diagnostic_threshold_rows.extend(_frame_records(diagnostic_thresholds))
+        row_level_calibration_rows.extend(_frame_records(row_level_calibration))
+        pooled_summary = _pooled_calibration_summary(calibration_summary)
         hypothesis_rows.append(
             {
                 **base_record,
@@ -2405,6 +2716,20 @@ def _evaluate_hypothesis(
                 "train_rows": len(split.train),
                 "calibration_rows": len(split.calibration),
                 "holdout_rows": len(split.holdout),
+                **_calibration_metadata_fields(
+                    status=str(pooled_summary.get("status", "AVAILABLE")),
+                    row_count=int(
+                        _as_float(pooled_summary.get("calibration_row_count"), default=0.0)
+                    ),
+                    base_rate=_as_float(pooled_summary.get("tbs_base_rate"), default=math.nan),
+                    artifact_hash=str(pooled_summary.get("artifact_hash") or ""),
+                    threshold_hash=str(
+                        pooled_summary.get("calibration_diagnostic_threshold_table_hash") or ""
+                    ),
+                    row_level_hash=str(
+                        pooled_summary.get("row_level_calibration_audit_hash") or ""
+                    ),
+                ),
                 **fitted.holdout_metrics,
             }
         )
@@ -2416,6 +2741,11 @@ def _evaluate_hypothesis(
             "analogs": [],
             "components": [],
             "gates": gates,
+            "calibration_summary": calibration_summary_rows,
+            "probability_distributions": probability_distribution_rows,
+            "probability_buckets": probability_bucket_rows,
+            "diagnostic_thresholds": diagnostic_threshold_rows,
+            "row_level_calibration_audit": row_level_calibration_rows,
         }
     best = _best_family_result(family_results)
     latest_rows = frame.loc[pd.to_datetime(frame["Date"]).dt.normalize() == latest_date].copy()
@@ -2443,17 +2773,24 @@ def _evaluate_hypothesis(
         "analogs": analogs,
         "components": components,
         "gates": gates,
+        "calibration_summary": calibration_summary_rows,
+        "probability_distributions": probability_distribution_rows,
+        "probability_buckets": probability_bucket_rows,
+        "diagnostic_thresholds": diagnostic_threshold_rows,
+        "row_level_calibration_audit": row_level_calibration_rows,
     }
 
 
 def _fit_family_model(
     family: str,
     spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
     feature_screen: FeatureScreenResult,
     train: pd.DataFrame,
     calibration: pd.DataFrame,
     holdout: pd.DataFrame,
     *,
+    generation_id: str,
     config: SignalDiscoveryConfig,
 ) -> FittedSignalModel | None:
     selected = tuple(feature_screen.selected_features)
@@ -2502,6 +2839,22 @@ def _fit_family_model(
     except ValueError:
         return None
 
+    calibration_tbs_raw = _predict_probability(tbs, x_cal)
+    calibration_tbs = _apply_probability_calibrator(tbs_calibrator, calibration_tbs_raw)
+    calibration_audit = _calibration_audit_frames(
+        spec,
+        archetype,
+        family=family,
+        feature_screen=feature_screen,
+        calibration=calibration_fit,
+        targets=calibration_targets,
+        raw_tbs_probability=calibration_tbs_raw,
+        calibrated_tbs_probability=calibration_tbs,
+        calibrator=tbs_calibrator,
+        generation_id=generation_id,
+        config=config,
+    )
+
     holdout_primary_raw = _predict_probability(primary, x_holdout)
     holdout_primary = _apply_probability_calibrator(primary_calibrator, holdout_primary_raw)
     holdout_tbs_raw = _predict_probability(tbs, x_holdout)
@@ -2537,7 +2890,805 @@ def _fit_family_model(
         mae_regressor=mae_model,
         train_frame=train_fit.copy(),
         holdout_metrics=metrics,
+        calibration_audit=calibration_audit,
     )
+
+
+def _calibration_metadata_fields(
+    *,
+    status: str,
+    row_count: int,
+    base_rate: float,
+    artifact_hash: str,
+    threshold_hash: str,
+    row_level_hash: str,
+) -> dict[str, object]:
+    return {
+        "calibration_audit_schema_version": MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
+        "calibration_evidence_status": status,
+        "calibration_audit_artifact_paths": json.dumps(
+            _calibration_audit_artifact_paths(),
+            sort_keys=True,
+        ),
+        "calibration_audit_artifact_hashes": json.dumps(
+            {
+                "calibration_artifact_hash": artifact_hash,
+                "calibration_diagnostic_threshold_table_hash": threshold_hash,
+                "row_level_calibration_audit_hash": row_level_hash,
+            },
+            sort_keys=True,
+        ),
+        "calibration_audit_row_count": row_count,
+        "calibration_audit_base_rate": base_rate,
+        "calibration_diagnostic_threshold_table_hash": threshold_hash,
+        "row_level_calibration_audit_hash": row_level_hash,
+    }
+
+
+def _calibration_audit_artifact_paths() -> dict[str, str]:
+    return {
+        "calibration_summary": "calibration_summary.csv",
+        "calibration_summary_json": "calibration_summary.json",
+        "probability_distributions": "probability_distributions.csv",
+        "probability_buckets": "probability_buckets.csv",
+        "diagnostic_thresholds": "diagnostic_thresholds.csv",
+        "row_level_calibration_audit_parquet": "row_level_calibration_audit.parquet",
+        "row_level_calibration_audit_csv": "row_level_calibration_audit.csv",
+        "calibration_artifact_manifest": "calibration_artifact_manifest.json",
+    }
+
+
+def _pooled_calibration_summary(summary: pd.DataFrame) -> pd.Series:
+    if summary.empty:
+        return pd.Series(dtype=object)
+    pooled = summary.loc[summary["product_scope"].astype(str).eq(PRODUCT_CLASS_SCOPE_POOLED)]
+    return pooled.iloc[0] if not pooled.empty else summary.iloc[0]
+
+
+def _insufficient_calibration_summary_row(
+    spec: SignalHypothesisSpec,
+    base_record: dict[str, object],
+    *,
+    generation_id: str,
+    family: str,
+    status: str,
+    reason: str,
+    row_count: int,
+    required_minimum: int,
+) -> dict[str, object]:
+    del required_minimum
+    action = _audit_action(spec)
+    return {
+        "schema_version": MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
+        "generation_id": generation_id,
+        "hypothesis_id": spec.hypothesis_id,
+        "archetype_id": spec.archetype_id,
+        "archetype": str(base_record.get("archetype") or spec.archetype_id),
+        "action": action,
+        "direction": spec.direction,
+        "horizon": spec.horizon,
+        "product_scope": PRODUCT_CLASS_SCOPE_POOLED,
+        "model_family": family,
+        "model_id": _audit_model_id(spec, family),
+        "status": status,
+        "reason": reason,
+        "calibration_start_date": "",
+        "calibration_end_date": "",
+        "calibration_row_count": row_count,
+        "positive_tbs_count": 0,
+        "negative_tbs_count": 0,
+        "tbs_base_rate": math.nan,
+        "target_hit_probability": math.nan,
+        "stop_hit_probability": math.nan,
+        "unresolved_probability": math.nan,
+        "average_forward_return": math.nan,
+        "average_mfe": math.nan,
+        "average_mae": math.nan,
+        "naive_base_rate_brier": math.nan,
+        "model_brier": math.nan,
+        "brier_skill": math.nan,
+        "roc_auc": math.nan,
+        "pr_auc": math.nan,
+        "ece": math.nan,
+        "calibration_slope": math.nan,
+        "calibration_intercept": math.nan,
+        "raw_versus_calibrated_rank_correlation": math.nan,
+        "unique_calibrated_probability_count": 0,
+        "largest_calibrated_plateau_percentage": math.nan,
+        "realized_tbs_rate_by_decile_json": "{}",
+        "selected_calibrator": "",
+        "calibration_method": "",
+        "selected_feature_manifest_hash": "",
+        "calibration_diagnostic_threshold_table_hash": "",
+        "row_level_calibration_audit_hash": "",
+        "artifact_hash": "",
+    }
+
+
+def _calibration_audit_frames(
+    spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
+    *,
+    family: str,
+    feature_screen: FeatureScreenResult,
+    calibration: pd.DataFrame,
+    targets: pd.DataFrame,
+    raw_tbs_probability: pd.Series,
+    calibrated_tbs_probability: pd.Series,
+    calibrator: Any,
+    generation_id: str,
+    config: SignalDiscoveryConfig,
+) -> dict[str, pd.DataFrame]:
+    row_level = _row_level_calibration_audit_frame(
+        spec,
+        archetype,
+        family=family,
+        feature_screen=feature_screen,
+        calibration=calibration,
+        targets=targets,
+        raw_tbs_probability=raw_tbs_probability,
+        calibrated_tbs_probability=calibrated_tbs_probability,
+        generation_id=generation_id,
+    )
+    row_hash = _frame_content_hash(
+        row_level.drop(columns=["calibration_artifact_hash"], errors="ignore")
+    )
+    row_level["calibration_artifact_hash"] = row_hash
+
+    summary_rows: list[dict[str, object]] = []
+    distribution_rows: list[dict[str, object]] = []
+    bucket_rows: list[dict[str, object]] = []
+    threshold_rows: list[dict[str, object]] = []
+    for product_scope, group in _calibration_scope_groups(row_level):
+        thresholds = _diagnostic_threshold_rows(
+            spec,
+            archetype,
+            family=family,
+            product_scope=product_scope,
+            group=group,
+            generation_id=generation_id,
+            config=config,
+        )
+        threshold_hash = _frame_content_hash(
+            pd.DataFrame(thresholds, columns=DIAGNOSTIC_THRESHOLD_COLUMNS)
+        )
+        artifact_hash = _stable_audit_hash(
+            {
+                "generation_id": generation_id,
+                "hypothesis_id": spec.hypothesis_id,
+                "family": family,
+                "product_scope": product_scope,
+                "row_level_hash": row_hash,
+                "threshold_hash": threshold_hash,
+            }
+        )
+        summary_rows.append(
+            _calibration_summary_row(
+                spec,
+                archetype,
+                family=family,
+                product_scope=product_scope,
+                group=group,
+                selected_feature_manifest_hash=feature_screen.selected_feature_manifest_hash,
+                calibrator=calibrator,
+                generation_id=generation_id,
+                threshold_hash=threshold_hash,
+                row_level_hash=row_hash,
+                artifact_hash=artifact_hash,
+            )
+        )
+        distribution_rows.extend(
+            _probability_distribution_rows(
+                spec,
+                archetype,
+                family=family,
+                product_scope=product_scope,
+                group=group,
+                generation_id=generation_id,
+            )
+        )
+        bucket_rows.extend(
+            _probability_bucket_rows(
+                spec,
+                archetype,
+                family=family,
+                product_scope=product_scope,
+                group=group,
+                generation_id=generation_id,
+                config=config,
+            )
+        )
+        threshold_rows.extend(thresholds)
+
+    return {
+        "calibration_summary": pd.DataFrame(summary_rows, columns=CALIBRATION_SUMMARY_COLUMNS),
+        "probability_distributions": pd.DataFrame(
+            distribution_rows,
+            columns=PROBABILITY_DISTRIBUTION_COLUMNS,
+        ),
+        "probability_buckets": pd.DataFrame(bucket_rows, columns=PROBABILITY_BUCKET_COLUMNS),
+        "diagnostic_thresholds": pd.DataFrame(
+            threshold_rows,
+            columns=DIAGNOSTIC_THRESHOLD_COLUMNS,
+        ),
+        "row_level_calibration_audit": row_level[ROW_LEVEL_CALIBRATION_AUDIT_COLUMNS],
+    }
+
+
+def _row_level_calibration_audit_frame(
+    spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
+    *,
+    family: str,
+    feature_screen: FeatureScreenResult,
+    calibration: pd.DataFrame,
+    targets: pd.DataFrame,
+    raw_tbs_probability: pd.Series,
+    calibrated_tbs_probability: pd.Series,
+    generation_id: str,
+) -> pd.DataFrame:
+    target_time = pd.to_numeric(
+        targets.get("time_to_target", pd.Series(dtype=float)), errors="coerce"
+    )
+    stop_time = pd.to_numeric(targets.get("time_to_stop", pd.Series(dtype=float)), errors="coerce")
+    target_hit = target_time.le(float(spec.horizon)) & target_time.notna()
+    stop_hit = stop_time.le(float(spec.horizon)) & stop_time.notna()
+    rows: list[dict[str, object]] = []
+    action = _audit_action(spec)
+    model_id = _audit_model_id(spec, family)
+    for index, row in calibration.loc[targets.index].iterrows():
+        target_row = targets.loc[cast(Any, index)]
+        rows.append(
+            {
+                "schema_version": MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
+                "generation_id": generation_id,
+                "hypothesis_id": spec.hypothesis_id,
+                "Date": pd.Timestamp(str(row.get("Date"))).date().isoformat(),
+                "symbol": str(row.get("symbol") or ""),
+                "product_scope": _row_scope(row),
+                "archetype": archetype.name,
+                "archetype_id": spec.archetype_id,
+                "action": action,
+                "direction": spec.direction,
+                "horizon": spec.horizon,
+                "model_family": family,
+                "model_id": model_id,
+                "raw_probability": _as_float(raw_tbs_probability.get(index), default=math.nan),
+                "calibrated_probability": _as_float(
+                    calibrated_tbs_probability.get(index),
+                    default=math.nan,
+                ),
+                "TBS_label": int(_as_float(target_row.get("target_before_stop"), default=0.0)),
+                "forward_return": _as_float(target_row.get("directional_return"), default=math.nan),
+                "MFE": _as_float(target_row.get("mfe"), default=math.nan),
+                "MAE": _as_float(target_row.get("mae"), default=math.nan),
+                "target_hit": bool(target_hit.get(index, False)),
+                "stop_hit": bool(stop_hit.get(index, False)),
+                "unresolved": not bool(target_hit.get(index, False) or stop_hit.get(index, False)),
+                "time_to_target": _as_float(target_row.get("time_to_target"), default=math.nan),
+                "time_to_stop": _as_float(target_row.get("time_to_stop"), default=math.nan),
+                "regime": str(
+                    row.get(
+                        "market_regime_label",
+                        row.get("market_regime_cluster_expanding", ""),
+                    )
+                ),
+                "sector": str(row.get("sector", row.get("sector_name", "")) or ""),
+                "selected_feature_manifest_hash": feature_screen.selected_feature_manifest_hash,
+                "calibration_artifact_hash": "",
+            }
+        )
+    return pd.DataFrame(rows, columns=ROW_LEVEL_CALIBRATION_AUDIT_COLUMNS)
+
+
+def _calibration_scope_groups(frame: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+    groups: list[tuple[str, pd.DataFrame]] = [(PRODUCT_CLASS_SCOPE_POOLED, frame.copy())]
+    if "product_scope" not in frame.columns:
+        return groups
+    for scope, group in frame.groupby(frame["product_scope"].astype(str), sort=True):
+        scope_text = str(scope)
+        if scope_text == PRODUCT_CLASS_SCOPE_POOLED:
+            continue
+        groups.append((scope_text, group.copy()))
+    return groups
+
+
+def _calibration_summary_row(
+    spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
+    *,
+    family: str,
+    product_scope: str,
+    group: pd.DataFrame,
+    selected_feature_manifest_hash: str,
+    calibrator: Any,
+    generation_id: str,
+    threshold_hash: str,
+    row_level_hash: str,
+    artifact_hash: str,
+) -> dict[str, object]:
+    labels = pd.to_numeric(group["TBS_label"], errors="coerce")
+    calibrated = pd.to_numeric(group["calibrated_probability"], errors="coerce")
+    raw = pd.to_numeric(group["raw_probability"], errors="coerce")
+    positive_count = int(labels.eq(1).sum())
+    negative_count = int(labels.eq(0).sum())
+    base_rate = _safe_mean(labels)
+    naive_brier = _safe_brier(labels, pd.Series(base_rate, index=labels.index))
+    model_brier = _safe_brier(labels, calibrated)
+    slope, intercept = _calibration_line(calibrated, labels)
+    return {
+        "schema_version": MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
+        "generation_id": generation_id,
+        "hypothesis_id": spec.hypothesis_id,
+        "archetype_id": spec.archetype_id,
+        "archetype": archetype.name,
+        "action": _audit_action(spec),
+        "direction": spec.direction,
+        "horizon": spec.horizon,
+        "product_scope": product_scope,
+        "model_family": family,
+        "model_id": _audit_model_id(spec, family),
+        "status": "AVAILABLE" if len(group) else "INSUFFICIENT_CALIBRATION_EVIDENCE",
+        "reason": "" if len(group) else "empty_calibration_slice",
+        "calibration_start_date": _date_min(group.get("Date", pd.Series(dtype=str))),
+        "calibration_end_date": _date_max(group.get("Date", pd.Series(dtype=str))),
+        "calibration_row_count": len(group),
+        "positive_tbs_count": positive_count,
+        "negative_tbs_count": negative_count,
+        "tbs_base_rate": base_rate,
+        "target_hit_probability": _safe_mean(group["target_hit"].astype(float)),
+        "stop_hit_probability": _safe_mean(group["stop_hit"].astype(float)),
+        "unresolved_probability": _safe_mean(group["unresolved"].astype(float)),
+        "average_forward_return": _safe_mean(group["forward_return"]),
+        "average_mfe": _safe_mean(group["MFE"]),
+        "average_mae": _safe_mean(group["MAE"]),
+        "naive_base_rate_brier": naive_brier,
+        "model_brier": model_brier,
+        "brier_skill": naive_brier - model_brier
+        if math.isfinite(naive_brier) and math.isfinite(model_brier)
+        else math.nan,
+        "roc_auc": _safe_roc_auc(labels, calibrated),
+        "pr_auc": _safe_pr_auc(labels, calibrated),
+        "ece": _expected_calibration_error(calibrated, labels),
+        "calibration_slope": slope,
+        "calibration_intercept": intercept,
+        "raw_versus_calibrated_rank_correlation": _rank_correlation(raw, calibrated),
+        "unique_calibrated_probability_count": _unique_probability_count(calibrated),
+        "largest_calibrated_plateau_percentage": _largest_plateau_share(calibrated),
+        "realized_tbs_rate_by_decile_json": _realized_tbs_by_decile_json(calibrated, labels),
+        "selected_calibrator": _calibrator_name(calibrator),
+        "calibration_method": _calibration_method(calibrator),
+        "selected_feature_manifest_hash": selected_feature_manifest_hash,
+        "calibration_diagnostic_threshold_table_hash": threshold_hash,
+        "row_level_calibration_audit_hash": row_level_hash,
+        "artifact_hash": artifact_hash,
+    }
+
+
+def _probability_distribution_rows(
+    spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
+    *,
+    family: str,
+    product_scope: str,
+    group: pd.DataFrame,
+    generation_id: str,
+) -> list[dict[str, object]]:
+    return [
+        _probability_distribution_row(
+            spec,
+            archetype,
+            family=family,
+            product_scope=product_scope,
+            probability_type="raw_tbs",
+            probabilities=pd.to_numeric(group["raw_probability"], errors="coerce"),
+            generation_id=generation_id,
+        ),
+        _probability_distribution_row(
+            spec,
+            archetype,
+            family=family,
+            product_scope=product_scope,
+            probability_type="calibrated_tbs",
+            probabilities=pd.to_numeric(group["calibrated_probability"], errors="coerce"),
+            generation_id=generation_id,
+        ),
+    ]
+
+
+def _probability_distribution_row(
+    spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
+    *,
+    family: str,
+    product_scope: str,
+    probability_type: str,
+    probabilities: pd.Series,
+    generation_id: str,
+) -> dict[str, object]:
+    values = pd.to_numeric(probabilities, errors="coerce").dropna()
+    quantiles = values.quantile([0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99])
+    row: dict[str, object] = {
+        "schema_version": MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
+        "generation_id": generation_id,
+        "hypothesis_id": spec.hypothesis_id,
+        "archetype_id": spec.archetype_id,
+        "archetype": archetype.name,
+        "action": _audit_action(spec),
+        "direction": spec.direction,
+        "horizon": spec.horizon,
+        "product_scope": product_scope,
+        "model_family": family,
+        "model_id": _audit_model_id(spec, family),
+        "probability_type": probability_type,
+        "min": _safe_min(values),
+        "p01": _quantile_value(quantiles, 0.01),
+        "p05": _quantile_value(quantiles, 0.05),
+        "p10": _quantile_value(quantiles, 0.10),
+        "p25": _quantile_value(quantiles, 0.25),
+        "median": _quantile_value(quantiles, 0.50),
+        "p75": _quantile_value(quantiles, 0.75),
+        "p90": _quantile_value(quantiles, 0.90),
+        "p95": _quantile_value(quantiles, 0.95),
+        "p99": _quantile_value(quantiles, 0.99),
+        "max": _safe_max(values),
+        "mean": _safe_mean(values),
+        "standard_deviation": float(values.std(ddof=0)) if not values.empty else math.nan,
+    }
+    for threshold in CALIBRATION_DIAGNOSTIC_THRESHOLDS:
+        row[f"count_ge_{int(threshold * 100):03d}"] = int(values.ge(threshold).sum())
+    return row
+
+
+def _probability_bucket_rows(
+    spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
+    *,
+    family: str,
+    product_scope: str,
+    group: pd.DataFrame,
+    generation_id: str,
+    config: SignalDiscoveryConfig,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    calibrated = pd.to_numeric(group["calibrated_probability"], errors="coerce")
+    for bucket_id in range(10):
+        lower = bucket_id / 10.0
+        upper = (bucket_id + 1) / 10.0
+        mask = calibrated.ge(lower) & (
+            calibrated.lt(upper) if bucket_id < 9 else calibrated.le(upper)
+        )
+        bucket = group.loc[mask].copy()
+        rows.append(
+            {
+                **_audit_row_context(
+                    spec,
+                    archetype,
+                    family=family,
+                    product_scope=product_scope,
+                    generation_id=generation_id,
+                ),
+                "bucket_id": bucket_id,
+                "bucket_lower_bound": lower,
+                "bucket_upper_bound": upper,
+                "row_count": len(bucket),
+                "average_raw_probability": _safe_mean(
+                    bucket.get("raw_probability", pd.Series(dtype=float))
+                ),
+                "average_calibrated_probability": _safe_mean(
+                    bucket.get("calibrated_probability", pd.Series(dtype=float))
+                ),
+                "observed_tbs_hit_rate": _safe_mean(
+                    bucket.get("TBS_label", pd.Series(dtype=float))
+                ),
+                "average_forward_return": _safe_mean(
+                    bucket.get("forward_return", pd.Series(dtype=float))
+                ),
+                "average_mfe": _safe_mean(bucket.get("MFE", pd.Series(dtype=float))),
+                "average_mae": _safe_mean(bucket.get("MAE", pd.Series(dtype=float))),
+                "target_hit_probability": _safe_mean(
+                    bucket.get("target_hit", pd.Series(dtype=float)).astype(float)
+                )
+                if not bucket.empty
+                else math.nan,
+                "stop_hit_probability": _safe_mean(
+                    bucket.get("stop_hit", pd.Series(dtype=float)).astype(float)
+                )
+                if not bucket.empty
+                else math.nan,
+                "unresolved_probability": _safe_mean(
+                    bucket.get("unresolved", pd.Series(dtype=float)).astype(float)
+                )
+                if not bucket.empty
+                else math.nan,
+                "average_time_to_target": _safe_mean(
+                    bucket.get("time_to_target", pd.Series(dtype=float))
+                ),
+                "average_time_to_stop": _safe_mean(
+                    bucket.get("time_to_stop", pd.Series(dtype=float))
+                ),
+                "transaction_cost_adjusted_utility": _safe_mean(
+                    bucket.get("forward_return", pd.Series(dtype=float)) - config.cost_return
+                )
+                if not bucket.empty
+                else math.nan,
+            }
+        )
+    return rows
+
+
+def _diagnostic_threshold_rows(
+    spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
+    *,
+    family: str,
+    product_scope: str,
+    group: pd.DataFrame,
+    generation_id: str,
+    config: SignalDiscoveryConfig,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    calibrated = pd.to_numeric(group["calibrated_probability"], errors="coerce")
+    labels = pd.to_numeric(group["TBS_label"], errors="coerce")
+    positives = int(labels.eq(1).sum())
+    for threshold in CALIBRATION_DIAGNOSTIC_THRESHOLDS:
+        qualified = group.loc[calibrated.ge(threshold)].copy()
+        qualified_labels = pd.to_numeric(
+            qualified.get("TBS_label", pd.Series(dtype=float)), errors="coerce"
+        )
+        row_count = len(qualified)
+        hit_rate = _safe_mean(qualified_labels)
+        rows.append(
+            {
+                **_audit_row_context(
+                    spec,
+                    archetype,
+                    family=family,
+                    product_scope=product_scope,
+                    generation_id=generation_id,
+                ),
+                "threshold": threshold,
+                "qualifying_row_count": row_count,
+                "qualifying_row_rate": float(row_count / len(group)) if len(group) else math.nan,
+                "observed_tbs_hit_rate": hit_rate,
+                "precision": hit_rate,
+                "recall": float(qualified_labels.eq(1).sum() / positives)
+                if positives
+                else math.nan,
+                "average_forward_return": _safe_mean(
+                    qualified.get("forward_return", pd.Series(dtype=float))
+                ),
+                "median_forward_return": _safe_median(
+                    qualified.get("forward_return", pd.Series(dtype=float))
+                ),
+                "average_mfe": _safe_mean(qualified.get("MFE", pd.Series(dtype=float))),
+                "average_mae": _safe_mean(qualified.get("MAE", pd.Series(dtype=float))),
+                "worst_mae": _safe_min(qualified.get("MAE", pd.Series(dtype=float))),
+                "target_hit_probability": _safe_mean(
+                    qualified.get("target_hit", pd.Series(dtype=float)).astype(float)
+                )
+                if not qualified.empty
+                else math.nan,
+                "stop_hit_probability": _safe_mean(
+                    qualified.get("stop_hit", pd.Series(dtype=float)).astype(float)
+                )
+                if not qualified.empty
+                else math.nan,
+                "unresolved_probability": _safe_mean(
+                    qualified.get("unresolved", pd.Series(dtype=float)).astype(float)
+                )
+                if not qualified.empty
+                else math.nan,
+                "transaction_cost_adjusted_utility": _safe_mean(
+                    qualified.get("forward_return", pd.Series(dtype=float)) - config.cost_return
+                )
+                if not qualified.empty
+                else math.nan,
+                "symbol_concentration": _value_concentration(
+                    qualified.get("symbol", pd.Series(dtype=str))
+                ),
+                "year_concentration": _year_concentration(
+                    qualified.get("Date", pd.Series(dtype=str))
+                ),
+                "regime_concentration": _value_concentration(
+                    qualified.get("regime", pd.Series(dtype=str))
+                ),
+                "diagnostic_only": True,
+                "production_target_before_stop_threshold": config.target_before_stop_threshold,
+            }
+        )
+    return rows
+
+
+def _audit_row_context(
+    spec: SignalHypothesisSpec,
+    archetype: SignalArchetypeSpec,
+    *,
+    family: str,
+    product_scope: str,
+    generation_id: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
+        "generation_id": generation_id,
+        "hypothesis_id": spec.hypothesis_id,
+        "archetype_id": spec.archetype_id,
+        "archetype": archetype.name,
+        "action": _audit_action(spec),
+        "direction": spec.direction,
+        "horizon": spec.horizon,
+        "product_scope": product_scope,
+        "model_family": family,
+        "model_id": _audit_model_id(spec, family),
+    }
+
+
+def _audit_action(spec: SignalHypothesisSpec) -> str:
+    return "BUY" if spec.direction == "BUY" else "SELL_SHORT"
+
+
+def _audit_model_id(spec: SignalHypothesisSpec, family: str) -> str:
+    return f"{spec.hypothesis_id}:{family}" if family else spec.hypothesis_id
+
+
+def _safe_brier(labels: pd.Series, probabilities: pd.Series) -> float:
+    frame = pd.DataFrame({"label": labels, "probability": probabilities}).dropna()
+    if frame.empty:
+        return math.nan
+    return float(
+        brier_score_loss(
+            frame["label"].astype(int),
+            frame["probability"].astype(float).clip(0.0, 1.0),
+        )
+    )
+
+
+def _safe_roc_auc(labels: pd.Series, probabilities: pd.Series) -> float:
+    frame = pd.DataFrame({"label": labels, "probability": probabilities}).dropna()
+    if frame.empty or frame["label"].nunique() < 2:
+        return math.nan
+    return float(roc_auc_score(frame["label"].astype(int), frame["probability"].astype(float)))
+
+
+def _safe_pr_auc(labels: pd.Series, probabilities: pd.Series) -> float:
+    frame = pd.DataFrame({"label": labels, "probability": probabilities}).dropna()
+    if frame.empty or frame["label"].nunique() < 2:
+        return math.nan
+    return float(
+        average_precision_score(
+            frame["label"].astype(int),
+            frame["probability"].astype(float),
+        )
+    )
+
+
+def _expected_calibration_error(probabilities: pd.Series, labels: pd.Series) -> float:
+    frame = pd.DataFrame({"probability": probabilities, "label": labels}).dropna()
+    if frame.empty:
+        return math.nan
+    total = len(frame)
+    error = 0.0
+    for bucket_id in range(10):
+        lower = bucket_id / 10.0
+        upper = (bucket_id + 1) / 10.0
+        mask = frame["probability"].ge(lower) & (
+            frame["probability"].lt(upper) if bucket_id < 9 else frame["probability"].le(upper)
+        )
+        bucket = frame.loc[mask]
+        if bucket.empty:
+            continue
+        error += (len(bucket) / total) * abs(
+            float(bucket["probability"].mean()) - float(bucket["label"].mean())
+        )
+    return float(error)
+
+
+def _calibration_line(probabilities: pd.Series, labels: pd.Series) -> tuple[float, float]:
+    frame = pd.DataFrame({"probability": probabilities, "label": labels}).dropna()
+    if len(frame) < 2 or frame["probability"].nunique() < 2:
+        return math.nan, math.nan
+    slope, intercept = np.polyfit(
+        frame["probability"].to_numpy(dtype=float),
+        frame["label"].to_numpy(dtype=float),
+        1,
+    )
+    return float(slope), float(intercept)
+
+
+def _rank_correlation(raw: pd.Series, calibrated: pd.Series) -> float:
+    frame = pd.DataFrame({"raw": raw, "calibrated": calibrated}).dropna()
+    if len(frame) < 2 or frame["raw"].nunique() < 2 or frame["calibrated"].nunique() < 2:
+        return math.nan
+    value = (
+        frame["raw"]
+        .rank(method="average")
+        .corr(
+            frame["calibrated"].rank(method="average"),
+            method="spearman",
+        )
+    )
+    return _as_float(value, default=math.nan)
+
+
+def _unique_probability_count(probabilities: pd.Series) -> int:
+    values = pd.to_numeric(probabilities, errors="coerce").dropna().round(12)
+    return int(values.nunique())
+
+
+def _largest_plateau_share(probabilities: pd.Series) -> float:
+    values = pd.to_numeric(probabilities, errors="coerce").dropna().round(12)
+    if values.empty:
+        return math.nan
+    return float(values.value_counts().iloc[0] / len(values))
+
+
+def _realized_tbs_by_decile_json(probabilities: pd.Series, labels: pd.Series) -> str:
+    frame = pd.DataFrame({"probability": probabilities, "label": labels}).dropna()
+    payload: dict[str, float | None] = {}
+    for bucket_id in range(10):
+        lower = bucket_id / 10.0
+        upper = (bucket_id + 1) / 10.0
+        key = f"{lower:.1f}-{upper:.1f}"
+        mask = frame["probability"].ge(lower) & (
+            frame["probability"].lt(upper) if bucket_id < 9 else frame["probability"].le(upper)
+        )
+        bucket = frame.loc[mask]
+        payload[key] = float(bucket["label"].mean()) if not bucket.empty else None
+    return json.dumps(payload, sort_keys=True)
+
+
+def _calibrator_name(calibrator: Any) -> str:
+    return "identity" if calibrator is None else type(calibrator).__name__
+
+
+def _calibration_method(calibrator: Any) -> str:
+    return "raw_probability_passthrough" if calibrator is None else "isotonic_regression"
+
+
+def _quantile_value(quantiles: pd.Series, quantile: float) -> float:
+    if quantiles.empty:
+        return math.nan
+    return _as_float(quantiles.get(quantile), default=math.nan)
+
+
+def _date_min(series: pd.Series) -> str:
+    values = pd.to_datetime(series, errors="coerce").dropna()
+    return values.min().date().isoformat() if not values.empty else ""
+
+
+def _date_max(series: pd.Series) -> str:
+    values = pd.to_datetime(series, errors="coerce").dropna()
+    return values.max().date().isoformat() if not values.empty else ""
+
+
+def _value_concentration(series: pd.Series) -> float:
+    values = series.dropna().astype(str)
+    values = values.loc[values.str.len() > 0]
+    if values.empty:
+        return math.nan
+    return float(values.value_counts(normalize=True).iloc[0])
+
+
+def _year_concentration(series: pd.Series) -> float:
+    years = pd.to_datetime(series, errors="coerce").dt.year.dropna()
+    if years.empty:
+        return math.nan
+    return float(years.astype(int).astype(str).value_counts(normalize=True).iloc[0])
+
+
+def _stable_audit_hash(payload: object) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _frame_content_hash(frame: pd.DataFrame) -> str:
+    records = json.loads(frame.to_json(orient="records", date_format="iso"))
+    return _stable_audit_hash(records)
+
+
+def _frame_records(frame: pd.DataFrame) -> list[dict[str, object]]:
+    return cast(list[dict[str, object]], frame.to_dict(orient="records"))
 
 
 def _latest_decisions(
@@ -3228,6 +4379,24 @@ def _unsupported_result(
                 "evidence_source": reason,
             }
         ],
+        "calibration_summary": [
+            _insufficient_calibration_summary_row(
+                spec,
+                base_record,
+                generation_id=generation_id,
+                family="",
+                status="INSUFFICIENT_CALIBRATION_EVIDENCE"
+                if "calibration" in reason or "sample" in reason or "insufficient" in reason
+                else "UNSUPPORTED",
+                reason=reason,
+                row_count=0,
+                required_minimum=0,
+            )
+        ],
+        "probability_distributions": [],
+        "probability_buckets": [],
+        "diagnostic_thresholds": [],
+        "row_level_calibration_audit": [],
     }
 
 
@@ -3314,6 +4483,64 @@ def _write_generation(
         _parquet_safe_frame(frame).to_parquet(directory / f"{name}.parquet", index=False)
     (directory / "metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    _write_calibration_audit_json_artifacts(directory, metadata, frames)
+
+
+def _write_calibration_audit_json_artifacts(
+    directory: Path,
+    metadata: dict[str, object],
+    frames: dict[str, pd.DataFrame],
+) -> None:
+    if "calibration_summary" not in frames:
+        return
+    summary = frames.get("calibration_summary", pd.DataFrame())
+    (directory / "calibration_summary.json").write_text(
+        json.dumps(
+            {
+                "schema_version": MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
+                "generation_id": metadata.get("generation_id", ""),
+                "records": summary.to_dict(orient="records"),
+            },
+            indent=2,
+            sort_keys=True,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    manifest_files: list[dict[str, object]] = []
+    for name in (
+        "calibration_summary.csv",
+        "calibration_summary.json",
+        "probability_distributions.csv",
+        "probability_buckets.csv",
+        "diagnostic_thresholds.csv",
+        "row_level_calibration_audit.parquet",
+        "row_level_calibration_audit.csv",
+    ):
+        path = directory / name
+        if not path.exists():
+            continue
+        frame_name = path.stem
+        row_count = len(frames.get(frame_name, pd.DataFrame()))
+        manifest_files.append(
+            {
+                "path": path.name,
+                "sha256": hash_file(path),
+                "size_bytes": path.stat().st_size,
+                "row_count": row_count,
+            }
+        )
+    manifest = {
+        "schema_version": MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
+        "generation_id": metadata.get("generation_id", ""),
+        "diagnostic_only": True,
+        "notice": "Calibration diagnostic only. Not a threshold change and not proof of edge.",
+        "files": manifest_files,
+    }
+    (directory / "calibration_artifact_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
 

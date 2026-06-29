@@ -261,6 +261,12 @@ def render_page() -> None:
             "analog_caution_flags",
             "score_components",
             "gate_results",
+            "calibration_summary",
+            "probability_distributions",
+            "probability_buckets",
+            "diagnostic_thresholds",
+            "row_level_calibration_audit",
+            "calibration_artifact_manifest",
         }
         and not frame.empty
     }
@@ -278,6 +284,22 @@ def render_page() -> None:
                 discovery_sheets,
             )
             streamlit.success(f"Saved {output.relative_to(root)}")
+        audit_names = (
+            "calibration_summary",
+            "probability_distributions",
+            "probability_buckets",
+            "diagnostic_thresholds",
+            "row_level_calibration_audit",
+            "calibration_artifact_manifest",
+        )
+        for name in audit_names:
+            frame = discovery_sheets.get(name, pd.DataFrame())
+            if not frame.empty:
+                render_table_downloads(
+                    frame,
+                    basename=f"signal_discovery_{name}",
+                    label=name,
+                )
     else:
         streamlit.info("No signal discovery generation is available locally.")
 

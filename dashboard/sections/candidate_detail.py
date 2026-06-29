@@ -330,6 +330,39 @@ def _blocked_analog_table(analogs: pd.DataFrame) -> pd.DataFrame:
     return output[BLOCKED_ANALOG_TABLE_COLUMNS]
 
 
+def _calibration_overview_frame(candidate: pd.Series) -> pd.DataFrame:
+    has_calibration_artifact = any(
+        _clean_identifier_value(candidate.get(field, ""))
+        for field in (
+            "calibration_summary_json",
+            "calibration_diagnostic_threshold_table",
+            "calibration_probability_bucket_evidence",
+        )
+    )
+    if not has_calibration_artifact:
+        return pd.DataFrame()
+    fields = (
+        ("model TBS probability", candidate.get("target_before_stop_probability", "")),
+        (
+            "same-archetype calibration base rate",
+            candidate.get("same_archetype_calibration_base_rate", ""),
+        ),
+        ("same-scope calibration base rate", candidate.get("same_scope_calibration_base_rate", "")),
+        ("calibration evidence status", candidate.get("calibration_evidence_status", "")),
+        (
+            "TBS blocker calibration assessment",
+            candidate.get("tbs_blocker_calibration_assessment", ""),
+        ),
+    )
+    return pd.DataFrame(
+        [
+            {"field": field, "value": _clean_identifier_value(value)}
+            for field, value in fields
+            if _clean_identifier_value(value)
+        ]
+    )
+
+
 def _metric_percent(value: object) -> str:
     try:
         numeric = float(value)  # type: ignore[arg-type]
@@ -461,6 +494,12 @@ def render_page() -> None:
     analog_robustness = _single_json_frame(candidate, "analog_robustness")
     analog_depth_comparison = _records_json_frame(candidate, "analog_depth_comparison")
     analog_caution_flags = _records_json_frame(candidate, "analog_caution_flags")
+    calibration_overview = _calibration_overview_frame(candidate)
+    calibration_summary = _single_json_frame(candidate, "calibration_summary_json")
+    calibration_thresholds = _records_json_frame(
+        candidate, "calibration_diagnostic_threshold_table"
+    )
+    calibration_buckets = _records_json_frame(candidate, "calibration_probability_bucket_evidence")
     feature_snapshot = pd.DataFrame([candidate.to_dict()])
     risk = _risk_frame(candidate)
 
@@ -529,6 +568,51 @@ def render_page() -> None:
 
     streamlit.subheader("Risk")
     streamlit.dataframe(display_frame(risk), width="stretch", hide_index=True)
+
+    if not calibration_overview.empty:
+        streamlit.subheader("Calibration Diagnostics")
+        streamlit.warning(
+            "Calibration diagnostic only. Not a threshold change and not proof of edge."
+        )
+        streamlit.dataframe(
+            display_frame(calibration_overview),
+            width="stretch",
+            hide_index=True,
+        )
+        if not calibration_thresholds.empty:
+            streamlit.caption("Diagnostic threshold table")
+            streamlit.dataframe(
+                display_frame(calibration_thresholds),
+                width="stretch",
+                hide_index=True,
+            )
+        if not calibration_buckets.empty:
+            streamlit.caption("Probability bucket evidence")
+            streamlit.dataframe(
+                display_frame(calibration_buckets),
+                width="stretch",
+                hide_index=True,
+            )
+        render_table_downloads(
+            calibration_overview,
+            basename="candidate_detail_calibration_overview",
+            label="calibration_overview",
+        )
+        render_table_downloads(
+            calibration_summary,
+            basename="candidate_detail_calibration_summary",
+            label="calibration_summary",
+        )
+        render_table_downloads(
+            calibration_thresholds,
+            basename="candidate_detail_calibration_thresholds",
+            label="calibration_thresholds",
+        )
+        render_table_downloads(
+            calibration_buckets,
+            basename="candidate_detail_calibration_buckets",
+            label="calibration_buckets",
+        )
 
     if not blocked_analog_summary.empty:
         blocked_summary_row = blocked_analog_summary.iloc[0]
@@ -694,6 +778,10 @@ def render_page() -> None:
                 "analog_robustness": analog_robustness,
                 "analog_depth_comparison": analog_depth_comparison,
                 "analog_caution_flags": analog_caution_flags,
+                "calibration_overview": calibration_overview,
+                "calibration_summary": calibration_summary,
+                "calibration_thresholds": calibration_thresholds,
+                "calibration_buckets": calibration_buckets,
                 "residual_unexplained": footprint.residual_unexplained,
                 "signal_score_breakdown": signal_score,
                 "attribution": attribution,
