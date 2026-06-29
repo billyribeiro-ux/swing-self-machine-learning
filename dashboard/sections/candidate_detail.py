@@ -292,6 +292,32 @@ def _blocked_row_analog_summary_frame(candidate: pd.Series) -> pd.DataFrame:
     return pd.DataFrame([payload])
 
 
+def _single_json_frame(candidate: pd.Series, field: str) -> pd.DataFrame:
+    raw = candidate.get(field, "")
+    if not isinstance(raw, str) or not raw.strip():
+        return pd.DataFrame()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return pd.DataFrame()
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    return pd.DataFrame([payload])
+
+
+def _records_json_frame(candidate: pd.Series, field: str) -> pd.DataFrame:
+    raw = candidate.get(field, "")
+    if not isinstance(raw, str) or not raw.strip():
+        return pd.DataFrame()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return pd.DataFrame()
+    if not isinstance(payload, list):
+        return pd.DataFrame()
+    return pd.DataFrame(payload)
+
+
 def _blocked_analog_table(analogs: pd.DataFrame) -> pd.DataFrame:
     if analogs.empty:
         return pd.DataFrame(columns=BLOCKED_ANALOG_TABLE_COLUMNS)
@@ -432,6 +458,9 @@ def render_page() -> None:
     attribution = _attribution_frame(candidate)
     analogs = footprint.historical_analogs
     blocked_analog_summary = _blocked_row_analog_summary_frame(candidate)
+    analog_robustness = _single_json_frame(candidate, "analog_robustness")
+    analog_depth_comparison = _records_json_frame(candidate, "analog_depth_comparison")
+    analog_caution_flags = _records_json_frame(candidate, "analog_caution_flags")
     feature_snapshot = pd.DataFrame([candidate.to_dict()])
     risk = _risk_frame(candidate)
 
@@ -527,6 +556,56 @@ def render_page() -> None:
         ]
         for index, (label, value) in enumerate(metric_cards):
             metric_columns[index].metric(label, value)
+        if not analog_robustness.empty:
+            robustness_row = analog_robustness.iloc[0]
+            streamlit.subheader("Historical Analog Robustness")
+            robust_columns = streamlit.columns(6)
+            depth_labels = {}
+            if not analog_depth_comparison.empty and "requested_depth" in analog_depth_comparison:
+                for _, depth_row in analog_depth_comparison.iterrows():
+                    depth = str(depth_row.get("requested_depth", ""))
+                    depth_labels[depth] = str(depth_row.get("depth_support_label", "Not available"))
+            robust_cards = [
+                ("top-10 support", depth_labels.get("10", "Not available")),
+                ("top-25 support", depth_labels.get("25", "Not available")),
+                ("top-50 support", depth_labels.get("50", "Not available")),
+                (
+                    "robust support label",
+                    str(robustness_row.get("robust_analog_support_label", "Not available")),
+                ),
+                (
+                    "caution flags",
+                    str(robustness_row.get("caution_flags", "") or "None"),
+                ),
+                (
+                    "too concentrated",
+                    str(robustness_row.get("analog_evidence_too_concentrated", "Not available")),
+                ),
+            ]
+            for index, (label, value) in enumerate(robust_cards):
+                robust_columns[index].metric(label, value)
+            explanation = str(robustness_row.get("robustness_explanation", "Not available"))
+            if str(robustness_row.get("robust_analog_support_label")) == "CONCENTRATION_ARTIFACT":
+                streamlit.warning(
+                    "Top-10 analogs are not robust because they are concentrated and "
+                    f"support degrades when expanded. {explanation}"
+                )
+            else:
+                streamlit.info(explanation)
+            if not analog_depth_comparison.empty:
+                streamlit.caption("Analog depth comparison")
+                streamlit.dataframe(
+                    display_frame(analog_depth_comparison),
+                    width="stretch",
+                    hide_index=True,
+                )
+            if not analog_caution_flags.empty:
+                streamlit.caption("Analog caution flags")
+                streamlit.dataframe(
+                    display_frame(analog_caution_flags),
+                    width="stretch",
+                    hide_index=True,
+                )
         blocked_table = _blocked_analog_table(analogs)
         if blocked_table.empty:
             streamlit.info("No blocked-row analog records are available for this candidate.")
@@ -541,6 +620,21 @@ def render_page() -> None:
             blocked_analog_summary,
             basename="candidate_detail_blocked_row_analog_summary",
             label="blocked_row_analog_summary",
+        )
+        render_table_downloads(
+            analog_robustness,
+            basename="candidate_detail_analog_robustness",
+            label="analog_robustness",
+        )
+        render_table_downloads(
+            analog_depth_comparison,
+            basename="candidate_detail_analog_depth_comparison",
+            label="analog_depth_comparison",
+        )
+        render_table_downloads(
+            analog_caution_flags,
+            basename="candidate_detail_analog_caution_flags",
+            label="analog_caution_flags",
         )
     else:
         streamlit.subheader("Historical Analogs")
@@ -597,6 +691,9 @@ def render_page() -> None:
                 "historical_analogs": analogs,
                 "blocked_row_analogs": _blocked_analog_table(analogs),
                 "blocked_row_analog_summary": blocked_analog_summary,
+                "analog_robustness": analog_robustness,
+                "analog_depth_comparison": analog_depth_comparison,
+                "analog_caution_flags": analog_caution_flags,
                 "residual_unexplained": footprint.residual_unexplained,
                 "signal_score_breakdown": signal_score,
                 "attribution": attribution,

@@ -953,6 +953,8 @@ def test_signal_board_displays_multi_angle_action_and_archetype(
     board = signal_board_frame(command_center_root)
     visible = signal_board_display_section(board)
     discovery = visible.loc[visible["Ticker"].astype(str) == "DEMO3"].iloc[0]
+    blocked = board.loc[board["ticker"].astype(str) == "DEMO4"].iloc[0]
+    visible_blocked = visible.loc[visible["Ticker"].astype(str) == "DEMO4"].iloc[0]
 
     assert discovery["Action"] == "BUY"
     assert discovery["Archetype"] == "Reversal / Exhaustion"
@@ -963,6 +965,9 @@ def test_signal_board_displays_multi_angle_action_and_archetype(
     assert str(discovery["Open"]).startswith("/candidate-detail?")
     assert f"scan_id={generation_id}" in str(discovery["Open"])
     assert "model_id=reversal_buy_5d%3Aextra_trees" in str(discovery["Open"])
+    assert "analog_status" in board.columns
+    assert blocked["analog_status"] == "Insufficient Analogs"
+    assert visible_blocked["Analog Status"] == "Insufficient Analogs"
 
 
 def test_signal_board_default_sections_keep_shadow_and_pending_visible(
@@ -1096,6 +1101,7 @@ def test_candidate_detail_displays_blocked_row_analogs(
     assert artifact.read_bytes() == before_artifact
     subheaders = {subheader.value for subheader in app.subheader}
     assert "Historical Analogs for Blocked Row" in subheaders
+    assert "Historical Analog Robustness" in subheaders
     assert any(
         "Historical analogs are explanatory only and do not override model gates." in warning.value
         for warning in app.warning
@@ -1108,6 +1114,8 @@ def test_candidate_detail_displays_blocked_row_analogs(
         "SUPPORTIVE",
         "WEAK",
     }
+    assert metrics["robust support label"] == "INSUFFICIENT_ANALOGS"
+    assert "low_analog_count" in metrics["caution flags"]
 
 
 def test_candidate_detail_raw_identifier_copy_block_and_exports(
@@ -1457,6 +1465,10 @@ def test_reports_and_exports_displays_signal_discovery_generation(
                     "historical_analogs": frames["historical_analogs"],
                     "blocked_row_analogs": frames["blocked_row_analogs"],
                     "blocked_row_analog_summary": frames["blocked_row_analog_summary"],
+                    "analog_robustness": frames["analog_robustness"],
+                    "analog_robustness_summary": frames["analog_robustness_summary"],
+                    "analog_depth_comparison": frames["analog_depth_comparison"],
+                    "analog_caution_flags": frames["analog_caution_flags"],
                     "score_components": frames["score_components"],
                     "gate_results": frames["gate_results"],
                 }
@@ -1475,6 +1487,10 @@ def test_reports_and_exports_displays_signal_discovery_generation(
         "historical_analogs",
         "blocked_row_analogs",
         "blocked_row_analog_summary",
+        "analog_robustness",
+        "analog_robustness_summary",
+        "analog_depth_comparison",
+        "analog_caution_flags",
         "score_components",
         "gate_results",
     }.issubset(set(workbook.sheetnames))

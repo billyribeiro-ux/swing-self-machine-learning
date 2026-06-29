@@ -67,7 +67,8 @@ Candidate Detail renders:
 4. Conflicting Evidence
 5. Historical Analogs
 6. Historical Analogs for Blocked Row when available
-7. Residual / Unexplained
+7. Historical Analog Robustness when blocked-row analogs are available
+8. Residual / Unexplained
 
 The Missing Evidence Audit counts `Evidence unavailable` footprint rows by
 category. Missing measurements remain explicit and are not treated as
@@ -76,8 +77,15 @@ confirmed evidence.
 Blocked-row analog sections must display the warning: `Historical analogs are
 explanatory only and do not override model gates.`
 
+Historical Analog Robustness shows top-10, top-25, and top-50 support, robust
+support label, caution flags, concentration summary, and depth-decay
+explanation. A top-10 analog cluster can be marked `CONCENTRATION_ARTIFACT` when
+it is concentrated in one ticker/year/regime/event cluster and support degrades
+with expanded analog depth.
+
 The Signal Board remains compact and shows only a short footprint summary such
-as `Risk-off inverse ETF footprint`.
+as `Risk-off inverse ETF footprint`, plus a compact analog status such as
+`Mixed Analog Support` or `Concentration Artifact`.
 
 ## Exports
 
@@ -90,6 +98,9 @@ Candidate Detail workbook exports include:
 - `historical_analogs`
 - `blocked_row_analogs`
 - `blocked_row_analog_summary`
+- `analog_robustness`
+- `analog_depth_comparison`
+- `analog_caution_flags`
 - `residual_unexplained`
 
 CSV exports are available for the same measured tables.

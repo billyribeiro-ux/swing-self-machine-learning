@@ -33,6 +33,7 @@ from swing_rsi.engine.registry import RegisteredModel
 from swing_rsi.engine.registry import _row_to_model as registry_row_to_model
 from swing_rsi.engine.signal_discovery import (
     load_signal_discovery_frames,
+    signal_discovery_analog_robustness_frames,
     signal_discovery_blocked_analog_frames,
     signal_discovery_blocker_report_frames,
 )
@@ -911,6 +912,7 @@ def signal_discovery_generation_frames(
     if include_blocked_analogs:
         blocked_frames = signal_discovery_blocked_analog_frames(root)
         frames.update(blocked_frames)
+        frames.update(signal_discovery_analog_robustness_frames(root))
     return frames
 
 
@@ -960,20 +962,55 @@ def _blocked_analog_support_by_signal(summary: pd.DataFrame) -> dict[str, str]:
     return output
 
 
+def _analog_robustness_support_by_signal(robustness: pd.DataFrame) -> dict[str, str]:
+    if robustness.empty or "target_signal_id" not in robustness.columns:
+        return {}
+    output: dict[str, str] = {}
+    for _, row in robustness.iterrows():
+        signal_id = str(row.get("target_signal_id", ""))
+        status = str(_display_value(row.get("analog_compact_status")))
+        explanation = str(_display_value(row.get("robustness_explanation")))
+        output[signal_id] = f"{status}. {explanation}".strip()
+    return output
+
+
+def _analog_robustness_status_by_signal(robustness: pd.DataFrame) -> dict[str, str]:
+    if robustness.empty or "target_signal_id" not in robustness.columns:
+        return {}
+    output: dict[str, str] = {}
+    for _, row in robustness.iterrows():
+        signal_id = str(row.get("target_signal_id", ""))
+        output[signal_id] = str(_display_value(row.get("analog_compact_status")))
+    return output
+
+
 def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
     frames = signal_discovery_generation_frames(root)
     candidates = frames.get("candidates", pd.DataFrame())
     if candidates.empty:
         return pd.DataFrame()
     blocked_frames = signal_discovery_blocked_analog_frames(root)
+    robustness_frames = signal_discovery_analog_robustness_frames(root)
     blocked_analogs_by_signal = _records_json_by_signal(
         blocked_frames.get("blocked_row_analogs", pd.DataFrame()).rename(
             columns={"target_signal_id": "signal_id"}
         )
     )
     blocked_summary = blocked_frames.get("blocked_row_analog_summary", pd.DataFrame())
+    robustness = robustness_frames.get("analog_robustness", pd.DataFrame())
+    depth_comparison = robustness_frames.get("analog_depth_comparison", pd.DataFrame())
+    caution_flags = robustness_frames.get("analog_caution_flags", pd.DataFrame())
     blocked_summary_by_signal = _single_record_json_by_signal(blocked_summary)
     blocked_support_by_signal = _blocked_analog_support_by_signal(blocked_summary)
+    robustness_by_signal = _single_record_json_by_signal(robustness)
+    robustness_support_by_signal = _analog_robustness_support_by_signal(robustness)
+    robustness_status_by_signal = _analog_robustness_status_by_signal(robustness)
+    depth_by_signal = _records_json_by_signal(
+        depth_comparison.rename(columns={"target_signal_id": "signal_id"})
+    )
+    flags_by_signal = _records_json_by_signal(
+        caution_flags.rename(columns={"target_signal_id": "signal_id"})
+    )
     blocked_footprint_by_signal = (
         blocked_summary.set_index("target_signal_id")["analog_footprint_summary"]
         .astype(str)
@@ -998,6 +1035,7 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
         analog_support = blocked_support_by_signal.get(
             signal_id, _display_value(row.get("historical_analog_support"))
         )
+        robust_support = robustness_support_by_signal.get(signal_id, analog_support)
         footprint_summary = blocked_footprint_by_signal.get(
             signal_id, _display_value(row.get("footprint_summary"))
         )
@@ -1040,7 +1078,12 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
                 "top_divergences": _display_value(row.get("top_conflict")),
                 "top_support": _display_value(row.get("top_support")),
                 "top_conflict": _display_value(row.get("top_conflict")),
-                "historical_analog_support": analog_support,
+                "historical_analog_support": robust_support,
+                "analog_status": robustness_status_by_signal.get(signal_id, "Not available"),
+                "analog_robustness": robustness_by_signal.get(signal_id, ""),
+                "analog_depth_comparison": depth_by_signal.get(signal_id, ""),
+                "analog_caution_flags": flags_by_signal.get(signal_id, ""),
+                "analog_robustness_explanation": robust_support,
                 "blocked_row_analog_summary": blocked_summary_by_signal.get(signal_id, ""),
                 "footprint_evidence_json": evidence_by_signal.get(signal_id, ""),
                 "footprint_summary": footprint_summary,
@@ -1059,8 +1102,14 @@ def _signal_discovery_board_rows(root: str | Path) -> pd.DataFrame:
     candidates = signal_discovery_candidates_frame(root)
     if candidates.empty:
         return pd.DataFrame()
+    robustness = signal_discovery_analog_robustness_frames(root).get(
+        "analog_robustness", pd.DataFrame()
+    )
+    robustness_support_by_signal = _analog_robustness_support_by_signal(robustness)
+    robustness_status_by_signal = _analog_robustness_status_by_signal(robustness)
     rows: list[dict[str, object]] = []
     for _, row in candidates.iterrows():
+        signal_id = str(_display_value(row.get("signal_id")))
         status = _display_value(row.get("candidate_status"))
         model_id = _display_value(row.get("model_id"))
         generation = _display_value(row.get("generation_id"))
@@ -1074,7 +1123,10 @@ def _signal_discovery_board_rows(root: str | Path) -> pd.DataFrame:
                 "footprint_summary": _display_value(row.get("footprint_summary")),
                 "top_support": _display_value(row.get("top_support")),
                 "top_conflict": _display_value(row.get("top_conflict")),
-                "historical_analog_support": _display_value(row.get("historical_analog_support")),
+                "historical_analog_support": robustness_support_by_signal.get(
+                    signal_id, _display_value(row.get("historical_analog_support"))
+                ),
+                "analog_status": robustness_status_by_signal.get(signal_id, "Not available"),
                 "scan_id": generation,
                 "run_id": NOT_AVAILABLE,
                 "run_display": "Signal Discovery",

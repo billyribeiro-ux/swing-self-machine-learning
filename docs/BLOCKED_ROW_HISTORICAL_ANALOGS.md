@@ -58,11 +58,19 @@ Generation export now includes:
 
 - `blocked_row_analogs.csv`
 - `blocked_row_analog_summary.csv`
+- `analog_robustness.csv`
+- `analog_robustness_summary.csv`
+- `analog_depth_comparison.csv`
+- `analog_caution_flags.csv`
 
 Reports and Exports includes matching XLSX sheets:
 
 - `blocked_row_analogs`
 - `blocked_row_analog_summary`
+- `analog_robustness`
+- `analog_robustness_summary`
+- `analog_depth_comparison`
+- `analog_caution_flags`
 
 Candidate Detail shows a dedicated **Historical Analogs for Blocked Row**
 section when a blocked/research row has analog diagnostics. The section includes
@@ -92,3 +100,26 @@ The diagnostic produced 120 analog rows and 12 target-row summary rows.
 
 Analog support labels are research summaries only, not proof of edge.
 
+## Robustness Guard
+
+Historical Analog Robustness Guard V1 adds depth-aware support classification on
+top of the blocked-row analog output. It recomputes analog summaries at top 10,
+top 25, and top 50, persists concentration and tail-risk caution flags, and
+replaces simple support language with robust labels:
+
+- `ROBUST_SUPPORT`
+- `SUPPORTIVE_BUT_CONCENTRATED`
+- `MIXED_SUPPORT`
+- `WEAK_SUPPORT`
+- `INSUFFICIENT_ANALOGS`
+- `CONCENTRATION_ARTIFACT`
+- `DECAYS_WITH_DEPTH`
+
+For the latest generation, the SOXS 10-day SELL rows that looked `SUPPORTIVE`
+at top 10 are now classified as `CONCENTRATION_ARTIFACT`: the top-10 analogs
+were all SOXS from 2026, top-25 and top-50 support fell to `MIXED`, and
+target-before-stop hit rate decayed from 50.00% at top 10 to 28.00% at top 50.
+
+The robust label is still explanatory only. It does not change blocked row
+status, rejected status, gates, thresholds, OOD governance, scanner state, model
+artifacts, or paper-forward events.
