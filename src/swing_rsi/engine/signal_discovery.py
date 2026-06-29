@@ -49,9 +49,11 @@ from swing_rsi.engine.universe import load_universe_config
 SIGNAL_DISCOVERY_SCHEMA_VERSION = "multi_angle_signal_discovery_v1"
 SIGNAL_DISCOVERY_GENERATION_TYPE = "signal_discovery_generation"
 SIGNAL_DISCOVERY_BLOCKER_REPORT_SCHEMA_VERSION = "signal_discovery_blocker_report_v1"
+HISTORICAL_ANALOG_ROBUSTNESS_SCHEMA_VERSION = "historical_analog_robustness_v1"
 SIGNAL_DISCOVERY_DIR = "signal_discovery"
 DEFAULT_SIGNAL_DISCOVERY_CONFIG = Path("configs/signal_discovery/v1.yaml")
 DEFAULT_BLOCKED_ROW_ANALOG_COUNT = 10
+ANALOG_ROBUSTNESS_DEPTHS = (10, 25, 50)
 
 SignalDirection = Literal["BUY", "SELL_SHORT"]
 SignalAction = Literal["BUY", "SELL", "NO SIGNAL"]
@@ -147,6 +149,104 @@ BLOCKED_ROW_ANALOG_SUMMARY_COLUMNS = [
     "positive_forward_outcomes",
     "analog_count_note",
     "analog_footprint_summary",
+]
+
+ANALOG_DEPTH_COMPARISON_COLUMNS = [
+    "schema_version",
+    "target_row_id",
+    "target_signal_id",
+    "generation_id",
+    "target_as_of_date",
+    "target_ticker",
+    "target_direction",
+    "target_archetype",
+    "target_action",
+    "target_status",
+    "target_score",
+    "target_blocker_reason",
+    "target_hypothesis_id",
+    "target_model_id",
+    "target_product_scope",
+    "requested_depth",
+    "analog_count",
+    "depth_support_label",
+    "same_symbol_count",
+    "same_symbol_share",
+    "same_scope_count",
+    "same_scope_share",
+    "same_archetype_count",
+    "same_archetype_share",
+    "same_year_max_count",
+    "same_year_max_share",
+    "same_regime_max_count",
+    "same_regime_max_share",
+    "average_forward_return",
+    "median_forward_return",
+    "win_rate",
+    "target_before_stop_hit_rate",
+    "average_MFE",
+    "average_MAE",
+    "worst_MAE",
+    "best_MFE",
+    "return_standard_deviation",
+    "analog_dispersion_score",
+    "average_similarity",
+    "minimum_similarity",
+    "maximum_distance",
+    "coverage_note",
+]
+
+ANALOG_ROBUSTNESS_COLUMNS = [
+    "schema_version",
+    "target_row_id",
+    "target_signal_id",
+    "generation_id",
+    "target_as_of_date",
+    "target_ticker",
+    "target_direction",
+    "target_archetype",
+    "target_action",
+    "target_status",
+    "target_score",
+    "target_blocker_reason",
+    "target_hypothesis_id",
+    "target_model_id",
+    "target_product_scope",
+    "original_analog_support_label",
+    "robust_analog_support_label",
+    "analog_compact_status",
+    "top_10_summary_json",
+    "top_25_summary_json",
+    "top_50_summary_json",
+    "caution_flags",
+    "robustness_explanation",
+    "analog_evidence_usable_for_research",
+    "analog_evidence_too_concentrated",
+    "analog_evidence_contradicts_signal_score",
+]
+
+ANALOG_CAUTION_FLAG_COLUMNS = [
+    "schema_version",
+    "target_row_id",
+    "target_signal_id",
+    "generation_id",
+    "target_ticker",
+    "target_hypothesis_id",
+    "caution_flag",
+    "evidence",
+]
+
+ANALOG_ROBUSTNESS_SUMMARY_COLUMNS = [
+    "schema_version",
+    "generation_id",
+    "target_rows",
+    "robust_support_count",
+    "supportive_but_concentrated_count",
+    "mixed_support_count",
+    "weak_support_count",
+    "insufficient_analogs_count",
+    "concentration_artifact_count",
+    "decays_with_depth_count",
 ]
 
 
@@ -827,6 +927,16 @@ def export_signal_discovery_generation(
         target = output_dir / f"{name}.csv"
         blocked_frames.get(name, pd.DataFrame()).to_csv(target, index=False)
         written.append(target)
+    robustness_frames = signal_discovery_analog_robustness_frames(root, generation=generation)
+    for name in (
+        "analog_robustness",
+        "analog_robustness_summary",
+        "analog_depth_comparison",
+        "analog_caution_flags",
+    ):
+        target = output_dir / f"{name}.csv"
+        robustness_frames.get(name, pd.DataFrame()).to_csv(target, index=False)
+        written.append(target)
     metadata_source = generation_dir / "metadata.json"
     if metadata_source.exists():
         target = output_dir / metadata_source.name
@@ -883,11 +993,535 @@ def signal_discovery_blocked_analog_frames(
     }
 
 
+def signal_discovery_analog_robustness_frames(
+    root: str | Path,
+    *,
+    generation: str = "latest",
+) -> dict[str, pd.DataFrame]:
+    frames = signal_discovery_blocked_analog_frames(
+        root,
+        generation=generation,
+        analog_count=max(ANALOG_ROBUSTNESS_DEPTHS),
+    )
+    return historical_analog_robustness_frames_from_analogs(
+        frames.get("blocked_row_analogs", pd.DataFrame())
+    )
+
+
+def historical_analog_robustness_frames_from_analogs(
+    analogs: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    if analogs.empty or "target_signal_id" not in analogs.columns:
+        return _empty_analog_robustness_frames()
+
+    robustness_rows: list[dict[str, object]] = []
+    depth_rows: list[dict[str, object]] = []
+    flag_rows: list[dict[str, object]] = []
+    for _, group in analogs.groupby(analogs["target_signal_id"].astype(str), sort=False):
+        ordered = group.sort_values("analog_rank", kind="mergesort").copy()
+        target = _analog_target_payload(ordered.iloc[0])
+        summaries = {
+            depth: _analog_depth_summary(target, ordered.head(depth), requested_depth=depth)
+            for depth in ANALOG_ROBUSTNESS_DEPTHS
+        }
+        depth_rows.extend(summaries.values())
+        flags = _analog_robustness_flags(target, summaries, ordered)
+        label = _robust_analog_support_label(summaries, flags)
+        flag_rows.extend(
+            {
+                "schema_version": HISTORICAL_ANALOG_ROBUSTNESS_SCHEMA_VERSION,
+                "target_row_id": target["target_row_id"],
+                "target_signal_id": target["target_signal_id"],
+                "generation_id": target["generation_id"],
+                "target_ticker": target["target_ticker"],
+                "target_hypothesis_id": target["target_hypothesis_id"],
+                "caution_flag": flag,
+                "evidence": evidence,
+            }
+            for flag, evidence in flags.items()
+        )
+        robustness_rows.append(
+            _analog_robustness_row(
+                target=target,
+                summaries=summaries,
+                flags=tuple(flags),
+                robust_label=label,
+            )
+        )
+
+    robustness = pd.DataFrame(robustness_rows, columns=ANALOG_ROBUSTNESS_COLUMNS)
+    depth_comparison = pd.DataFrame(depth_rows, columns=ANALOG_DEPTH_COMPARISON_COLUMNS)
+    caution_flags = pd.DataFrame(flag_rows, columns=ANALOG_CAUTION_FLAG_COLUMNS)
+    summary = _analog_robustness_summary(robustness)
+    return {
+        "analog_robustness": robustness,
+        "analog_depth_comparison": depth_comparison,
+        "analog_caution_flags": caution_flags,
+        "analog_robustness_summary": summary,
+    }
+
+
+def write_signal_discovery_analog_robustness_report(
+    root: str | Path,
+    *,
+    generation: str = "latest",
+) -> tuple[Path, ...]:
+    project_root = Path(root)
+    frames = signal_discovery_analog_robustness_frames(project_root, generation=generation)
+    output_dir = ProjectPaths(project_root).reports / "signal_discovery_v1"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    csv_names = {
+        "analog_robustness": "analog_robustness.csv",
+        "analog_robustness_summary": "analog_robustness_summary.csv",
+        "analog_depth_comparison": "analog_depth_comparison.csv",
+        "analog_caution_flags": "analog_caution_flags.csv",
+    }
+    for name, filename in csv_names.items():
+        path = output_dir / filename
+        frames.get(name, pd.DataFrame()).to_csv(path, index=False)
+        written.append(path)
+
+    json_path = output_dir / "analog_robustness.json"
+    json_payload = {
+        "schema_version": HISTORICAL_ANALOG_ROBUSTNESS_SCHEMA_VERSION,
+        "generation": generation,
+        "frames": {name: frame.to_dict(orient="records") for name, frame in frames.items()},
+    }
+    json_path.write_text(
+        json.dumps(json_payload, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    written.append(json_path)
+
+    xlsx_path = output_dir / "analog_robustness.xlsx"
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+        for name, frame in frames.items():
+            frame.to_excel(writer, sheet_name=name[:31], index=False)
+    written.append(xlsx_path)
+    return tuple(written)
+
+
 def _empty_blocked_analog_frames() -> dict[str, pd.DataFrame]:
     return {
         "blocked_row_analogs": pd.DataFrame(columns=BLOCKED_ROW_ANALOG_COLUMNS),
         "blocked_row_analog_summary": pd.DataFrame(columns=BLOCKED_ROW_ANALOG_SUMMARY_COLUMNS),
     }
+
+
+def _empty_analog_robustness_frames() -> dict[str, pd.DataFrame]:
+    return {
+        "analog_robustness": pd.DataFrame(columns=ANALOG_ROBUSTNESS_COLUMNS),
+        "analog_depth_comparison": pd.DataFrame(columns=ANALOG_DEPTH_COMPARISON_COLUMNS),
+        "analog_caution_flags": pd.DataFrame(columns=ANALOG_CAUTION_FLAG_COLUMNS),
+        "analog_robustness_summary": pd.DataFrame(columns=ANALOG_ROBUSTNESS_SUMMARY_COLUMNS),
+    }
+
+
+def _analog_target_payload(row: pd.Series) -> dict[str, object]:
+    return {
+        "target_row_id": str(row.get("target_row_id") or row.get("target_signal_id") or ""),
+        "target_signal_id": str(row.get("target_signal_id") or row.get("target_row_id") or ""),
+        "generation_id": str(row.get("generation_id") or ""),
+        "target_as_of_date": str(row.get("target_as_of_date") or ""),
+        "target_ticker": str(row.get("target_ticker") or ""),
+        "target_direction": str(row.get("target_direction") or ""),
+        "target_archetype": str(row.get("target_archetype") or ""),
+        "target_action": str(row.get("target_action") or ""),
+        "target_status": str(row.get("target_status") or ""),
+        "target_score": _as_float(row.get("target_score"), default=math.nan),
+        "target_blocker_reason": str(row.get("target_blocker_reason") or ""),
+        "target_hypothesis_id": str(row.get("target_hypothesis_id") or ""),
+        "target_model_id": str(row.get("target_model_id") or ""),
+        "target_product_scope": str(row.get("target_product_scope") or ""),
+    }
+
+
+def _share(count: int, total: int) -> float:
+    return float(count / total) if total else math.nan
+
+
+def _max_count_and_share(series: pd.Series, count: int) -> tuple[int, float]:
+    values = series.dropna().astype(str)
+    values = values.loc[values.str.len() > 0]
+    if values.empty:
+        return 0, math.nan
+    max_count = int(values.value_counts().iloc[0])
+    return max_count, _share(max_count, count)
+
+
+def _analog_depth_summary(
+    target: dict[str, object],
+    analogs: pd.DataFrame,
+    *,
+    requested_depth: int,
+) -> dict[str, object]:
+    count = len(analogs)
+    returns = pd.to_numeric(analogs.get("forward_return", pd.Series(dtype=float)), errors="coerce")
+    mfes = pd.to_numeric(analogs.get("MFE", pd.Series(dtype=float)), errors="coerce")
+    maes = pd.to_numeric(analogs.get("MAE", pd.Series(dtype=float)), errors="coerce")
+    similarity = pd.to_numeric(
+        analogs.get("similarity_score", pd.Series(dtype=float)), errors="coerce"
+    )
+    distance = pd.to_numeric(analogs.get("distance_score", pd.Series(dtype=float)), errors="coerce")
+    tbs = (
+        analogs.get("target_before_stop_result", pd.Series(dtype=str))
+        .astype(str)
+        .str.lower()
+        .eq("target before stop")
+    )
+    years = pd.to_datetime(
+        analogs.get("analog_date", pd.Series(dtype=str)), errors="coerce"
+    ).dt.year
+    same_symbol = int(analogs.get("same_symbol", pd.Series(dtype=bool)).eq(True).sum())
+    same_scope = int(analogs.get("same_product_scope", pd.Series(dtype=bool)).eq(True).sum())
+    same_archetype = int(analogs.get("same_archetype", pd.Series(dtype=bool)).eq(True).sum())
+    same_year_count, same_year_share = _max_count_and_share(years, count)
+    same_regime_count, same_regime_share = _max_count_and_share(
+        analogs.get("market_regime", pd.Series(dtype=str)),
+        count,
+    )
+    average_return = _safe_mean(returns)
+    return_std = float(returns.dropna().std(ddof=0)) if not returns.dropna().empty else math.nan
+    dispersion = (
+        return_std / max(abs(average_return), 0.01)
+        if math.isfinite(return_std) and math.isfinite(average_return)
+        else math.nan
+    )
+    win_rate = _safe_mean((returns > 0.0).astype(float)) if count else math.nan
+    tbs_hit_rate = _safe_mean(tbs.astype(float)) if count else math.nan
+    depth_label = _analog_support_label(
+        count=count,
+        average_return=average_return,
+        win_rate=win_rate,
+        tbs_hit_rate=tbs_hit_rate,
+    )
+    return {
+        "schema_version": HISTORICAL_ANALOG_ROBUSTNESS_SCHEMA_VERSION,
+        **target,
+        "requested_depth": requested_depth,
+        "analog_count": count,
+        "depth_support_label": depth_label,
+        "same_symbol_count": same_symbol,
+        "same_symbol_share": _share(same_symbol, count),
+        "same_scope_count": same_scope,
+        "same_scope_share": _share(same_scope, count),
+        "same_archetype_count": same_archetype,
+        "same_archetype_share": _share(same_archetype, count),
+        "same_year_max_count": same_year_count,
+        "same_year_max_share": same_year_share,
+        "same_regime_max_count": same_regime_count,
+        "same_regime_max_share": same_regime_share,
+        "average_forward_return": average_return,
+        "median_forward_return": _safe_median(returns),
+        "win_rate": win_rate,
+        "target_before_stop_hit_rate": tbs_hit_rate,
+        "average_MFE": _safe_mean(mfes),
+        "average_MAE": _safe_mean(maes),
+        "worst_MAE": _safe_min(maes),
+        "best_MFE": _safe_max(mfes),
+        "return_standard_deviation": return_std,
+        "analog_dispersion_score": dispersion,
+        "average_similarity": _safe_mean(similarity),
+        "minimum_similarity": _safe_min(similarity),
+        "maximum_distance": _safe_max(distance),
+        "coverage_note": _analog_count_note(count, requested_depth),
+    }
+
+
+def _summary_float(summary: dict[str, object], key: str) -> float:
+    return _as_float(summary.get(key), default=math.nan)
+
+
+def _max_finite(values: list[float]) -> float:
+    finite = [value for value in values if math.isfinite(value)]
+    return max(finite) if finite else math.nan
+
+
+def _min_finite(values: list[float]) -> float:
+    finite = [value for value in values if math.isfinite(value)]
+    return min(finite) if finite else math.nan
+
+
+def _depth_is_supportive(summary: dict[str, object]) -> bool:
+    return str(summary.get("depth_support_label") or "") == "SUPPORTIVE"
+
+
+def _depth_available(summary: dict[str, object]) -> bool:
+    return int(_as_float(summary.get("analog_count"), default=0.0)) >= int(
+        _as_float(summary.get("requested_depth"), default=0.0)
+    )
+
+
+def _analog_robustness_flags(
+    target: dict[str, object],
+    summaries: dict[int, dict[str, object]],
+    analogs: pd.DataFrame,
+) -> dict[str, str]:
+    flags: dict[str, str] = {}
+    max_same_symbol = _max_finite(
+        [_summary_float(summary, "same_symbol_share") for summary in summaries.values()]
+    )
+    max_same_year = _max_finite(
+        [_summary_float(summary, "same_year_max_share") for summary in summaries.values()]
+    )
+    max_same_regime = _max_finite(
+        [_summary_float(summary, "same_regime_max_share") for summary in summaries.values()]
+    )
+    min_same_scope = _min_finite(
+        [_summary_float(summary, "same_scope_share") for summary in summaries.values()]
+    )
+    max_return_std = _max_finite(
+        [_summary_float(summary, "return_standard_deviation") for summary in summaries.values()]
+    )
+    max_dispersion = _max_finite(
+        [_summary_float(summary, "analog_dispersion_score") for summary in summaries.values()]
+    )
+    worst_mae = _min_finite(
+        [_summary_float(summary, "worst_MAE") for summary in summaries.values()]
+    )
+    top10 = summaries[10]
+    if max_same_symbol >= 0.70:
+        flags["same_symbol_concentration"] = (
+            f"Maximum same-symbol share is {max_same_symbol:.2%} across robustness depths."
+        )
+    if max_same_year >= 0.70:
+        flags["same_year_concentration"] = (
+            f"Maximum same-year share is {max_same_year:.2%} across robustness depths."
+        )
+    if max_same_regime >= 0.80:
+        flags["same_regime_concentration"] = (
+            f"Maximum same-regime share is {max_same_regime:.2%} across robustness depths."
+        )
+    if math.isfinite(min_same_scope) and min_same_scope < 0.80:
+        flags["same_scope_scarcity"] = (
+            f"Minimum same-scope share is {min_same_scope:.2%}; cross-scope fallback affects analog support."
+        )
+    if any(not _depth_available(summary) for summary in summaries.values()):
+        flags["low_analog_count"] = (
+            "At least one requested robustness depth had fewer analogs than requested."
+        )
+    if (
+        math.isfinite(max_return_std)
+        and math.isfinite(max_dispersion)
+        and (max_return_std >= 0.25 or max_dispersion >= 1.50)
+    ):
+        flags["high_return_dispersion"] = (
+            f"Maximum return standard deviation is {max_return_std:.2%}; "
+            f"maximum dispersion score is {max_dispersion:.2f}."
+        )
+    if math.isfinite(worst_mae) and worst_mae <= -0.20:
+        flags["high_mae_tail_risk"] = f"Worst analog MAE is {worst_mae:.2%}."
+    top10_tbs = _summary_float(top10, "target_before_stop_hit_rate")
+    for depth in (25, 50):
+        depth_tbs = _summary_float(summaries[depth], "target_before_stop_hit_rate")
+        if math.isfinite(top10_tbs) and math.isfinite(depth_tbs) and top10_tbs - depth_tbs >= 0.15:
+            flags["tbs_support_decay"] = (
+                f"Target-before-stop hit rate decays from {top10_tbs:.2%} at top 10 "
+                f"to {depth_tbs:.2%} at top {depth}."
+            )
+            break
+    if _depth_is_supportive(top10) and not _depth_is_supportive(summaries[25]):
+        flags["support_decays_top25"] = "Top-10 support does not remain SUPPORTIVE at top 25."
+    if _depth_is_supportive(top10) and not _depth_is_supportive(summaries[50]):
+        flags["support_decays_top50"] = "Top-10 support does not remain SUPPORTIVE at top 50."
+    target_text = " ".join(
+        str(target.get(key) or "") for key in ("target_status", "target_blocker_reason")
+    ).lower()
+    if "ood" in target_text:
+        flags["ood_target_row"] = "Target row is rejected or blocked by OOD policy."
+    top10_analogs = analogs.head(10).copy()
+    if len(top10_analogs) >= 3:
+        dates = pd.to_datetime(
+            top10_analogs.get("analog_date", pd.Series(dtype=str)), errors="coerce"
+        )
+        valid_dates = dates.dropna()
+        span = (valid_dates.max() - valid_dates.min()).days if len(valid_dates) >= 2 else 0
+        if (
+            _summary_float(top10, "same_symbol_share") >= 0.80
+            and _summary_float(top10, "same_year_max_share") >= 0.80
+            and span <= 45
+        ):
+            flags["analogs_mostly_same_event_cluster"] = (
+                f"Top-10 analogs are mostly one ticker/year over a {span}-day window."
+            )
+    return flags
+
+
+def _robust_analog_support_label(
+    summaries: dict[int, dict[str, object]],
+    flags: dict[str, str],
+) -> str:
+    top10 = summaries[10]
+    if int(_as_float(top10.get("analog_count"), default=0.0)) < 10:
+        return "INSUFFICIENT_ANALOGS"
+    top10_supportive = _depth_is_supportive(top10)
+    concentration_flags = {
+        "same_symbol_concentration",
+        "same_year_concentration",
+        "same_regime_concentration",
+        "analogs_mostly_same_event_cluster",
+    }
+    decay_flags = {"support_decays_top25", "support_decays_top50", "tbs_support_decay"}
+    risk_flags = {"high_return_dispersion", "high_mae_tail_risk"}
+    has_concentration = bool(concentration_flags.intersection(flags))
+    has_decay = bool(decay_flags.intersection(flags))
+    if top10_supportive and has_concentration and has_decay:
+        return "CONCENTRATION_ARTIFACT"
+    if top10_supportive and has_decay:
+        return "DECAYS_WITH_DEPTH"
+    support_survives = top10_supportive and all(
+        _depth_is_supportive(summary) for summary in summaries.values() if _depth_available(summary)
+    )
+    if support_survives:
+        if bool(risk_flags.intersection(flags)):
+            return "MIXED_SUPPORT"
+        if has_concentration:
+            return "SUPPORTIVE_BUT_CONCENTRATED"
+        return "ROBUST_SUPPORT"
+    if str(top10.get("depth_support_label") or "") == "WEAK":
+        return "WEAK_SUPPORT"
+    return "MIXED_SUPPORT"
+
+
+def _analog_compact_status(label: str) -> str:
+    return {
+        "ROBUST_SUPPORT": "Robust Analog Support",
+        "SUPPORTIVE_BUT_CONCENTRATED": "Supportive But Concentrated",
+        "MIXED_SUPPORT": "Mixed Analog Support",
+        "WEAK_SUPPORT": "Weak Analog Support",
+        "INSUFFICIENT_ANALOGS": "Insufficient Analogs",
+        "CONCENTRATION_ARTIFACT": "Concentration Artifact",
+        "DECAYS_WITH_DEPTH": "Decays With Depth",
+    }.get(label, label.replace("_", " ").title())
+
+
+def _analog_robustness_explanation(
+    target: dict[str, object],
+    summaries: dict[int, dict[str, object]],
+    flags: tuple[str, ...],
+    label: str,
+) -> str:
+    ticker = str(target.get("target_ticker") or "Target")
+    top10 = summaries[10]
+    top25 = summaries[25]
+    top50 = summaries[50]
+    if label == "CONCENTRATION_ARTIFACT":
+        return (
+            f"Top-10 analogs looked {str(top10.get('depth_support_label')).lower()}, but "
+            f"{int(_as_float(top10.get('same_symbol_count'), default=0.0))}/"
+            f"{int(_as_float(top10.get('analog_count'), default=0.0))} were {ticker} and "
+            f"the same-year max share was {_summary_float(top10, 'same_year_max_share'):.2%}. "
+            "Support degraded at expanded depths, so this is classified as a concentration "
+            "artifact rather than robust evidence."
+        )
+    if label == "DECAYS_WITH_DEPTH":
+        return (
+            "Top-10 analogs were supportive, but support decayed at top-25 or top-50 without "
+            "a dominant concentration flag. Analog evidence is explanatory and non-robust."
+        )
+    if label == "SUPPORTIVE_BUT_CONCENTRATED":
+        return (
+            "Analog support remains positive across available depths, but concentration flags "
+            "remain active. Treat as research-only support, not independent confirmation."
+        )
+    if label == "ROBUST_SUPPORT":
+        return (
+            "Analog support remains supportive across available depths without excessive "
+            "symbol/year/regime concentration, return dispersion, or MAE tail risk."
+        )
+    if label == "INSUFFICIENT_ANALOGS":
+        return "Fewer than 10 valid pre-target analogs were available; robustness is insufficient."
+    if label == "WEAK_SUPPORT":
+        return "Analog outcomes are weak at the nearest depth and do not support the target row."
+    if top10.get("depth_support_label") == "SUPPORTIVE":
+        return (
+            f"Top-10 analogs were supportive, but top-25 is {top25.get('depth_support_label')} "
+            f"and top-50 is {top50.get('depth_support_label')}. Evidence remains mixed."
+        )
+    if flags:
+        return "Analog evidence is mixed with caution flags: " + ", ".join(flags) + "."
+    return "Analog evidence is mixed and remains explanatory only."
+
+
+def _analog_robustness_row(
+    *,
+    target: dict[str, object],
+    summaries: dict[int, dict[str, object]],
+    flags: tuple[str, ...],
+    robust_label: str,
+) -> dict[str, object]:
+    flag_text = ";".join(flags)
+    original = str(summaries[10].get("depth_support_label") or "INSUFFICIENT_ANALOGS")
+    concentration_flags = {
+        "same_symbol_concentration",
+        "same_year_concentration",
+        "same_regime_concentration",
+        "analogs_mostly_same_event_cluster",
+    }
+    too_concentrated = robust_label == "CONCENTRATION_ARTIFACT" or bool(
+        concentration_flags.intersection(flags)
+    )
+    target_score = _as_float(target.get("target_score"), default=math.nan)
+    contradicts_score = (
+        math.isfinite(target_score)
+        and target_score >= 0.55
+        and robust_label in {"WEAK_SUPPORT", "INSUFFICIENT_ANALOGS"}
+    )
+    usable = robust_label not in {
+        "CONCENTRATION_ARTIFACT",
+        "INSUFFICIENT_ANALOGS",
+        "WEAK_SUPPORT",
+    }
+    explanation = _analog_robustness_explanation(target, summaries, flags, robust_label)
+    return {
+        "schema_version": HISTORICAL_ANALOG_ROBUSTNESS_SCHEMA_VERSION,
+        **target,
+        "original_analog_support_label": original,
+        "robust_analog_support_label": robust_label,
+        "analog_compact_status": _analog_compact_status(robust_label),
+        "top_10_summary_json": json.dumps(summaries[10], sort_keys=True, default=str),
+        "top_25_summary_json": json.dumps(summaries[25], sort_keys=True, default=str),
+        "top_50_summary_json": json.dumps(summaries[50], sort_keys=True, default=str),
+        "caution_flags": flag_text,
+        "robustness_explanation": explanation,
+        "analog_evidence_usable_for_research": usable,
+        "analog_evidence_too_concentrated": too_concentrated,
+        "analog_evidence_contradicts_signal_score": contradicts_score,
+    }
+
+
+def _analog_robustness_summary(robustness: pd.DataFrame) -> pd.DataFrame:
+    counts = (
+        robustness.get("robust_analog_support_label", pd.Series(dtype=str))
+        .astype(str)
+        .value_counts()
+        .to_dict()
+    )
+    generation_id = (
+        str(robustness.iloc[0].get("generation_id"))
+        if not robustness.empty and "generation_id" in robustness.columns
+        else ""
+    )
+    return pd.DataFrame(
+        [
+            {
+                "schema_version": HISTORICAL_ANALOG_ROBUSTNESS_SCHEMA_VERSION,
+                "generation_id": generation_id,
+                "target_rows": len(robustness),
+                "robust_support_count": int(counts.get("ROBUST_SUPPORT", 0)),
+                "supportive_but_concentrated_count": int(
+                    counts.get("SUPPORTIVE_BUT_CONCENTRATED", 0)
+                ),
+                "mixed_support_count": int(counts.get("MIXED_SUPPORT", 0)),
+                "weak_support_count": int(counts.get("WEAK_SUPPORT", 0)),
+                "insufficient_analogs_count": int(counts.get("INSUFFICIENT_ANALOGS", 0)),
+                "concentration_artifact_count": int(counts.get("CONCENTRATION_ARTIFACT", 0)),
+                "decays_with_depth_count": int(counts.get("DECAYS_WITH_DEPTH", 0)),
+            }
+        ],
+        columns=ANALOG_ROBUSTNESS_SUMMARY_COLUMNS,
+    )
 
 
 def _blocked_analog_target_rows(candidates: pd.DataFrame) -> pd.DataFrame:

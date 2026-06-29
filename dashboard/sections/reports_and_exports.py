@@ -255,6 +255,10 @@ def render_page() -> None:
             "historical_analogs",
             "blocked_row_analogs",
             "blocked_row_analog_summary",
+            "analog_robustness",
+            "analog_robustness_summary",
+            "analog_depth_comparison",
+            "analog_caution_flags",
             "score_components",
             "gate_results",
         }
