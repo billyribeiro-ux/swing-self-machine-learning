@@ -45,15 +45,19 @@ MISSING_EVIDENCE_AUDIT_COLUMNS = [
     "Status",
 ]
 ANALOG_COLUMNS = [
+    "analog_rank",
     "analog_date",
     "symbol",
     "scope",
+    "archetype",
     "regime",
     "similarity",
     "forward_return",
     "MFE",
     "MAE",
     "target_before_stop_result",
+    "same_product_scope",
+    "same_archetype",
 ]
 
 
@@ -705,19 +709,41 @@ def _historical_analog_frame(candidate: pd.Series) -> pd.DataFrame:
     for item in loaded:
         if not isinstance(item, dict):
             continue
+        direction = _clean(candidate.get("direction")).lower()
+        horizon = _clean(candidate.get("horizon")) or "10"
+        label_prefix = "label_bear" if direction.startswith("bear") else "label_bull"
         rows.append(
             {
-                "analog_date": _date_string(item.get("Date")),
-                "symbol": _clean(item.get("symbol")) or NOT_AVAILABLE,
-                "scope": _clean(item.get("scope")) or scope or NOT_AVAILABLE,
+                "analog_rank": _clean(item.get("analog_rank")) or NOT_AVAILABLE,
+                "analog_date": _date_string(item.get("analog_date", item.get("Date"))),
+                "symbol": _clean(item.get("analog_ticker", item.get("symbol"))) or NOT_AVAILABLE,
+                "scope": _clean(item.get("analog_scope", item.get("scope")))
+                or scope
+                or NOT_AVAILABLE,
+                "archetype": _clean(item.get("analog_archetype")) or NOT_AVAILABLE,
                 "regime": _clean(item.get("regime")) or regime or NOT_AVAILABLE,
-                "similarity": _format_number(item.get("similarity", item.get("distance"))),
-                "forward_return": _format_percent(item.get("label_bull_forward_return_10")),
-                "MFE": _format_percent(item.get("label_bull_mfe_10")),
-                "MAE": _format_percent(item.get("label_bull_mae_10")),
-                "target_before_stop_result": _target_before_stop_label(
-                    item.get("label_bull_target_before_stop_10")
+                "similarity": _format_number(
+                    item.get(
+                        "similarity_score",
+                        item.get("similarity", item.get("distance")),
+                    )
                 ),
+                "forward_return": _format_percent(
+                    item.get(
+                        "forward_return",
+                        item.get(f"{label_prefix}_forward_return_{horizon}"),
+                    )
+                ),
+                "MFE": _format_percent(item.get("MFE", item.get(f"{label_prefix}_mfe_{horizon}"))),
+                "MAE": _format_percent(item.get("MAE", item.get(f"{label_prefix}_mae_{horizon}"))),
+                "target_before_stop_result": _target_before_stop_label(
+                    item.get(
+                        "target_before_stop_result",
+                        item.get(f"{label_prefix}_target_before_stop_{horizon}"),
+                    )
+                ),
+                "same_product_scope": _clean(item.get("same_product_scope")) or NOT_AVAILABLE,
+                "same_archetype": _clean(item.get("same_archetype")) or NOT_AVAILABLE,
             }
         )
     return pd.DataFrame(rows, columns=ANALOG_COLUMNS)
@@ -1166,6 +1192,9 @@ def _parse_percent(value: object) -> float | None:
 
 
 def _target_before_stop_label(value: object) -> str:
+    text = _clean(value).lower()
+    if text in {"target before stop", "stop before target"}:
+        return text
     numeric = _as_float(value)
     if numeric is None:
         return EVIDENCE_UNAVAILABLE

@@ -51,6 +51,7 @@ SIGNAL_DISCOVERY_GENERATION_TYPE = "signal_discovery_generation"
 SIGNAL_DISCOVERY_BLOCKER_REPORT_SCHEMA_VERSION = "signal_discovery_blocker_report_v1"
 SIGNAL_DISCOVERY_DIR = "signal_discovery"
 DEFAULT_SIGNAL_DISCOVERY_CONFIG = Path("configs/signal_discovery/v1.yaml")
+DEFAULT_BLOCKED_ROW_ANALOG_COUNT = 10
 
 SignalDirection = Literal["BUY", "SELL_SHORT"]
 SignalAction = Literal["BUY", "SELL", "NO SIGNAL"]
@@ -73,6 +74,80 @@ ALL_FEATURE_FAMILIES = (
     "relationship_graph",
     "regime",
 )
+
+BLOCKED_ROW_ANALOG_COLUMNS = [
+    "target_row_id",
+    "target_signal_id",
+    "generation_id",
+    "target_as_of_date",
+    "target_ticker",
+    "target_direction",
+    "target_archetype",
+    "target_action",
+    "target_status",
+    "target_score",
+    "target_blocker_reason",
+    "target_hypothesis_id",
+    "target_model_id",
+    "target_product_scope",
+    "target_selection_reason",
+    "analog_rank",
+    "analog_date",
+    "analog_ticker",
+    "analog_scope",
+    "analog_direction",
+    "analog_archetype",
+    "analog_pool",
+    "similarity_score",
+    "distance_score",
+    "same_symbol",
+    "same_product_scope",
+    "same_archetype",
+    "same_direction",
+    "market_regime",
+    "forward_return",
+    "MFE",
+    "MAE",
+    "target_before_stop_result",
+    "analog_would_have_passed_current_thresholds",
+    "analog_rejection_reason",
+    "outcome_labels_used_for_explanation_only",
+]
+
+BLOCKED_ROW_ANALOG_SUMMARY_COLUMNS = [
+    "target_row_id",
+    "target_signal_id",
+    "generation_id",
+    "target_as_of_date",
+    "target_ticker",
+    "target_direction",
+    "target_archetype",
+    "target_action",
+    "target_status",
+    "target_score",
+    "target_blocker_reason",
+    "target_hypothesis_id",
+    "target_model_id",
+    "target_product_scope",
+    "target_selection_reason",
+    "analog_count",
+    "requested_analog_count",
+    "same_scope_analog_count",
+    "same_archetype_analog_count",
+    "average_forward_return",
+    "median_forward_return",
+    "win_rate",
+    "target_before_stop_hit_rate",
+    "average_MFE",
+    "average_MAE",
+    "worst_MAE",
+    "best_MFE",
+    "analog_support_label",
+    "key_caution",
+    "positive_forward_outcomes",
+    "analog_count_note",
+    "analog_footprint_summary",
+]
 
 
 @dataclass(frozen=True)
@@ -544,6 +619,8 @@ def load_signal_discovery_frames(
         "rejected",
         "footprint_evidence",
         "historical_analogs",
+        "blocked_row_analogs",
+        "blocked_row_analog_summary",
         "score_components",
         "gate_results",
         "summary",
@@ -745,12 +822,540 @@ def export_signal_discovery_generation(
         target = output_dir / source.name
         shutil.copyfile(source, target)
         written.append(target)
+    blocked_frames = signal_discovery_blocked_analog_frames(root, generation=generation)
+    for name in ("blocked_row_analogs", "blocked_row_analog_summary"):
+        target = output_dir / f"{name}.csv"
+        blocked_frames.get(name, pd.DataFrame()).to_csv(target, index=False)
+        written.append(target)
     metadata_source = generation_dir / "metadata.json"
     if metadata_source.exists():
         target = output_dir / metadata_source.name
         shutil.copyfile(metadata_source, target)
         written.append(target)
     return tuple(written)
+
+
+def signal_discovery_blocked_analog_frames(
+    root: str | Path,
+    *,
+    generation: str = "latest",
+    analog_count: int = DEFAULT_BLOCKED_ROW_ANALOG_COUNT,
+) -> dict[str, pd.DataFrame]:
+    frames = load_signal_discovery_frames(root, generation=generation)
+    if not frames:
+        return _empty_blocked_analog_frames()
+    candidates = frames.get("candidates", pd.DataFrame())
+    hypotheses = frames.get("hypotheses", pd.DataFrame())
+    if candidates.empty or hypotheses.empty:
+        return _empty_blocked_analog_frames()
+    try:
+        modeling, _ = _latest_modeling_frame(ProjectPaths(Path(root)))
+    except FileNotFoundError:
+        return _empty_blocked_analog_frames()
+
+    target_rows = _blocked_analog_target_rows(candidates)
+    analog_rows: list[dict[str, object]] = []
+    summary_rows: list[dict[str, object]] = []
+    for _, target in target_rows.iterrows():
+        target_analogs = _blocked_analogs_for_target(
+            target,
+            hypotheses,
+            modeling,
+            analog_count=analog_count,
+        )
+        analog_rows.extend(target_analogs)
+        summary_rows.append(
+            _blocked_analog_summary_for_target(
+                target,
+                target_analogs,
+                requested_analog_count=analog_count,
+            )
+        )
+    return {
+        "blocked_row_analogs": pd.DataFrame(
+            analog_rows,
+            columns=BLOCKED_ROW_ANALOG_COLUMNS,
+        ),
+        "blocked_row_analog_summary": pd.DataFrame(
+            summary_rows,
+            columns=BLOCKED_ROW_ANALOG_SUMMARY_COLUMNS,
+        ),
+    }
+
+
+def _empty_blocked_analog_frames() -> dict[str, pd.DataFrame]:
+    return {
+        "blocked_row_analogs": pd.DataFrame(columns=BLOCKED_ROW_ANALOG_COLUMNS),
+        "blocked_row_analog_summary": pd.DataFrame(columns=BLOCKED_ROW_ANALOG_SUMMARY_COLUMNS),
+    }
+
+
+def _blocked_analog_target_rows(candidates: pd.DataFrame) -> pd.DataFrame:
+    if candidates.empty:
+        return pd.DataFrame(columns=candidates.columns)
+    frame = candidates.copy()
+    frame["_decision"] = frame.get("decision", pd.Series(dtype=str)).astype(str)
+    blocked = frame.loc[
+        frame["_decision"].eq("NO_SIGNAL") | frame["_decision"].str.startswith("REJECTED")
+    ].copy()
+    if blocked.empty:
+        return blocked.drop(columns=["_decision"], errors="ignore")
+    blocked["_score_rank"] = pd.to_numeric(
+        blocked.get("signal_score", pd.Series(dtype=float)), errors="coerce"
+    ).fillna(-math.inf)
+    blocked["_blocker_reason"] = [_target_blocker_reason(row) for _, row in blocked.iterrows()]
+    selections: list[pd.DataFrame] = []
+    direction_series = (
+        blocked["direction"].astype(str)
+        if "direction" in blocked.columns
+        else pd.Series("", index=blocked.index, dtype=str)
+    )
+    for direction in ("Bullish", "Bearish"):
+        direction_rows = blocked.loc[direction_series == direction]
+        if not direction_rows.empty:
+            selected = direction_rows.sort_values(
+                ["_score_rank", "ticker", "hypothesis_id"],
+                ascending=[False, True, True],
+            ).head(5)
+            selections.append(selected.assign(_target_selection_reason=f"top_{direction.lower()}"))
+    for reason in (
+        "probability_below_threshold",
+        "target_before_stop_probability_below_threshold",
+        "ood_feature_rate_above_limit",
+    ):
+        reason_rows = blocked.loc[blocked["_blocker_reason"].astype(str).eq(reason)]
+        if not reason_rows.empty:
+            selections.append(
+                reason_rows.sort_values(
+                    ["_score_rank", "ticker", "hypothesis_id"],
+                    ascending=[False, True, True],
+                )
+                .head(3)
+                .assign(_target_selection_reason=f"top_{reason}")
+            )
+    if not selections:
+        return blocked.iloc[0:0].drop(columns=["_decision"], errors="ignore")
+    selected = pd.concat(selections, ignore_index=False, sort=False)
+    selected = (
+        selected.sort_values(
+            ["_score_rank", "ticker", "hypothesis_id"], ascending=[False, True, True]
+        )
+        .loc[lambda output: ~output.index.duplicated(keep="first")]
+        .copy()
+    )
+    if "_target_selection_reason" not in selected.columns:
+        selected["_target_selection_reason"] = "top_blocked_row"
+    return selected.drop(columns=["_decision"], errors="ignore").reset_index(drop=True)
+
+
+def _blocked_analogs_for_target(
+    target: pd.Series,
+    hypotheses: pd.DataFrame,
+    modeling: pd.DataFrame,
+    *,
+    analog_count: int,
+) -> list[dict[str, object]]:
+    features = _hypothesis_selected_features_for_target(target, hypotheses)
+    features = _distance_feature_columns(features, modeling.columns)
+    labels = _hypothesis_outcome_labels_for_target(target, hypotheses)
+    required_labels = [
+        labels.get("directional_return", ""),
+        labels.get("mfe", ""),
+        labels.get("mae", ""),
+        labels.get("target_before_stop", ""),
+    ]
+    if not features or any(label not in modeling.columns for label in required_labels):
+        return []
+    target_date = pd.Timestamp(str(target.get("as_of_date"))).normalize()
+    if pd.isna(target_date):
+        return []
+    dated = modeling.copy()
+    date_values = dated["Date"] if "Date" in dated.columns else pd.Series(pd.NaT, index=dated.index)
+    dated["_analog_date"] = pd.to_datetime(date_values, errors="coerce").dt.normalize()
+    historical = dated.loc[dated["_analog_date"] < target_date].copy()
+    historical = historical.dropna(subset=["_analog_date", "symbol", *required_labels])
+    if historical.empty:
+        return []
+    target_payload = {str(key): value for key, value in target.to_dict().items()}
+    current_values = _candidate_selected_feature_values(target_payload, tuple(features))
+    if current_values is None:
+        current_values = _target_feature_values_from_modeling(target, dated, features)
+    if current_values is None:
+        return []
+
+    feature_frame = _numeric_feature_frame(historical, features)
+    current_frame = _numeric_feature_frame(pd.DataFrame([current_values]), features)
+    medians = feature_frame.median(axis=0, skipna=True)
+    feature_frame = feature_frame.fillna(medians).fillna(0.0)
+    current_row = current_frame.fillna(medians).fillna(0.0).iloc[0]
+    scale = feature_frame.std(axis=0, ddof=0).replace(0.0, np.nan).fillna(1.0)
+    distances = (((feature_frame - current_row) / scale) ** 2).sum(axis=1).pow(0.5)
+    scored = historical.copy()
+    scored["_distance_score"] = distances
+    scored["_analog_scope"] = scored.apply(_row_scope, axis=1)
+    target_scope = str(
+        target.get("product_class_scope") or target.get("scope") or PRODUCT_CLASS_SCOPE_POOLED
+    )
+    same_scope = scored.loc[scored["_analog_scope"].astype(str).eq(target_scope)].copy()
+    cross_scope = scored.loc[~scored["_analog_scope"].astype(str).eq(target_scope)].copy()
+    selected_same = _nearest_analog_rows(same_scope, limit=analog_count)
+    remaining = max(analog_count - len(selected_same), 0)
+    selected_cross = (
+        _nearest_analog_rows(cross_scope, limit=remaining) if remaining else cross_scope.iloc[0:0]
+    )
+    selected_same = selected_same.assign(_analog_pool="same_scope")
+    selected_cross = selected_cross.assign(_analog_pool="cross_scope_fallback")
+    selected = pd.concat([selected_same, selected_cross], ignore_index=False, sort=False)
+    if selected.empty:
+        return []
+
+    rows: list[dict[str, object]] = []
+    for rank, (_, row) in enumerate(selected.iterrows(), start=1):
+        distance = _as_float(row.get("_distance_score"), default=math.nan)
+        similarity = 1.0 / (1.0 + distance) if math.isfinite(distance) else math.nan
+        analog_scope = str(row.get("_analog_scope") or PRODUCT_CLASS_SCOPE_POOLED)
+        analog_symbol = str(row.get("symbol") or "")
+        target_ticker = str(target.get("ticker") or target.get("symbol") or "")
+        target_direction = str(target.get("direction") or "")
+        target_archetype = str(target.get("archetype") or "")
+        rows.append(
+            {
+                "target_row_id": str(target.get("signal_id") or ""),
+                "target_signal_id": str(target.get("signal_id") or ""),
+                "generation_id": str(target.get("generation_id") or ""),
+                "target_as_of_date": target_date.date().isoformat(),
+                "target_ticker": target_ticker,
+                "target_direction": target_direction,
+                "target_archetype": target_archetype,
+                "target_action": str(target.get("action") or ""),
+                "target_status": str(
+                    target.get("candidate_status") or target.get("decision") or ""
+                ),
+                "target_score": _as_float(target.get("signal_score"), default=math.nan),
+                "target_blocker_reason": _target_blocker_reason(target),
+                "target_hypothesis_id": str(target.get("hypothesis_id") or ""),
+                "target_model_id": str(target.get("model_id") or ""),
+                "target_product_scope": target_scope,
+                "target_selection_reason": str(
+                    target.get("_target_selection_reason") or "top_blocked_row"
+                ),
+                "analog_rank": rank,
+                "analog_date": pd.Timestamp(row["_analog_date"]).date().isoformat(),
+                "analog_ticker": analog_symbol,
+                "analog_scope": analog_scope,
+                "analog_direction": target_direction,
+                "analog_archetype": target_archetype,
+                "analog_pool": str(row.get("_analog_pool") or ""),
+                "similarity_score": similarity,
+                "distance_score": distance,
+                "same_symbol": analog_symbol == target_ticker,
+                "same_product_scope": analog_scope == target_scope,
+                "same_archetype": True,
+                "same_direction": True,
+                "market_regime": str(
+                    row.get(
+                        "market_regime_label",
+                        row.get("market_regime_cluster_expanding", ""),
+                    )
+                ),
+                "forward_return": _as_float(
+                    row.get(labels["directional_return"]), default=math.nan
+                ),
+                "MFE": _as_float(row.get(labels["mfe"]), default=math.nan),
+                "MAE": _as_float(row.get(labels["mae"]), default=math.nan),
+                "target_before_stop_result": _target_before_stop_text(
+                    row.get(labels["target_before_stop"])
+                ),
+                "analog_would_have_passed_current_thresholds": (
+                    "not_available_existing_artifacts_only"
+                ),
+                "analog_rejection_reason": "not_available_existing_artifacts_only",
+                "outcome_labels_used_for_explanation_only": True,
+            }
+        )
+    return rows
+
+
+def _nearest_analog_rows(frame: pd.DataFrame, *, limit: int) -> pd.DataFrame:
+    if frame.empty or limit <= 0:
+        return frame.iloc[0:0].copy()
+    return frame.sort_values(
+        ["_distance_score", "_analog_date", "symbol"],
+        ascending=[True, False, True],
+    ).head(limit)
+
+
+def _blocked_analog_summary_for_target(
+    target: pd.Series,
+    analogs: list[dict[str, object]],
+    *,
+    requested_analog_count: int,
+) -> dict[str, object]:
+    frame = pd.DataFrame(analogs)
+    returns = pd.to_numeric(frame.get("forward_return", pd.Series(dtype=float)), errors="coerce")
+    mfes = pd.to_numeric(frame.get("MFE", pd.Series(dtype=float)), errors="coerce")
+    maes = pd.to_numeric(frame.get("MAE", pd.Series(dtype=float)), errors="coerce")
+    tbs = (
+        frame.get("target_before_stop_result", pd.Series(dtype=str))
+        .astype(str)
+        .str.lower()
+        .eq("target before stop")
+    )
+    count = len(frame)
+    positive = int((returns > 0.0).sum()) if not returns.empty else 0
+    same_scope = int(frame.get("same_product_scope", pd.Series(dtype=bool)).eq(True).sum())
+    same_archetype = int(frame.get("same_archetype", pd.Series(dtype=bool)).eq(True).sum())
+    support_label = _analog_support_label(
+        count=count,
+        average_return=_safe_mean(returns),
+        win_rate=_safe_mean((returns > 0.0).astype(float)) if count else math.nan,
+        tbs_hit_rate=_safe_mean(tbs.astype(float)) if count else math.nan,
+    )
+    reason = _target_blocker_reason(target)
+    summary = {
+        "target_row_id": str(target.get("signal_id") or ""),
+        "target_signal_id": str(target.get("signal_id") or ""),
+        "generation_id": str(target.get("generation_id") or ""),
+        "target_as_of_date": str(target.get("as_of_date") or ""),
+        "target_ticker": str(target.get("ticker") or target.get("symbol") or ""),
+        "target_direction": str(target.get("direction") or ""),
+        "target_archetype": str(target.get("archetype") or ""),
+        "target_action": str(target.get("action") or ""),
+        "target_status": str(target.get("candidate_status") or target.get("decision") or ""),
+        "target_score": _as_float(target.get("signal_score"), default=math.nan),
+        "target_blocker_reason": reason,
+        "target_hypothesis_id": str(target.get("hypothesis_id") or ""),
+        "target_model_id": str(target.get("model_id") or ""),
+        "target_product_scope": str(
+            target.get("product_class_scope") or target.get("scope") or PRODUCT_CLASS_SCOPE_POOLED
+        ),
+        "target_selection_reason": str(target.get("_target_selection_reason") or "top_blocked_row"),
+        "analog_count": count,
+        "requested_analog_count": requested_analog_count,
+        "same_scope_analog_count": same_scope,
+        "same_archetype_analog_count": same_archetype,
+        "average_forward_return": _safe_mean(returns),
+        "median_forward_return": _safe_median(returns),
+        "win_rate": _safe_mean((returns > 0.0).astype(float)) if count else math.nan,
+        "target_before_stop_hit_rate": _safe_mean(tbs.astype(float)) if count else math.nan,
+        "average_MFE": _safe_mean(mfes),
+        "average_MAE": _safe_mean(maes),
+        "worst_MAE": _safe_min(maes),
+        "best_MFE": _safe_max(mfes),
+        "analog_support_label": support_label,
+        "key_caution": _analog_key_caution(target, frame, returns, same_scope),
+        "positive_forward_outcomes": positive,
+        "analog_count_note": _analog_count_note(count, requested_analog_count),
+        "analog_footprint_summary": "",
+    }
+    summary["analog_footprint_summary"] = _blocked_analog_footprint_summary(summary)
+    return summary
+
+
+def _hypothesis_selected_features_for_target(
+    target: pd.Series, hypotheses: pd.DataFrame
+) -> tuple[str, ...]:
+    if hypotheses.empty:
+        return ()
+    hypothesis_id = str(target.get("hypothesis_id") or "")
+    model_family = str(target.get("model_family") or target.get("family") or "")
+    hypothesis_ids = (
+        hypotheses["hypothesis_id"].astype(str)
+        if "hypothesis_id" in hypotheses.columns
+        else pd.Series("", index=hypotheses.index, dtype=str)
+    )
+    matches = hypotheses.loc[hypothesis_ids.eq(hypothesis_id)]
+    if model_family and "family" in matches.columns:
+        family_matches = matches.loc[matches["family"].astype(str).eq(model_family)]
+        if not family_matches.empty:
+            matches = family_matches
+    if matches.empty or "selected_features" not in matches.columns:
+        return ()
+    raw = matches.iloc[0].get("selected_features")
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(feature) for feature in parsed if str(feature))
+
+
+def _hypothesis_outcome_labels_for_target(
+    target: pd.Series, hypotheses: pd.DataFrame
+) -> dict[str, str]:
+    hypothesis_id = str(target.get("hypothesis_id") or "")
+    hypothesis_ids = (
+        hypotheses["hypothesis_id"].astype(str)
+        if "hypothesis_id" in hypotheses.columns
+        else pd.Series("", index=hypotheses.index, dtype=str)
+    )
+    matches = hypotheses.loc[hypothesis_ids.eq(hypothesis_id)]
+    raw = matches.iloc[0].get("outcome_labels") if not matches.empty else None
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        parsed = {}
+    if isinstance(parsed, dict) and parsed:
+        return {str(key): str(value) for key, value in parsed.items()}
+    spec = default_hypothesis_registry().get(hypothesis_id)
+    return dict(spec.outcome_labels) if spec is not None else {}
+
+
+def _distance_feature_columns(
+    selected_features: tuple[str, ...], available_columns: pd.Index
+) -> tuple[str, ...]:
+    available = set(str(column) for column in available_columns)
+    return tuple(
+        feature
+        for feature in selected_features
+        if feature in available and not feature.startswith("label_")
+    )
+
+
+def _target_feature_values_from_modeling(
+    target: pd.Series,
+    modeling: pd.DataFrame,
+    features: tuple[str, ...],
+) -> dict[str, float | None] | None:
+    target_date = pd.Timestamp(str(target.get("as_of_date"))).normalize()
+    ticker = str(target.get("ticker") or target.get("symbol") or "")
+    rows = modeling.loc[
+        modeling["_analog_date"].eq(target_date) & modeling["symbol"].astype(str).eq(ticker)
+    ]
+    if rows.empty:
+        return None
+    row = rows.iloc[0]
+    values: dict[str, float | None] = {}
+    for feature in features:
+        numeric = pd.to_numeric(pd.Series([row.get(feature)]), errors="coerce").iloc[0]
+        values[feature] = (
+            float(numeric) if pd.notna(numeric) and math.isfinite(float(numeric)) else None
+        )
+    return values
+
+
+def _numeric_feature_frame(frame: pd.DataFrame, features: tuple[str, ...]) -> pd.DataFrame:
+    output = pd.DataFrame(index=frame.index)
+    for feature in features:
+        values = (
+            frame[feature]
+            if feature in frame.columns
+            else pd.Series(np.nan, index=frame.index, dtype=float)
+        )
+        output[feature] = pd.to_numeric(values, errors="coerce")
+    return output.replace([np.inf, -np.inf], np.nan)
+
+
+def _target_blocker_reason(row: pd.Series) -> str:
+    decision = str(row.get("decision") or "")
+    if decision.startswith("REJECTED"):
+        reason = str(row.get("rejection_reason") or "").strip()
+    else:
+        reason = str(row.get("no_signal_reason") or "").strip()
+    return reason or decision or "blocker_reason_unavailable"
+
+
+def _safe_mean(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    return float(numeric.mean()) if not numeric.empty else math.nan
+
+
+def _safe_median(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    return float(numeric.median()) if not numeric.empty else math.nan
+
+
+def _safe_min(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    return float(numeric.min()) if not numeric.empty else math.nan
+
+
+def _safe_max(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    return float(numeric.max()) if not numeric.empty else math.nan
+
+
+def _analog_support_label(
+    *,
+    count: int,
+    average_return: float,
+    win_rate: float,
+    tbs_hit_rate: float,
+) -> str:
+    if count < 3:
+        return "INSUFFICIENT_ANALOGS"
+    if average_return > 0.0 and win_rate >= 0.55 and tbs_hit_rate >= 0.50:
+        return "SUPPORTIVE"
+    if average_return <= 0.0 and win_rate < 0.45 and tbs_hit_rate < 0.45:
+        return "WEAK"
+    return "MIXED"
+
+
+def _analog_key_caution(
+    target: pd.Series,
+    analogs: pd.DataFrame,
+    returns: pd.Series,
+    same_scope_count: int,
+) -> str:
+    reason = _target_blocker_reason(target).lower()
+    if "ood" in reason:
+        return "OOD target row"
+    if analogs.empty:
+        return "insufficient same-scope analogs"
+    if same_scope_count < min(len(analogs), DEFAULT_BLOCKED_ROW_ANALOG_COUNT):
+        return "insufficient same-scope analogs"
+    ticker_share = (
+        analogs.get("analog_ticker", pd.Series(dtype=str)).astype(str).value_counts(normalize=True)
+    )
+    if not ticker_share.empty and float(ticker_share.iloc[0]) >= 0.50:
+        return "concentrated in one ticker"
+    years = pd.to_datetime(
+        analogs.get("analog_date", pd.Series(dtype=str)), errors="coerce"
+    ).dt.year
+    year_share = years.dropna().astype(int).astype(str).value_counts(normalize=True)
+    if not year_share.empty and float(year_share.iloc[0]) >= 0.50:
+        return "concentrated in one year"
+    numeric_returns = pd.to_numeric(returns, errors="coerce").dropna()
+    if len(numeric_returns) >= 3 and float(numeric_returns.std(ddof=0)) >= 0.10:
+        return "high analog dispersion"
+    similarity = pd.to_numeric(
+        analogs.get("similarity_score", pd.Series(dtype=float)), errors="coerce"
+    ).dropna()
+    if not similarity.empty and float(similarity.mean()) < 0.20:
+        return "low similarity"
+    return "high analog dispersion" if numeric_returns.empty else "low similarity"
+
+
+def _analog_count_note(count: int, requested: int) -> str:
+    if count >= requested:
+        return ""
+    return (
+        f"Only {count} valid historical analog rows were available before the target date; "
+        f"{requested} were requested."
+    )
+
+
+def _blocked_analog_footprint_summary(summary: dict[str, object]) -> str:
+    ticker = str(summary.get("target_ticker") or "Candidate")
+    archetype = str(summary.get("target_archetype") or "signal").lower().replace(" / ", "-")
+    direction = (
+        str(summary.get("target_direction") or "")
+        .replace("Bullish", "BUY")
+        .replace("Bearish", "SELL/SHORT")
+    )
+    reason = str(summary.get("target_blocker_reason") or "policy blocker").replace("_", " ")
+    count = int(_as_float(summary.get("analog_count"), default=0.0))
+    positives = int(_as_float(summary.get("positive_forward_outcomes"), default=0.0))
+    label = str(summary.get("analog_support_label") or "INSUFFICIENT_ANALOGS").lower()
+    average = _as_float(summary.get("average_forward_return"), default=math.nan)
+    average_text = f"{average:.2%}" if math.isfinite(average) else "unavailable"
+    return (
+        f"{ticker} {archetype} {direction} footprint remains research-only because "
+        f"{reason}. Historical analogs are {label} with {positives}/{count} positive "
+        f"forward outcomes and average forward return {average_text}, but this is "
+        "explanatory only and does not override the gate."
+    )
 
 
 def signal_discovery_blocker_report_frames(

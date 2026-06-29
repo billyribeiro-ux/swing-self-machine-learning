@@ -25,6 +25,8 @@ The evidence layer reads local development artifacts only:
 - latest local feature parquet under `data/features/`;
 - local universe configuration under `configs/universe/core.yaml`;
 - compact historical analog payloads already stored in scanner rows.
+- read-only blocked-row analog payloads computed from existing signal discovery
+  generation artifacts and local modeling parquet.
 
 It does not contact FMP, run `build-features`, run discovery, run the scanner,
 mutate SQLite, or modify model artifacts during page load.
@@ -64,11 +66,15 @@ Candidate Detail renders:
 3. Supporting Evidence
 4. Conflicting Evidence
 5. Historical Analogs
-6. Residual / Unexplained
+6. Historical Analogs for Blocked Row when available
+7. Residual / Unexplained
 
 The Missing Evidence Audit counts `Evidence unavailable` footprint rows by
 category. Missing measurements remain explicit and are not treated as
 confirmed evidence.
+
+Blocked-row analog sections must display the warning: `Historical analogs are
+explanatory only and do not override model gates.`
 
 The Signal Board remains compact and shows only a short footprint summary such
 as `Risk-off inverse ETF footprint`.
@@ -82,6 +88,8 @@ Candidate Detail workbook exports include:
 - `supporting_evidence`
 - `conflicting_evidence`
 - `historical_analogs`
+- `blocked_row_analogs`
+- `blocked_row_analog_summary`
 - `residual_unexplained`
 
 CSV exports are available for the same measured tables.

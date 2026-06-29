@@ -130,6 +130,17 @@ forward return, MFE, MAE, target-before-stop result, and a similarity score.
 Analog outcomes are explanatory only and are not used to change the selected
 signal after the fact.
 
+Blocked/research rows now have a separate read-only diagnostic export:
+`blocked_row_analogs.csv` and `blocked_row_analog_summary.csv`. These rows are
+computed from existing local generation artifacts and the latest local modeling
+parquet without rerunning discovery or models. They use the matching hypothesis
+feature set, exclude `label_` columns from distance calculations, use only rows
+strictly before the target row date, prefer same-product-scope analogs, and
+label cross-scope fallback rows when same-scope history is too small. Blocked
+analog support is explanatory only and cannot change row status, gates,
+thresholds, OOD governance, model promotion, paper-forward events, or scanner
+selection.
+
 ## Artifacts
 
 Generation artifacts are written under ignored local paths:
@@ -151,6 +162,8 @@ Core files:
 - `rejected.csv`
 - `footprint_evidence.csv`
 - `historical_analogs.csv`
+- `blocked_row_analogs.csv` when exported
+- `blocked_row_analog_summary.csv` when exported
 - `score_components.csv`
 - `gate_results.csv`
 
@@ -211,8 +224,8 @@ detail links and exports.
 
 Reports and Exports can create a Signal Discovery Generation workbook with
 summary, metadata, hypotheses, candidates, selected candidates, no-signal rows,
-rejected rows, footprint evidence, historical analogs, score components, and
-gate results.
+rejected rows, footprint evidence, historical analogs, blocked-row analogs,
+blocked-row analog summaries, score components, and gate results.
 
 Reports and Exports can also create a Signal Discovery Blockers workbook with:
 
@@ -271,8 +284,9 @@ Current blocker report:
 ## Limitations
 
 - V1 produced no BUY/SELL candidates under the current governed policy.
-- Analog and selected-candidate footprint artifacts are empty when no BUY/SELL
-  candidate is selected.
+- Selected-candidate analog artifacts are empty when no BUY/SELL candidate is
+  selected; blocked-row analog diagnostics remain available as read-only
+  explanatory reports when enough historical local modeling rows exist.
 - Time-to-target and time-to-stop labels are optional evaluation metrics because
   they are sparse path fields; they are not required to co-occur for model
   fitting.

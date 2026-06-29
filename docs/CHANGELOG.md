@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added read-only blocked-row historical analog diagnostics for top Signal Discovery blockers, with same-scope analog preference, cross-scope fallback labeling, explanatory-only summary stats, Candidate Detail display, CSV/XLSX exports, and tests proving chronology, label exclusion, no FMP calls, no artifact mutation, and status immutability.
 - Added Candidate Detail links to highest-scoring Signal Discovery blocker rows by carrying raw signal/model identifiers through the blocker report and using the existing Candidate Detail URL contract.
 - Added a Reports and Exports Signal Discovery blocker review panel with read-only summary cards, grouped drilldowns, highest-scoring blocked rows, and AppTest coverage while preserving existing CSV/XLSX blocker exports.
 - Added a read-only Signal Discovery blocker review documenting the latest generation's blocker distribution by reason, product scope, archetype, highest-scoring blocked rows, and TZA-specific evidence without changing gates, thresholds, labels, features, scanner state, or operational state.

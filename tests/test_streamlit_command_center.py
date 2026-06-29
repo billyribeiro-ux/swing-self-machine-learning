@@ -480,6 +480,7 @@ def _write_signal_discovery_generation(root: Path) -> str:
         "footprint_summary": "BUY reversal exhaustion footprint",
         "supporting_evidence": "volatility_range: atr_pct_14=0.0275",
         "top_divergences": "candle_geometry: weak local movement",
+        "selected_feature_values_json": json.dumps({"atr_pct_14": 0.0275, "close_position": 0.70}),
         "rejection_reason": "",
         "no_signal_reason": "",
         "next_required_event": "Collect prospective evidence; not live actionable without promotion.",
@@ -505,6 +506,19 @@ def _write_signal_discovery_generation(root: Path) -> str:
         "horizon": 5,
         "family": "extra_trees",
         "status": "CANDIDATE",
+        "outcome_labels": json.dumps(
+            {
+                "directional_return": "label_bull_forward_return_5",
+                "positive_return": "label_bull_positive_return_5",
+                "mfe": "label_bull_mfe_5",
+                "mae": "label_bull_mae_5",
+                "target_before_stop": "label_bull_target_before_stop_5",
+                "time_to_target": "label_bull_time_to_target_5",
+                "time_to_stop": "label_bull_time_to_stop_5",
+                "label_end_date": "label_end_date_5",
+            },
+            sort_keys=True,
+        ),
         "selected_features": json.dumps(["atr_pct_14", "close_position"]),
         "train_rows": 100,
         "calibration_rows": 30,
@@ -639,6 +653,61 @@ def _write_signal_discovery_generation(root: Path) -> str:
     (generation_dir.parent / "latest.json").write_text(
         json.dumps({"generation_id": generation_id}, sort_keys=True), encoding="utf-8"
     )
+    feature_dir = root / "data" / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    modeling = pd.DataFrame(
+        [
+            {
+                "Date": "2026-05-20",
+                "symbol": "DEMO4",
+                "role": "stock",
+                "atr_pct_14": 0.027,
+                "close_position": 0.69,
+                "market_regime_cluster_expanding": "fixture",
+                "label_bull_forward_return_5": 0.025,
+                "label_bull_positive_return_5": 1,
+                "label_bull_mfe_5": 0.050,
+                "label_bull_mae_5": -0.010,
+                "label_bull_target_before_stop_5": 1,
+                "label_bull_time_to_target_5": 2,
+                "label_bull_time_to_stop_5": 5,
+                "label_end_date_5": "2026-05-27",
+            },
+            {
+                "Date": "2026-05-19",
+                "symbol": "DEMO",
+                "role": "stock",
+                "atr_pct_14": 0.030,
+                "close_position": 0.65,
+                "market_regime_cluster_expanding": "fixture",
+                "label_bull_forward_return_5": -0.010,
+                "label_bull_positive_return_5": 0,
+                "label_bull_mfe_5": 0.015,
+                "label_bull_mae_5": -0.030,
+                "label_bull_target_before_stop_5": 0,
+                "label_bull_time_to_target_5": 5,
+                "label_bull_time_to_stop_5": 2,
+                "label_end_date_5": "2026-05-26",
+            },
+            {
+                "Date": "2026-05-26",
+                "symbol": "DEMO4",
+                "role": "stock",
+                "atr_pct_14": 0.0275,
+                "close_position": 0.70,
+                "market_regime_cluster_expanding": "fixture",
+                "label_bull_forward_return_5": 0.50,
+                "label_bull_positive_return_5": 1,
+                "label_bull_mfe_5": 0.60,
+                "label_bull_mae_5": -0.20,
+                "label_bull_target_before_stop_5": 1,
+                "label_bull_time_to_target_5": 1,
+                "label_bull_time_to_stop_5": 5,
+                "label_end_date_5": "2026-06-02",
+            },
+        ]
+    )
+    modeling.to_parquet(feature_dir / "fixturehash_signal_discovery_modeling.parquet", index=False)
     return generation_id
 
 
@@ -1006,6 +1075,41 @@ def test_candidate_detail_displays_signal_discovery_score_breakdown(
     assert app.selectbox[2].value == "reversal_buy_5d:extra_trees"
 
 
+def test_candidate_detail_displays_blocked_row_analogs(
+    command_center_root: Path,
+) -> None:
+    generation_id = _write_signal_discovery_generation(command_center_root)
+    db = command_center_root / "state" / "engine.sqlite3"
+    artifact = command_center_root / "artifacts" / "models" / "model.joblib"
+    before_db = db.read_bytes()
+    before_artifact = artifact.read_bytes()
+
+    app = AppTest.from_file("dashboard/sections/candidate_detail.py")
+    app.query_params["scan_id"] = generation_id
+    app.query_params["ticker"] = "DEMO4"
+    app.query_params["model_id"] = "reversal_buy_5d:extra_trees"
+    app.query_params["direction"] = "Bullish"
+    app.run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    assert db.read_bytes() == before_db
+    assert artifact.read_bytes() == before_artifact
+    subheaders = {subheader.value for subheader in app.subheader}
+    assert "Historical Analogs for Blocked Row" in subheaders
+    assert any(
+        "Historical analogs are explanatory only and do not override model gates." in warning.value
+        for warning in app.warning
+    )
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["analog count"] == "2"
+    assert metrics["analog support label"] in {
+        "INSUFFICIENT_ANALOGS",
+        "MIXED",
+        "SUPPORTIVE",
+        "WEAK",
+    }
+
+
 def test_candidate_detail_raw_identifier_copy_block_and_exports(
     command_center_root: Path,
 ) -> None:
@@ -1311,7 +1415,7 @@ def test_reports_and_exports_displays_signal_discovery_generation(
 ) -> None:
     generation_id = _write_signal_discovery_generation(command_center_root)
 
-    frames = signal_discovery_generation_frames(command_center_root)
+    frames = signal_discovery_generation_frames(command_center_root, include_blocked_analogs=True)
     blocker_frames = signal_discovery_blocker_frames(command_center_root)
     app = AppTest.from_file("dashboard/sections/reports_and_exports.py").run(timeout=30)
 
@@ -1351,6 +1455,8 @@ def test_reports_and_exports_displays_signal_discovery_generation(
                     "rejected": frames["rejected"],
                     "footprint_evidence": frames["footprint_evidence"],
                     "historical_analogs": frames["historical_analogs"],
+                    "blocked_row_analogs": frames["blocked_row_analogs"],
+                    "blocked_row_analog_summary": frames["blocked_row_analog_summary"],
                     "score_components": frames["score_components"],
                     "gate_results": frames["gate_results"],
                 }
@@ -1367,6 +1473,8 @@ def test_reports_and_exports_displays_signal_discovery_generation(
         "rejected",
         "footprint_evidence",
         "historical_analogs",
+        "blocked_row_analogs",
+        "blocked_row_analog_summary",
         "score_components",
         "gate_results",
     }.issubset(set(workbook.sheetnames))
