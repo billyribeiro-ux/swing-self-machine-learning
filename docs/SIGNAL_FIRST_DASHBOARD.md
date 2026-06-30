@@ -236,6 +236,12 @@ Candidate Detail workbook exports include measured footprint sheets:
 - `calibration_summary`
 - `calibration_thresholds`
 - `calibration_buckets`
+- `target_stop_policy`
+- `policy_registry`
+- `calibration_selection`
+- `baseline_vs_candidate`
+- `derived_outcomes`
+- `signal_policy_comparison`
 - `residual_unexplained`
 
 Reports and Exports includes Signal Discovery calibration audit sheets when
@@ -247,6 +253,23 @@ available:
 - `diagnostic_thresholds`
 - `row_level_calibration_audit`
 - `calibration_artifact_manifest`
+- `target_stop_policy_registry`
+- `calibration_selection`
+- `sector_rotation_buy_ordinary_policy_comparison`
+- `derived_policy_outcomes`
+- `signal_discovery_policy_comparison`
+
+Signal Board keeps target/stop policy display compact. Candidate Detail shows
+baseline-versus-experimental policy metrics, calibration-only selection
+evidence, exact derived policy outcomes when available, and the warning:
+
+```text
+Experimental target/stop policy. Development evidence only. Not a live signal.
+```
+
+Gate Audit keeps canonical model gates unchanged and adds a separate Signal
+Discovery policy-gate table when local generation artifacts include policy
+fields.
 
 ## Command Behavior
 

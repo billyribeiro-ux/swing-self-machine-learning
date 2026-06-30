@@ -48,6 +48,8 @@ Each `SignalHypothesisSpec` records:
 - footprint categories
 - explanation template
 - governance version
+- target/stop policy ID, status, hash, target multiple, and stop multiple when
+  a hypothesis uses an explicit policy
 
 The default config evaluates BUY and SELL/SHORT hypotheses, including examples
 such as `trend_continuation_buy_10d`, `reversal_sell_5d`,
@@ -55,6 +57,36 @@ such as `trend_continuation_buy_10d`, `reversal_sell_5d`,
 
 RSI is not required by any default hypothesis. It is one candidate feature
 family among many.
+
+## Target/Stop Policy Candidates
+
+Signal Discovery now supports versioned target/stop policy definitions under
+`target_stop_policy_candidate_v1`.
+
+The default Sector Rotation BUY 20-day hypothesis remains available as:
+
+- `sector_rotation_buy_20d`
+- baseline policy `sector_rotation_buy_ordinary_20d_default_t2p0_s1p0`
+- target `2.0 ATR`, stop `1.0 ATR`, horizon 20 sessions
+
+The experimental candidate is:
+
+- `sector_rotation_buy_ordinary_20d_target_stop_candidate_v1`
+- policy `sector_rotation_buy_ordinary_20d_experimental_t2p0_s1p25`
+- `ORDINARY` scope only
+- BUY action only
+- Sector Rotation archetype only
+- target `2.0 ATR`, stop `1.25 ATR`, horizon 20 sessions
+- status `EXPERIMENTAL_CANDIDATE`
+
+The candidate was selected by the precommitted calibration-only rule from
+`docs/SECTOR_ROTATION_BUY_ORDINARY_TARGET_STOP_DIAGNOSTIC.md`: same target and
+horizon first, then the smallest wider stop that improves TBS hit rate, lowers
+stop-before-target rate, preserves forward-return evidence, improves expected R
+or utility, and does not worsen concentration.
+
+The candidate does not replace the default policy, lower thresholds, weaken
+OOD governance, bypass gates, create live actionable rows, or promote models.
 
 ## Chronology
 
@@ -71,6 +103,11 @@ For each hypothesis:
 9. Persist selected, no-signal, rejected, evidence, analog, and gate rows.
 
 No random split is used. Label columns remain separate from feature matrices.
+
+Experimental policy outcomes are derived in memory for the discovery run and
+persisted as generated artifacts. Existing label parquet files are not
+overwritten. Candidate-policy label columns remain prefixed with `label_`, and
+feature selection still rejects every `label_` column before model fitting.
 
 ## Model Families
 
@@ -263,6 +300,19 @@ summary, metadata, hypotheses, candidates, selected candidates, no-signal rows,
 rejected rows, footprint evidence, historical analogs, blocked-row analogs,
 blocked-row analog summaries, score components, gate results, and calibration
 audit frames.
+
+Policy-candidate exports include:
+
+- `target_stop_policy_registry.csv`
+- `target_stop_policy_registry.json`
+- `calibration_selection.csv`
+- `sector_rotation_buy_ordinary_policy_comparison.csv`
+- `derived_policy_outcomes.csv`
+- `signal_discovery_policy_comparison.csv`
+
+Dashboard workbooks expose the policy sheets as `policy_registry`,
+`calibration_selection`, `baseline_vs_candidate`, `derived_outcomes`,
+`signal_rows`, and `gates` when data is available.
 
 Reports and Exports can also create a Signal Discovery Blockers workbook with:
 

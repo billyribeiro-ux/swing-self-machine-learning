@@ -1,5 +1,25 @@
 # Decision Log
 
+## 2026-06-30 — Sector Rotation BUY ORDINARY gets an experimental target/stop policy candidate
+
+Decision: Add `target_stop_policy_candidate_v1` and register an experimental
+Sector Rotation BUY `ORDINARY` 20-session policy candidate
+`sector_rotation_buy_ordinary_20d_experimental_t2p0_s1p25`. The default
+`sector_rotation_buy_20d` 2.0 ATR target / 1.0 ATR stop policy remains
+available and unchanged. The experimental hypothesis
+`sector_rotation_buy_ordinary_20d_target_stop_candidate_v1` is ORDINARY-only,
+BUY-only, uses the existing feature and model families, keeps current gates and
+OOD governance, and persists separate derived policy outcomes and policy IDs in
+hypothesis, candidate, gate, calibration, and export artifacts. It cannot create
+live actionable rows or promote a model without future prospective validation.
+
+Reason: The read-only Sector Rotation BUY ORDINARY target/stop diagnostic
+classified the current policy as `STOP_TOO_TIGHT`. The precommitted
+calibration-only selection rule chose the smallest same-target/same-horizon
+wider stop that improved TBS evidence and utility without worsening
+concentration: target `2.0 ATR`, stop `1.25 ATR`, horizon 20 sessions.
+Development-holdout diagnostics were not used to select the candidate.
+
 ## 2026-06-29 — Historical analog support must be depth-robust
 
 Decision: Add `historical_analog_robustness_v1` as a read-only guard over
