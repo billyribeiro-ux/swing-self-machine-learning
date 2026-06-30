@@ -453,6 +453,16 @@ def _write_signal_discovery_generation(root: Path) -> str:
         "model_id": "reversal_buy_5d:extra_trees",
         "model_family": "extra_trees",
         "family": "extra_trees",
+        "target_stop_policy_id": "fixture_policy_candidate",
+        "target_stop_policy_name": "Fixture Policy Candidate",
+        "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+        "target_stop_policy_hash": "fixture-policy-hash",
+        "target_stop_policy_target_multiple": 2.0,
+        "target_stop_policy_stop_multiple": 1.25,
+        "target_stop_policy_notice": (
+            "Experimental target/stop policy. Development evidence only. Not a live signal."
+        ),
+        "target_stop_policy_display": "Fixture Policy Candidate · T2/S1.25/5D",
         "horizon": 5,
         "scope": "POOLED",
         "product_class_scope": "POOLED",
@@ -635,12 +645,104 @@ def _write_signal_discovery_generation(root: Path) -> str:
                 {
                     "generation_id": generation_id,
                     "hypothesis_id": "reversal_buy_5d",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_name": "Fixture Policy Candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "target_stop_policy_hash": "fixture-policy-hash",
                     "gate_id": "minimum_training_samples",
                     "actual": 100,
                     "threshold": 20,
                     "status": "PASS",
                     "mandatory": True,
                     "evidence_source": "chronological_split",
+                }
+            ]
+        ),
+        "target_stop_policy_registry": pd.DataFrame(
+            [
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "policy_id": "fixture_policy_candidate",
+                    "policy_name": "Fixture Policy Candidate",
+                    "archetype": "reversal_exhaustion",
+                    "action": "BUY",
+                    "product_scope": "POOLED",
+                    "horizon": 5,
+                    "target_multiple": 2.0,
+                    "stop_multiple": 1.25,
+                    "governance_status": "EXPERIMENTAL_CANDIDATE",
+                    "policy_hash": "fixture-policy-hash",
+                }
+            ]
+        ),
+        "calibration_selection": pd.DataFrame(
+            [
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "selection_status": "CALIBRATION_SUPPORTED_POLICY_CANDIDATE",
+                    "selected": True,
+                    "horizon": 5,
+                    "target_multiple": 2.0,
+                    "stop_multiple": 1.25,
+                    "target_before_stop_hit_rate": 0.55,
+                    "stop_before_target_rate": 0.35,
+                    "cost_adjusted_utility": 0.004,
+                }
+            ]
+        ),
+        "sector_rotation_buy_ordinary_policy_comparison": pd.DataFrame(
+            [
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "policy_role": "baseline",
+                    "target_stop_policy_id": "fixture_policy_baseline",
+                    "target_stop_policy_status": "DEFAULT_BASELINE",
+                    "target_multiple": 2.0,
+                    "stop_multiple": 1.0,
+                    "target_before_stop_hit_rate": 0.45,
+                },
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "policy_role": "experimental_candidate",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "target_multiple": 2.0,
+                    "stop_multiple": 1.25,
+                    "target_before_stop_hit_rate": 0.55,
+                },
+            ]
+        ),
+        "derived_policy_outcomes": pd.DataFrame(
+            [
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_name": "Fixture Policy Candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "Date": "2026-05-26",
+                    "symbol": "DEMO3",
+                    "entry_price": 100.0,
+                    "target_price": 104.0,
+                    "stop_price": 97.5,
+                    "target_before_stop": 1.0,
+                    "stop_before_target": 0.0,
+                    "forward_return": 0.024,
+                    "MFE": 0.052,
+                    "MAE": -0.018,
+                }
+            ]
+        ),
+        "signal_discovery_policy_comparison": pd.DataFrame(
+            [
+                {
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_name": "Fixture Policy Candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "hypothesis_id": "reversal_buy_5d",
+                    "row_count": 2,
+                    "selected_rows": 1,
+                    "no_signal_rows": 1,
+                    "tbs_blocked_rows": 0,
                 }
             ]
         ),
@@ -1291,6 +1393,12 @@ def test_candidate_detail_displays_signal_discovery_score_breakdown(
     subheaders = {subheader.value for subheader in app.subheader}
     assert "Signal Score Breakdown" in subheaders
     assert "Footprint Evidence Table" in subheaders
+    assert "Target/Stop Policy" in subheaders
+    assert any(
+        "Experimental target/stop policy. Development evidence only. Not a live signal."
+        in warning.value
+        for warning in app.warning
+    )
     assert "Conflicting Evidence" in subheaders
     assert "Residual / Unexplained" in subheaders
     assert "Historical Analogs" in subheaders
@@ -1666,6 +1774,11 @@ def test_reports_and_exports_displays_signal_discovery_generation(
     assert metrics["Generation ID"] == generation_id
     assert any("Read-only blocker review" in caption.value for caption in app.caption)
     assert not frames["candidates"].empty
+    assert not frames["target_stop_policy_registry"].empty
+    assert not frames["calibration_selection"].empty
+    assert not frames["sector_rotation_buy_ordinary_policy_comparison"].empty
+    assert not frames["derived_policy_outcomes"].empty
+    assert not frames["signal_discovery_policy_comparison"].empty
     assert not blocker_frames["blocker_rows"].empty
     assert not blocker_frames["by_reason"].empty
     top_blockers = _top_blocker_rows(blocker_frames["blocker_rows"])

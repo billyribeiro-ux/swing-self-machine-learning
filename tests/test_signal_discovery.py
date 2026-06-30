@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from swing_rsi.application.dashboard_exports import to_xlsx_bytes
+from swing_rsi.engine.labels import LabelConfig, build_symbol_labels
 from swing_rsi.engine.signal_discovery import (
     CALIBRATION_DIAGNOSTIC_THRESHOLDS,
     MULTI_ANGLE_CALIBRATION_AUDIT_SCHEMA_VERSION,
@@ -25,6 +26,16 @@ from swing_rsi.engine.signal_discovery import (
     signal_discovery_analog_robustness_frames,
     signal_discovery_blocked_analog_frames,
     signal_discovery_blocker_report_frames,
+)
+from swing_rsi.engine.target_stop_policy import (
+    SECTOR_ROTATION_BUY_ORDINARY_CALIBRATION_EVIDENCE,
+    SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID,
+    SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID,
+    CalibrationPolicyEvidence,
+    augment_model_frame_with_policy_outcomes,
+    candidate_policy_outcome_labels,
+    select_sector_rotation_buy_ordinary_policy_candidate,
+    target_stop_policy_registry,
 )
 
 
@@ -134,6 +145,12 @@ def _write_feature_data(root: Path, *, db_marker: bool = False) -> None:
             bear_forward = -bull_forward + 0.004 * (
                 1 if (date_index + symbol_index) % 4 == 0 else -0.2
             )
+            bull_forward_20 = return_20 + 0.008 * (
+                1 if (date_index + symbol_index) % 4 in {0, 1} else -0.6
+            )
+            bear_forward_20 = -bull_forward_20 + 0.003 * (
+                1 if (date_index + symbol_index) % 5 == 0 else -0.3
+            )
             rows.append(
                 {
                     "Date": date,
@@ -160,6 +177,8 @@ def _write_feature_data(root: Path, *, db_marker: bool = False) -> None:
                     "dollar_volume": 8_000_000 + 50_000 * date_index,
                     "relative_return_vs_spy_20": return_20 - 0.005,
                     "rolling_corr_vs_spy_63": 0.25,
+                    "relative_return_vs_sector_20": return_20 - 0.002 * symbol_index,
+                    "sector_momentum_rank_20": ((date_index + 2 * symbol_index) % 23) / 22,
                     "breadth_advance_pct": 0.45 + 0.01 * ((date_index + symbol_index) % 5),
                     "breadth_dispersion_20": 0.08 + atr,
                     "inverse_confirmation_iwm_tza_63": 0.80 if symbol == "TZA" else 0.10,
@@ -183,6 +202,21 @@ def _write_feature_data(root: Path, *, db_marker: bool = False) -> None:
                     "label_bear_time_to_target_5": 3 if bear_forward > -0.004 else 6,
                     "label_bear_time_to_stop_5": 6 if bear_forward > -0.004 else 3,
                     "label_end_date_5": dates[min(date_index + 5, len(dates) - 1)],
+                    "label_bull_forward_return_20": bull_forward_20,
+                    "label_bull_positive_return_20": int(bull_forward_20 > 0.0),
+                    "label_bull_mfe_20": max(bull_forward_20 + 0.045, 0.004),
+                    "label_bull_mae_20": min(bull_forward_20 - 0.045, -0.004),
+                    "label_bull_target_before_stop_20": int(bull_forward_20 > -0.006),
+                    "label_bull_time_to_target_20": 8 if bull_forward_20 > -0.006 else 22,
+                    "label_bull_time_to_stop_20": 22 if bull_forward_20 > -0.006 else 5,
+                    "label_bear_forward_return_20": bear_forward_20,
+                    "label_bear_positive_return_20": int(bear_forward_20 > 0.0),
+                    "label_bear_mfe_20": max(bear_forward_20 + 0.045, 0.004),
+                    "label_bear_mae_20": min(bear_forward_20 - 0.045, -0.004),
+                    "label_bear_target_before_stop_20": int(bear_forward_20 > -0.006),
+                    "label_bear_time_to_target_20": 8 if bear_forward_20 > -0.006 else 22,
+                    "label_bear_time_to_stop_20": 22 if bear_forward_20 > -0.006 else 5,
+                    "label_end_date_20": dates[min(date_index + 20, len(dates) - 1)],
                 }
             )
     modeling = pd.DataFrame(rows)
@@ -190,6 +224,126 @@ def _write_feature_data(root: Path, *, db_marker: bool = False) -> None:
     features = modeling[feature_columns].copy()
     features.to_parquet(feature_dir / "universehash_testfeatures_features.parquet", index=False)
     modeling.to_parquet(feature_dir / "universehash_testfeatures_modeling.parquet", index=False)
+
+
+def _write_policy_candidate_feature_data(root: Path) -> None:
+    feature_dir = root / "data" / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    manifest_dir = root / "data" / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "AAA.json").write_text('{"symbol":"AAA","hash":"raw"}', encoding="utf-8")
+
+    dates = pd.bdate_range("2025-01-02", periods=190)
+    symbols = ("AAA", "BBB", "CCC", "TZA")
+    feature_rows: list[pd.DataFrame] = []
+    label_rows: list[pd.DataFrame] = []
+    for symbol_index, symbol in enumerate(symbols):
+        role = "leveraged_inverse_etf" if symbol == "TZA" else "stock"
+        rows: list[dict[str, object]] = []
+        base = 80.0 + symbol_index * 9.0
+        for date_index, date in enumerate(dates):
+            phase = date_index / 4.5 + symbol_index * 0.8
+            close = base + date_index * 0.04 + 4.0 * math.sin(phase)
+            open_price = close + 0.35 * math.sin(phase * 1.7)
+            high = max(open_price, close) + 1.15 + 0.75 * abs(math.sin(phase * 0.9))
+            low = min(open_price, close) - 1.15 - 0.75 * abs(math.cos(phase * 0.8))
+            return_5 = 0.025 * math.sin(phase)
+            return_20 = 0.035 * math.sin(phase / 1.8)
+            rows.append(
+                {
+                    "Date": date,
+                    "symbol": symbol,
+                    "role": role,
+                    "sector": "test",
+                    "Open": open_price,
+                    "High": high,
+                    "Low": low,
+                    "Close": close,
+                    "Volume": 1_500_000 + date_index * 2000 + symbol_index * 100,
+                    "return_5": return_5,
+                    "return_20": return_20,
+                    "momentum_20_percentile_252": ((date_index + symbol_index) % 30) / 29,
+                    "trend_persistence_20": return_20 * 1.8,
+                    "range_position_20": 0.50 + 0.35 * math.sin(phase / 2.0),
+                    "distance_prior_high_20": 0.03 - return_5,
+                    "atr_pct_14": 0.020 + 0.010 * abs(math.sin(phase / 2.0)),
+                    "realized_vol_20": 0.025 + 0.010 * abs(math.cos(phase / 2.5)),
+                    "volatility_expansion_20_63": 0.85 + 0.10 * abs(math.sin(phase)),
+                    "close_position": 0.50 + 0.30 * math.sin(phase / 1.5),
+                    "upper_wick_pct": 0.12 + 0.03 * abs(math.sin(phase)),
+                    "lower_wick_pct": 0.12 + 0.03 * abs(math.cos(phase)),
+                    "relative_volume_20": 1.0 + 0.05 * math.sin(phase / 3.0),
+                    "dollar_volume": 10_000_000 + date_index * 75_000,
+                    "relative_return_vs_spy_20": return_20 - 0.003,
+                    "rolling_corr_vs_spy_63": 0.30 + 0.05 * math.sin(phase / 3.0),
+                    "relative_return_vs_sector_20": return_20 - 0.002 * symbol_index,
+                    "sector_momentum_rank_20": ((date_index + symbol_index) % 23) / 22,
+                    "breadth_advance_pct": 0.45 + 0.02 * math.sin(phase / 2.0),
+                    "breadth_dispersion_20": 0.08 + 0.01 * abs(math.cos(phase)),
+                    "market_regime_trend_score": 0.35 + return_20,
+                    "market_regime_volatility_score": 0.20 + abs(return_5),
+                    "rsi_14": 50.0 + return_5 * 100.0,
+                }
+            )
+        feature_rows.append(pd.DataFrame(rows))
+
+    features = (
+        pd.concat(feature_rows, ignore_index=True)
+        .sort_values(["Date", "symbol"])
+        .reset_index(drop=True)
+    )
+    for symbol, group in features.groupby("symbol", sort=True):
+        labels = build_symbol_labels(
+            group.set_index("Date"),
+            LabelConfig(horizons=(20,), target_atr_multiple=2.0, stop_atr_multiple=1.0),
+        )
+        label_rows.append(
+            labels.assign(symbol=symbol).reset_index().sort_values(["Date", "symbol"])
+        )
+    labels = pd.concat(label_rows, ignore_index=True)
+    modeling = features.merge(labels, on=["Date", "symbol"], how="inner", validate="one_to_one")
+    features.to_parquet(feature_dir / "universehash_policyfeatures_features.parquet", index=False)
+    modeling.to_parquet(feature_dir / "universehash_policyfeatures_modeling.parquet", index=False)
+
+
+def _write_policy_candidate_config(root: Path) -> Path:
+    config_dir = root / "configs" / "signal_discovery"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "policy_candidate_v1.yaml"
+    path.write_text(
+        f"""
+schema_version: multi_angle_signal_discovery_v1
+enabled_hypotheses:
+  - sector_rotation_buy_20d
+  - {SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID}
+horizons: [20]
+product_scopes: [POOLED, ORDINARY, LEVERAGED_INVERSE]
+model_families:
+  - hist_gradient_boosting
+minimum_training_samples: 80
+minimum_calibration_samples: 30
+minimum_holdout_samples: 30
+max_selected_features: 12
+analog_count: 3
+candidate_cap_per_hypothesis: 8
+random_seed: 23
+research_start: "2025-01-02"
+research_end:
+costs:
+  round_trip_bps: 5.0
+selection_policy:
+  reference: signal_discovery_policy_test_v1
+  probability: 0.10
+  target_before_stop: 0.10
+  expected_return: -0.10
+  signal_score: 0.05
+ood_policy:
+  reference: prediction_ood_governance_test_v1
+  feature_rate_limit: 1.00
+""",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _write_blocked_analog_fixture(root: Path) -> None:
@@ -523,6 +677,165 @@ def test_hypothesis_registry_loads_required_archetypes_without_privileged_rsi() 
         assert spec.validation_policy["calibration_split"] == "calibration_only"
         assert spec.validation_policy["holdout_usage"] == "evaluation_only"
 
+    candidate = hypotheses[SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID]
+    assert candidate.eligible_product_scopes == ("ORDINARY",)
+    assert candidate.direction == "BUY"
+    assert candidate.target_stop_policy_status == "EXPERIMENTAL_CANDIDATE"
+    assert candidate.target_stop_policy_id == SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+    baseline = hypotheses["sector_rotation_buy_20d"]
+    assert baseline.target_stop_policy_status == "DEFAULT_BASELINE"
+    assert baseline.target_stop_policy_target_multiple == 2.0
+    assert baseline.target_stop_policy_stop_multiple == 1.0
+
+
+def test_target_stop_policy_candidate_selection_uses_calibration_only_rule() -> None:
+    selection = select_sector_rotation_buy_ordinary_policy_candidate()
+    assert selection.status == "CALIBRATION_SUPPORTED_POLICY_CANDIDATE"
+    assert selection.selected is not None
+    assert selection.selected.target_multiple == 2.0
+    assert selection.selected.stop_multiple == 1.25
+    assert selection.selected_policy is not None
+    assert selection.selected_policy.governance_status == "EXPERIMENTAL_CANDIDATE"
+    assert selection.selected_policy.policy_id == SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+
+    registry = {policy.policy_id: policy for policy in target_stop_policy_registry()}
+    assert registry[SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID].stop_multiple == 1.25
+    assert registry[SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID].target_multiple == 2.0
+
+    baseline = SECTOR_ROTATION_BUY_ORDINARY_CALIBRATION_EVIDENCE[0]
+    unsupported = (
+        baseline,
+        CalibrationPolicyEvidence(
+            horizon=20,
+            target_multiple=2.0,
+            stop_multiple=1.25,
+            row_count=baseline.row_count,
+            target_before_stop_hit_rate=baseline.target_before_stop_hit_rate,
+            stop_before_target_rate=baseline.stop_before_target_rate + 0.01,
+            unresolved_rate=baseline.unresolved_rate,
+            average_forward_return=baseline.average_forward_return,
+            median_forward_return=baseline.median_forward_return,
+            average_mfe=baseline.average_mfe,
+            average_mae=baseline.average_mae,
+            worst_mae=baseline.worst_mae,
+            expected_r=baseline.expected_r,
+            cost_adjusted_utility=baseline.cost_adjusted_utility,
+            symbol_concentration=baseline.symbol_concentration,
+            year_concentration=baseline.year_concentration,
+            regime_concentration=baseline.regime_concentration,
+        ),
+    )
+    no_candidate = select_sector_rotation_buy_ordinary_policy_candidate(unsupported)
+    assert no_candidate.status == "NO_CALIBRATION_SUPPORTED_POLICY_CANDIDATE"
+    assert no_candidate.selected_policy is None
+
+
+def test_candidate_policy_derived_labels_are_separate_from_baseline_labels(tmp_path: Path) -> None:
+    root = tmp_path / "policy-labels"
+    _write_universe(root)
+    _write_policy_candidate_feature_data(root)
+    modeling_path = next((root / "data" / "features").glob("*_modeling.parquet"))
+    modeling = pd.read_parquet(modeling_path)
+    before_baseline = modeling["label_bull_target_before_stop_20"].copy()
+
+    candidate_policy = next(
+        policy
+        for policy in target_stop_policy_registry()
+        if policy.policy_id == SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+    )
+    augmented, derived = augment_model_frame_with_policy_outcomes(modeling, (candidate_policy,))
+    label_columns = candidate_policy_outcome_labels(candidate_policy)
+
+    assert label_columns["target_before_stop"] in augmented.columns
+    assert label_columns["time_to_target"] in augmented.columns
+    assert not derived.empty
+    assert set(derived["target_stop_policy_id"]) == {
+        SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+    }
+    pd.testing.assert_series_equal(
+        modeling["label_bull_target_before_stop_20"],
+        before_baseline,
+        check_names=False,
+    )
+    assert label_columns["target_before_stop"] != "label_bull_target_before_stop_20"
+    assert augmented[label_columns["target_before_stop"]].dropna().isin([0.0, 1.0]).all()
+
+
+def test_signal_discovery_persists_target_stop_policy_candidate_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "policy-discovery"
+    _write_universe(root)
+    _write_policy_candidate_feature_data(root)
+    config = _write_policy_candidate_config(root)
+    model_artifact = root / "artifacts" / "models" / "model.joblib"
+    model_artifact.parent.mkdir(parents=True, exist_ok=True)
+    model_artifact.write_text("model-artifact-do-not-touch", encoding="utf-8")
+    before_model_artifact = model_artifact.read_text(encoding="utf-8")
+    modeling_path = next((root / "data" / "features").glob("*_modeling.parquet"))
+    before_modeling = modeling_path.read_bytes()
+
+    def fail_download(*_: object, **__: object) -> None:
+        raise AssertionError("Policy candidate discovery attempted an FMP request")
+
+    monkeypatch.setattr("swing_rsi.data.loader.download_daily", fail_download)
+    run_signal_discovery(root, config_path=config)
+    frames = load_signal_discovery_frames(root)
+
+    assert not frames["target_stop_policy_registry"].empty
+    assert not frames["calibration_selection"].empty
+    assert not frames["sector_rotation_buy_ordinary_policy_comparison"].empty
+    assert not frames["derived_policy_outcomes"].empty
+    assert not frames["signal_discovery_policy_comparison"].empty
+    assert (root / "artifacts" / "signal_discovery" / "latest.json").exists()
+    registry_ids = set(frames["target_stop_policy_registry"]["policy_id"].astype(str))
+    assert SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID in registry_ids
+    hypotheses = frames["hypotheses"]
+    candidate_hypothesis = hypotheses.loc[
+        hypotheses["hypothesis_id"]
+        .astype(str)
+        .eq(SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID)
+    ]
+    assert not candidate_hypothesis.empty
+    assert set(candidate_hypothesis["target_stop_policy_id"].astype(str)) == {
+        SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+    }
+    assert set(candidate_hypothesis["target_stop_policy_status"].astype(str)) == {
+        "EXPERIMENTAL_CANDIDATE"
+    }
+    candidate_rows = frames["candidates"].loc[
+        frames["candidates"]["hypothesis_id"]
+        .astype(str)
+        .eq(SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID)
+    ]
+    assert not candidate_rows.empty
+    assert set(candidate_rows["product_class_scope"].astype(str)) == {"ORDINARY"}
+    assert set(candidate_rows["target_stop_policy_id"].astype(str)) == {
+        SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+    }
+    assert "LIVE_ACTIONABLE" not in set(candidate_rows["candidate_status"].astype(str))
+    gate_rows = frames["gate_results"].loc[
+        frames["gate_results"]["hypothesis_id"]
+        .astype(str)
+        .eq(SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID)
+    ]
+    assert not gate_rows.empty
+    assert set(gate_rows["target_stop_policy_id"].astype(str)) == {
+        SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+    }
+    comparison = frames["signal_discovery_policy_comparison"]
+    assert SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID in set(
+        comparison["target_stop_policy_id"].astype(str)
+    )
+    selected_feature_payloads = candidate_hypothesis["selected_features"].dropna()
+    assert not selected_feature_payloads.empty
+    for payload in selected_feature_payloads:
+        selected = json.loads(payload)
+        assert not any(str(feature).startswith("label_") for feature in selected)
+    assert model_artifact.read_text(encoding="utf-8") == before_model_artifact
+    assert modeling_path.read_bytes() == before_modeling
+
 
 def test_analog_robustness_classifies_concentrated_top10_decay_as_artifact() -> None:
     frames = historical_analog_robustness_frames_from_analogs(_concentrated_decay_analogs())
@@ -759,6 +1072,13 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
                     "diagnostic_thresholds": frames["diagnostic_thresholds"],
                     "row_level_calibration_audit": frames["row_level_calibration_audit"],
                     "calibration_artifact_manifest": frames["calibration_artifact_manifest"],
+                    "target_stop_policy_registry": frames["target_stop_policy_registry"],
+                    "calibration_selection": frames["calibration_selection"],
+                    "baseline_vs_candidate": frames[
+                        "sector_rotation_buy_ordinary_policy_comparison"
+                    ],
+                    "derived_outcomes": frames["derived_policy_outcomes"],
+                    "signal_policy_comparison": frames["signal_discovery_policy_comparison"],
                 }
             )
         )
@@ -779,6 +1099,12 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
     assert "row_level_calibration_audit.csv" in written_names
     assert "row_level_calibration_audit.parquet" in written_names
     assert "calibration_artifact_manifest.json" in written_names
+    assert "target_stop_policy_registry.csv" in written_names
+    assert "target_stop_policy_registry.json" in written_names
+    assert "calibration_selection.csv" in written_names
+    assert "sector_rotation_buy_ordinary_policy_comparison.csv" in written_names
+    assert "derived_policy_outcomes.csv" in written_names
+    assert "signal_discovery_policy_comparison.csv" in written_names
     assert "metadata.json" in written_names
     assert {
         "signal_discovery_summary",
@@ -800,6 +1126,11 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
         "diagnostic_thresholds",
         "row_level_calibration_audit",
         "calibration_artifact_manifest",
+        "target_stop_policy_registry",
+        "calibration_selection",
+        "baseline_vs_candidate",
+        "derived_outcomes",
+        "signal_policy_comparison",
     }.issubset(set(workbook.sheetnames))
 
 
