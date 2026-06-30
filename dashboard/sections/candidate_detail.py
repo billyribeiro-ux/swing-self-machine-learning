@@ -212,6 +212,8 @@ def _summary_frame(candidate: pd.Series) -> pd.DataFrame:
         "entry_rule",
         "as_of_date",
         "model",
+        "target_stop_policy_display",
+        "target_stop_policy_status",
         "scope",
         "generation",
     )
@@ -272,11 +274,36 @@ def _risk_frame(candidate: pd.Series) -> pd.DataFrame:
     fields = (
         ("expected MFE", candidate.get("expected_mfe", "")),
         ("expected MAE", candidate.get("expected_mae", "")),
-        ("stop/target policy", candidate.get("selection_policy_result", "")),
+        ("stop/target policy", candidate.get("target_stop_policy_display", "")),
         ("time horizon", candidate.get("horizon", "")),
         ("drawdown/gate limitations", candidate.get("gate_status", "")),
     )
     return pd.DataFrame([{"risk": label, "value": str(value)} for label, value in fields])
+
+
+def _policy_overview_frame(candidate: pd.Series) -> pd.DataFrame:
+    if not _clean_identifier_value(candidate.get("target_stop_policy_display", "")):
+        return pd.DataFrame()
+    fields = (
+        ("Target/Stop Policy", candidate.get("target_stop_policy_display", "")),
+        ("Policy status", candidate.get("target_stop_policy_status", "")),
+        ("Target ATR multiple", candidate.get("target_stop_policy_target_multiple", "")),
+        ("Stop ATR multiple", candidate.get("target_stop_policy_stop_multiple", "")),
+        ("Horizon", candidate.get("horizon", "")),
+        ("Policy ID", candidate.get("target_stop_policy_id", "")),
+        ("Policy hash", candidate.get("target_stop_policy_hash", "")),
+        (
+            "Why this policy exists",
+            "STOP_TOO_TIGHT calibration diagnostic for Sector Rotation BUY ORDINARY.",
+        ),
+    )
+    return pd.DataFrame(
+        [
+            {"field": field, "value": _clean_identifier_value(value)}
+            for field, value in fields
+            if _clean_identifier_value(value)
+        ]
+    )
 
 
 def _blocked_row_analog_summary_frame(candidate: pd.Series) -> pd.DataFrame:
@@ -389,6 +416,8 @@ def _signal_score_frame(candidate: pd.Series) -> pd.DataFrame:
         ("top_support", "Top Support"),
         ("top_conflict", "Top Conflict"),
         ("historical_analog_support", "Historical Analog Support"),
+        ("target_stop_policy_display", "Target/Stop Policy"),
+        ("target_stop_policy_status", "Policy Status"),
         ("no_signal_reason", "No-Signal Reason"),
         ("rejection_reason", "Rejection Reason"),
         ("signal_source", "Signal Source"),
@@ -500,6 +529,15 @@ def render_page() -> None:
         candidate, "calibration_diagnostic_threshold_table"
     )
     calibration_buckets = _records_json_frame(candidate, "calibration_probability_bucket_evidence")
+    policy_overview = _policy_overview_frame(candidate)
+    policy_registry = _records_json_frame(candidate, "target_stop_policy_registry_json")
+    policy_selection = _records_json_frame(candidate, "target_stop_policy_selection_evidence")
+    policy_comparison = _records_json_frame(candidate, "target_stop_policy_comparison_json")
+    derived_policy_outcome = _records_json_frame(candidate, "derived_policy_outcome_json")
+    signal_policy_comparison = _records_json_frame(
+        candidate,
+        "signal_discovery_policy_comparison_json",
+    )
     feature_snapshot = pd.DataFrame([candidate.to_dict()])
     risk = _risk_frame(candidate)
 
@@ -568,6 +606,58 @@ def render_page() -> None:
 
     streamlit.subheader("Risk")
     streamlit.dataframe(display_frame(risk), width="stretch", hide_index=True)
+
+    if not policy_overview.empty:
+        streamlit.subheader("Target/Stop Policy")
+        streamlit.warning(
+            "Experimental target/stop policy. Development evidence only. Not a live signal."
+        )
+        streamlit.dataframe(display_frame(policy_overview), width="stretch", hide_index=True)
+        if not policy_comparison.empty:
+            streamlit.caption("Baseline versus experimental policy")
+            streamlit.dataframe(display_frame(policy_comparison), width="stretch", hide_index=True)
+        if not policy_selection.empty:
+            streamlit.caption("Calibration-only selection evidence")
+            streamlit.dataframe(display_frame(policy_selection), width="stretch", hide_index=True)
+        if not derived_policy_outcome.empty:
+            streamlit.caption("Target/stop path diagnostics")
+            streamlit.dataframe(
+                display_frame(derived_policy_outcome),
+                width="stretch",
+                hide_index=True,
+            )
+        if not signal_policy_comparison.empty:
+            streamlit.caption("Signal-discovery policy comparison")
+            streamlit.dataframe(
+                display_frame(signal_policy_comparison),
+                width="stretch",
+                hide_index=True,
+            )
+        render_table_downloads(
+            policy_overview,
+            basename="candidate_detail_target_stop_policy",
+            label="target_stop_policy",
+        )
+        render_table_downloads(
+            policy_registry,
+            basename="candidate_detail_target_stop_policy_registry",
+            label="target_stop_policy_registry",
+        )
+        render_table_downloads(
+            policy_comparison,
+            basename="candidate_detail_policy_comparison",
+            label="policy_comparison",
+        )
+        render_table_downloads(
+            policy_selection,
+            basename="candidate_detail_policy_selection",
+            label="policy_selection",
+        )
+        render_table_downloads(
+            derived_policy_outcome,
+            basename="candidate_detail_derived_policy_outcome",
+            label="derived_policy_outcome",
+        )
 
     if not calibration_overview.empty:
         streamlit.subheader("Calibration Diagnostics")
@@ -782,6 +872,12 @@ def render_page() -> None:
                 "calibration_summary": calibration_summary,
                 "calibration_thresholds": calibration_thresholds,
                 "calibration_buckets": calibration_buckets,
+                "target_stop_policy": policy_overview,
+                "policy_registry": policy_registry,
+                "calibration_selection": policy_selection,
+                "baseline_vs_candidate": policy_comparison,
+                "derived_outcomes": derived_policy_outcome,
+                "signal_policy_comparison": signal_policy_comparison,
                 "residual_unexplained": footprint.residual_unexplained,
                 "signal_score_breakdown": signal_score,
                 "attribution": attribution,

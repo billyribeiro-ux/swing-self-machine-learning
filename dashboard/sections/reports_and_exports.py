@@ -267,6 +267,11 @@ def render_page() -> None:
             "diagnostic_thresholds",
             "row_level_calibration_audit",
             "calibration_artifact_manifest",
+            "target_stop_policy_registry",
+            "calibration_selection",
+            "sector_rotation_buy_ordinary_policy_comparison",
+            "derived_policy_outcomes",
+            "signal_discovery_policy_comparison",
         }
         and not frame.empty
     }
@@ -278,10 +283,22 @@ def render_page() -> None:
             hide_index=True,
         )
         if streamlit.button("Create signal discovery generation workbook"):
+            workbook_sheets = dict(discovery_sheets)
+            for source, alias in {
+                "target_stop_policy_registry": "policy_registry",
+                "calibration_selection": "calibration_selection",
+                "sector_rotation_buy_ordinary_policy_comparison": "baseline_vs_candidate",
+                "derived_policy_outcomes": "derived_outcomes",
+                "candidates": "signal_rows",
+                "gate_results": "gates",
+            }.items():
+                frame = discovery_sheets.get(source, pd.DataFrame())
+                if not frame.empty:
+                    workbook_sheets[alias] = frame
             output = save_xlsx_report(
                 root,
                 "signal_discovery_generation.xlsx",
-                discovery_sheets,
+                workbook_sheets,
             )
             streamlit.success(f"Saved {output.relative_to(root)}")
         audit_names = (
@@ -291,6 +308,11 @@ def render_page() -> None:
             "diagnostic_thresholds",
             "row_level_calibration_audit",
             "calibration_artifact_manifest",
+            "target_stop_policy_registry",
+            "calibration_selection",
+            "sector_rotation_buy_ordinary_policy_comparison",
+            "derived_policy_outcomes",
+            "signal_discovery_policy_comparison",
         )
         for name in audit_names:
             frame = discovery_sheets.get(name, pd.DataFrame())

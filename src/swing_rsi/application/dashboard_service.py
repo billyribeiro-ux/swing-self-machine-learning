@@ -1024,6 +1024,35 @@ def _calibration_single_record_json(frame: pd.DataFrame, row: pd.Series) -> str:
     return json.dumps(sliced.iloc[0].to_dict(), default=str)
 
 
+def _policy_records_json(frame: pd.DataFrame, row: pd.Series) -> str:
+    if frame.empty:
+        return ""
+    output = frame.copy()
+    policy_id = _clean_text(row.get("target_stop_policy_id"))
+    if policy_id and "target_stop_policy_id" in output.columns:
+        scoped = output.loc[output["target_stop_policy_id"].astype(str).eq(policy_id)]
+        if not scoped.empty:
+            output = scoped
+    return json.dumps(output.to_dict(orient="records"), default=str)
+
+
+def _policy_exact_row_json(frame: pd.DataFrame, row: pd.Series) -> str:
+    if frame.empty:
+        return ""
+    output = frame.copy()
+    for candidate_column, frame_column in (
+        ("target_stop_policy_id", "target_stop_policy_id"),
+        ("ticker", "symbol"),
+        ("as_of_date", "Date"),
+    ):
+        value = _clean_text(row.get(candidate_column))
+        if value and frame_column in output.columns:
+            output = output.loc[output[frame_column].astype(str).eq(value)]
+    if output.empty:
+        return ""
+    return json.dumps(output.head(25).to_dict(orient="records"), default=str)
+
+
 def _weighted_calibration_base_rate(frame: pd.DataFrame) -> float | None:
     if frame.empty or not {"tbs_base_rate", "calibration_row_count"}.issubset(frame.columns):
         return None
@@ -1122,6 +1151,17 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
     calibration_summary = frames.get("calibration_summary", pd.DataFrame())
     diagnostic_thresholds = frames.get("diagnostic_thresholds", pd.DataFrame())
     probability_buckets = frames.get("probability_buckets", pd.DataFrame())
+    policy_registry = frames.get("target_stop_policy_registry", pd.DataFrame())
+    policy_selection = frames.get("calibration_selection", pd.DataFrame())
+    policy_comparison = frames.get(
+        "sector_rotation_buy_ordinary_policy_comparison",
+        pd.DataFrame(),
+    )
+    derived_outcomes = frames.get("derived_policy_outcomes", pd.DataFrame())
+    signal_policy_comparison = frames.get(
+        "signal_discovery_policy_comparison",
+        pd.DataFrame(),
+    )
     blocked_summary_by_signal = _single_record_json_by_signal(blocked_summary)
     blocked_support_by_signal = _blocked_analog_support_by_signal(blocked_summary)
     robustness_by_signal = _single_record_json_by_signal(robustness)
@@ -1177,6 +1217,43 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
                 "model": _display_value(row.get("model_id")),
                 "model_id": _display_value(row.get("model_id")),
                 "family": _display_value(row.get("model_family")),
+                "target_stop_policy": _display_value(row.get("target_stop_policy_display")),
+                "target_stop_policy_display": _display_value(row.get("target_stop_policy_display")),
+                "target_stop_policy_id": _display_value(row.get("target_stop_policy_id")),
+                "target_stop_policy_name": _display_value(row.get("target_stop_policy_name")),
+                "target_stop_policy_status": _display_value(row.get("target_stop_policy_status")),
+                "target_stop_policy_hash": _display_value(row.get("target_stop_policy_hash")),
+                "target_stop_policy_target_multiple": _display_value(
+                    row.get("target_stop_policy_target_multiple")
+                ),
+                "target_stop_policy_stop_multiple": _display_value(
+                    row.get("target_stop_policy_stop_multiple")
+                ),
+                "target_stop_policy_notice": _display_value(row.get("target_stop_policy_notice")),
+                "target_stop_policy_registry_json": _policy_records_json(
+                    policy_registry,
+                    row,
+                ),
+                "target_stop_policy_selection_evidence": json.dumps(
+                    policy_selection.to_dict(orient="records"),
+                    default=str,
+                )
+                if not policy_selection.empty
+                else "",
+                "target_stop_policy_comparison_json": json.dumps(
+                    policy_comparison.to_dict(orient="records"),
+                    default=str,
+                )
+                if not policy_comparison.empty
+                else "",
+                "derived_policy_outcome_json": _policy_exact_row_json(
+                    derived_outcomes,
+                    row,
+                ),
+                "signal_discovery_policy_comparison_json": _policy_records_json(
+                    signal_policy_comparison,
+                    row,
+                ),
                 "generation": _display_value(row.get("generation_id")),
                 "feature_snapshot_hash": _display_value(row.get("feature_snapshot_hash")),
                 "row_product_class_role": _display_value(row.get("row_product_class_role")),
@@ -1287,6 +1364,15 @@ def _signal_discovery_board_rows(root: str | Path) -> pd.DataFrame:
                 "model_display": str(model_id),
                 "scope": _display_value(row.get("scope")),
                 "family": _display_value(row.get("model_family")),
+                "target_stop_policy": _display_value(row.get("target_stop_policy_display")),
+                "target_stop_policy_display": _display_value(row.get("target_stop_policy_display")),
+                "target_stop_policy_status": _display_value(row.get("target_stop_policy_status")),
+                "target_stop_policy_target_multiple": _display_value(
+                    row.get("target_stop_policy_target_multiple")
+                ),
+                "target_stop_policy_stop_multiple": _display_value(
+                    row.get("target_stop_policy_stop_multiple")
+                ),
                 "horizon": _display_value(row.get("horizon")),
                 "generation": generation,
                 "generation_display": _generation_display(generation),
@@ -3093,7 +3179,18 @@ def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]
         "reports_index": reports_inventory_frame(root),
     }
     discovery = signal_discovery_generation_frames(root)
-    for name in ("summary", "hypotheses", "candidates", "no_signal", "rejected"):
+    for name in (
+        "summary",
+        "hypotheses",
+        "candidates",
+        "no_signal",
+        "rejected",
+        "target_stop_policy_registry",
+        "calibration_selection",
+        "sector_rotation_buy_ordinary_policy_comparison",
+        "derived_policy_outcomes",
+        "signal_discovery_policy_comparison",
+    ):
         frame = discovery.get(name)
         if frame is not None and not frame.empty:
             frames[f"signal_discovery_{name}"] = frame

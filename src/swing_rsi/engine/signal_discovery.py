@@ -50,6 +50,20 @@ from swing_rsi.engine.product_scope import (
     product_class_scope_for_role,
 )
 from swing_rsi.engine.splits import chronological_train_calibration_holdout_split
+from swing_rsi.engine.target_stop_policy import (
+    SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID,
+    TARGET_STOP_POLICY_DIAGNOSTIC_NOTICE,
+    TARGET_STOP_POLICY_SCHEMA_VERSION,
+    TargetStopPolicyCandidate,
+    augment_model_frame_with_policy_outcomes,
+    calibration_selection_frame,
+    candidate_policy_outcome_labels,
+    policy_registry_frame,
+    sector_rotation_buy_ordinary_baseline_policy,
+    sector_rotation_buy_ordinary_policy_comparison_frame,
+    select_sector_rotation_buy_ordinary_policy_candidate,
+    target_stop_policy_registry,
+)
 from swing_rsi.engine.universe import load_universe_config
 
 SIGNAL_DISCOVERY_SCHEMA_VERSION = "multi_angle_signal_discovery_v1"
@@ -62,6 +76,12 @@ DEFAULT_SIGNAL_DISCOVERY_CONFIG = Path("configs/signal_discovery/v1.yaml")
 DEFAULT_BLOCKED_ROW_ANALOG_COUNT = 10
 ANALOG_ROBUSTNESS_DEPTHS = (10, 25, 50)
 CALIBRATION_DIAGNOSTIC_THRESHOLDS = (0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60)
+TARGET_STOP_POLICY_AUDIT_COLUMNS = [
+    "target_stop_policy_id",
+    "target_stop_policy_name",
+    "target_stop_policy_status",
+    "target_stop_policy_hash",
+]
 
 SignalDirection = Literal["BUY", "SELL_SHORT"]
 SignalAction = Literal["BUY", "SELL", "NO SIGNAL"]
@@ -277,6 +297,7 @@ CALIBRATION_SUMMARY_COLUMNS = [
     "product_scope",
     "model_family",
     "model_id",
+    *TARGET_STOP_POLICY_AUDIT_COLUMNS,
     "status",
     "reason",
     "calibration_start_date",
@@ -323,6 +344,7 @@ PROBABILITY_DISTRIBUTION_COLUMNS = [
     "product_scope",
     "model_family",
     "model_id",
+    *TARGET_STOP_POLICY_AUDIT_COLUMNS,
     "probability_type",
     "min",
     "p01",
@@ -358,6 +380,7 @@ PROBABILITY_BUCKET_COLUMNS = [
     "product_scope",
     "model_family",
     "model_id",
+    *TARGET_STOP_POLICY_AUDIT_COLUMNS,
     "bucket_id",
     "bucket_lower_bound",
     "bucket_upper_bound",
@@ -388,6 +411,7 @@ DIAGNOSTIC_THRESHOLD_COLUMNS = [
     "product_scope",
     "model_family",
     "model_id",
+    *TARGET_STOP_POLICY_AUDIT_COLUMNS,
     "threshold",
     "qualifying_row_count",
     "qualifying_row_rate",
@@ -424,6 +448,7 @@ ROW_LEVEL_CALIBRATION_AUDIT_COLUMNS = [
     "horizon",
     "model_family",
     "model_id",
+    *TARGET_STOP_POLICY_AUDIT_COLUMNS,
     "raw_probability",
     "calibrated_probability",
     "TBS_label",
@@ -470,6 +495,14 @@ class SignalHypothesisSpec:
     footprint_categories: tuple[str, ...]
     explanation_template: str
     governance_version: str = SIGNAL_DISCOVERY_SCHEMA_VERSION
+    target_stop_policy_id: str = ""
+    target_stop_policy_name: str = ""
+    target_stop_policy_status: str = ""
+    target_stop_policy_hash: str = ""
+    target_stop_policy_schema_version: str = ""
+    target_stop_policy_notice: str = ""
+    target_stop_policy_target_multiple: float | None = None
+    target_stop_policy_stop_multiple: float | None = None
 
     @property
     def label_direction(self) -> str:
@@ -651,8 +684,11 @@ def _hypothesis(
     scopes: tuple[ProductClassScope, ...],
     required: tuple[str, ...],
     explanation: str,
+    *,
+    outcome_labels: dict[str, str] | None = None,
+    target_stop_policy: TargetStopPolicyCandidate | None = None,
 ) -> SignalHypothesisSpec:
-    labels = _outcome_labels(direction, horizon)
+    labels = outcome_labels or _outcome_labels(direction, horizon)
     return SignalHypothesisSpec(
         hypothesis_id=hypothesis_id,
         archetype_id=archetype_id,
@@ -683,7 +719,56 @@ def _hypothesis(
         },
         footprint_categories=required,
         explanation_template=explanation,
+        target_stop_policy_id=target_stop_policy.policy_id if target_stop_policy else "",
+        target_stop_policy_name=target_stop_policy.policy_name if target_stop_policy else "",
+        target_stop_policy_status=(
+            target_stop_policy.governance_status if target_stop_policy else ""
+        ),
+        target_stop_policy_hash=target_stop_policy.policy_hash if target_stop_policy else "",
+        target_stop_policy_schema_version=TARGET_STOP_POLICY_SCHEMA_VERSION
+        if target_stop_policy
+        else "",
+        target_stop_policy_notice=TARGET_STOP_POLICY_DIAGNOSTIC_NOTICE
+        if target_stop_policy
+        else "",
+        target_stop_policy_target_multiple=(
+            target_stop_policy.target_multiple if target_stop_policy else None
+        ),
+        target_stop_policy_stop_multiple=(
+            target_stop_policy.stop_multiple if target_stop_policy else None
+        ),
     )
+
+
+def _policy_context_fields(spec: SignalHypothesisSpec) -> dict[str, object]:
+    return {
+        "target_stop_policy_id": spec.target_stop_policy_id,
+        "target_stop_policy_name": spec.target_stop_policy_name,
+        "target_stop_policy_status": spec.target_stop_policy_status,
+        "target_stop_policy_hash": spec.target_stop_policy_hash,
+    }
+
+
+def _target_stop_policy_display(spec: SignalHypothesisSpec) -> str:
+    if not spec.target_stop_policy_id:
+        return ""
+    target = spec.target_stop_policy_target_multiple
+    stop = spec.target_stop_policy_stop_multiple
+    target_text = f"{target:g}" if target is not None else "?"
+    stop_text = f"{stop:g}" if stop is not None else "?"
+    name = spec.target_stop_policy_name or spec.target_stop_policy_id
+    return f"{name} · T{target_text}/S{stop_text}/{spec.horizon}D"
+
+
+def _sector_rotation_candidate_outcome_labels(
+    policy: TargetStopPolicyCandidate,
+) -> dict[str, str]:
+    labels = _outcome_labels("BUY", policy.horizon)
+    candidate_labels = candidate_policy_outcome_labels(policy)
+    labels["target_before_stop"] = candidate_labels["target_before_stop"]
+    labels["time_to_target"] = candidate_labels["time_to_target"]
+    labels["time_to_stop"] = candidate_labels["time_to_stop"]
+    return labels
 
 
 def default_hypothesis_registry() -> dict[str, SignalHypothesisSpec]:
@@ -696,146 +781,162 @@ def default_hypothesis_registry() -> dict[str, SignalHypothesisSpec]:
         "INVERSE",
         "LEVERAGED_INVERSE",
     )
-    return {
-        spec.hypothesis_id: spec
-        for spec in (
+    baseline_policy = sector_rotation_buy_ordinary_baseline_policy()
+    policy_selection = select_sector_rotation_buy_ordinary_policy_candidate()
+    specs = [
+        _hypothesis(
+            "trend_continuation_buy_10d",
+            "trend_continuation",
+            "BUY",
+            10,
+            ordinary_scopes,
+            ("returns_momentum", "trend_structure", "market_relative"),
+            "Trend continuation buy lens with market/sector confirmation.",
+        ),
+        _hypothesis(
+            "trend_continuation_sell_10d",
+            "trend_continuation",
+            "SELL_SHORT",
+            10,
+            ordinary_scopes,
+            ("returns_momentum", "trend_structure", "market_relative"),
+            "Trend continuation sell/short lens with market pressure.",
+        ),
+        _hypothesis(
+            "reversal_buy_5d",
+            "reversal_exhaustion",
+            "BUY",
+            5,
+            ordinary_scopes,
+            ("trend_structure", "volatility_range", "candle_geometry"),
+            "Bullish exhaustion/reclaim lens after selloff pressure.",
+        ),
+        _hypothesis(
+            "reversal_sell_5d",
+            "reversal_exhaustion",
+            "SELL_SHORT",
+            5,
+            ordinary_scopes,
+            ("trend_structure", "volatility_range", "candle_geometry"),
+            "Bearish exhaustion/rejection lens after upside pressure.",
+        ),
+        _hypothesis(
+            "breakout_buy_10d",
+            "breakout_breakdown",
+            "BUY",
+            10,
+            ordinary_scopes,
+            ("trend_structure", "volume_participation", "volatility_range"),
+            "Breakout buy lens using range/volume expansion.",
+        ),
+        _hypothesis(
+            "breakdown_sell_10d",
+            "breakout_breakdown",
+            "SELL_SHORT",
+            10,
+            ordinary_scopes,
+            ("trend_structure", "volume_participation", "volatility_range"),
+            "Breakdown sell/short lens using range/volume expansion.",
+        ),
+        _hypothesis(
+            "pullback_continuation_buy_10d",
+            "pullback_continuation",
+            "BUY",
+            10,
+            ordinary_scopes,
+            ("trend_structure", "returns_momentum", "volatility_range"),
+            "Controlled pullback buy lens inside a stronger trend.",
+        ),
+        _hypothesis(
+            "pullback_continuation_sell_10d",
+            "pullback_continuation",
+            "SELL_SHORT",
+            10,
+            ordinary_scopes,
+            ("trend_structure", "returns_momentum", "volatility_range"),
+            "Controlled bounce sell/short lens inside a weaker trend.",
+        ),
+        _hypothesis(
+            "risk_off_buy_inverse_10d",
+            "risk_on_risk_off",
+            "BUY",
+            10,
+            inverse_scopes,
+            ("inverse_leveraged", "breadth", "market_relative", "relationship_graph"),
+            "Risk-off inverse ETF buy lens.",
+        ),
+        _hypothesis(
+            "sector_rotation_buy_20d",
+            "sector_rotation",
+            "BUY",
+            20,
+            ordinary_scopes,
+            ("sector_relative", "market_relative", "returns_momentum"),
+            "Sector leadership and relative strength buy lens.",
+            target_stop_policy=baseline_policy,
+        ),
+        _hypothesis(
+            "volatility_expansion_sell_5d",
+            "volatility_expansion",
+            "SELL_SHORT",
+            5,
+            ordinary_scopes,
+            ("volatility_range", "trend_structure", "regime"),
+            "Downside volatility expansion sell/short lens.",
+        ),
+        _hypothesis(
+            "volatility_compression_release_buy_10d",
+            "volatility_compression_release",
+            "BUY",
+            10,
+            ordinary_scopes,
+            ("volatility_range", "trend_structure", "candle_geometry"),
+            "Bullish compression release lens.",
+        ),
+        _hypothesis(
+            "breadth_deterioration_sell_10d",
+            "breadth_thrust_deterioration",
+            "SELL_SHORT",
+            10,
+            ordinary_scopes,
+            ("breadth", "market_relative", "inverse_leveraged"),
+            "Breadth deterioration sell/short lens.",
+        ),
+        _hypothesis(
+            "failed_breakdown_buy_5d",
+            "failed_move_liquidity_trap",
+            "BUY",
+            5,
+            ordinary_scopes,
+            ("trend_structure", "candle_geometry", "volatility_range"),
+            "Failed breakdown and reclaim buy lens.",
+        ),
+        _hypothesis(
+            "failed_breakout_sell_5d",
+            "failed_move_liquidity_trap",
+            "SELL_SHORT",
+            5,
+            ordinary_scopes,
+            ("trend_structure", "candle_geometry", "volatility_range"),
+            "Failed breakout and rejection sell/short lens.",
+        ),
+    ]
+    if policy_selection.selected_policy is not None:
+        candidate_policy = policy_selection.selected_policy
+        specs.append(
             _hypothesis(
-                "trend_continuation_buy_10d",
-                "trend_continuation",
-                "BUY",
-                10,
-                ordinary_scopes,
-                ("returns_momentum", "trend_structure", "market_relative"),
-                "Trend continuation buy lens with market/sector confirmation.",
-            ),
-            _hypothesis(
-                "trend_continuation_sell_10d",
-                "trend_continuation",
-                "SELL_SHORT",
-                10,
-                ordinary_scopes,
-                ("returns_momentum", "trend_structure", "market_relative"),
-                "Trend continuation sell/short lens with market pressure.",
-            ),
-            _hypothesis(
-                "reversal_buy_5d",
-                "reversal_exhaustion",
-                "BUY",
-                5,
-                ordinary_scopes,
-                ("trend_structure", "volatility_range", "candle_geometry"),
-                "Bullish exhaustion/reclaim lens after selloff pressure.",
-            ),
-            _hypothesis(
-                "reversal_sell_5d",
-                "reversal_exhaustion",
-                "SELL_SHORT",
-                5,
-                ordinary_scopes,
-                ("trend_structure", "volatility_range", "candle_geometry"),
-                "Bearish exhaustion/rejection lens after upside pressure.",
-            ),
-            _hypothesis(
-                "breakout_buy_10d",
-                "breakout_breakdown",
-                "BUY",
-                10,
-                ordinary_scopes,
-                ("trend_structure", "volume_participation", "volatility_range"),
-                "Breakout buy lens using range/volume expansion.",
-            ),
-            _hypothesis(
-                "breakdown_sell_10d",
-                "breakout_breakdown",
-                "SELL_SHORT",
-                10,
-                ordinary_scopes,
-                ("trend_structure", "volume_participation", "volatility_range"),
-                "Breakdown sell/short lens using range/volume expansion.",
-            ),
-            _hypothesis(
-                "pullback_continuation_buy_10d",
-                "pullback_continuation",
-                "BUY",
-                10,
-                ordinary_scopes,
-                ("trend_structure", "returns_momentum", "volatility_range"),
-                "Controlled pullback buy lens inside a stronger trend.",
-            ),
-            _hypothesis(
-                "pullback_continuation_sell_10d",
-                "pullback_continuation",
-                "SELL_SHORT",
-                10,
-                ordinary_scopes,
-                ("trend_structure", "returns_momentum", "volatility_range"),
-                "Controlled bounce sell/short lens inside a weaker trend.",
-            ),
-            _hypothesis(
-                "risk_off_buy_inverse_10d",
-                "risk_on_risk_off",
-                "BUY",
-                10,
-                inverse_scopes,
-                ("inverse_leveraged", "breadth", "market_relative", "relationship_graph"),
-                "Risk-off inverse ETF buy lens.",
-            ),
-            _hypothesis(
-                "sector_rotation_buy_20d",
+                SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID,
                 "sector_rotation",
                 "BUY",
-                20,
-                ordinary_scopes,
+                candidate_policy.horizon,
+                ("ORDINARY",),
                 ("sector_relative", "market_relative", "returns_momentum"),
-                "Sector leadership and relative strength buy lens.",
-            ),
-            _hypothesis(
-                "volatility_expansion_sell_5d",
-                "volatility_expansion",
-                "SELL_SHORT",
-                5,
-                ordinary_scopes,
-                ("volatility_range", "trend_structure", "regime"),
-                "Downside volatility expansion sell/short lens.",
-            ),
-            _hypothesis(
-                "volatility_compression_release_buy_10d",
-                "volatility_compression_release",
-                "BUY",
-                10,
-                ordinary_scopes,
-                ("volatility_range", "trend_structure", "candle_geometry"),
-                "Bullish compression release lens.",
-            ),
-            _hypothesis(
-                "breadth_deterioration_sell_10d",
-                "breadth_thrust_deterioration",
-                "SELL_SHORT",
-                10,
-                ordinary_scopes,
-                ("breadth", "market_relative", "inverse_leveraged"),
-                "Breadth deterioration sell/short lens.",
-            ),
-            _hypothesis(
-                "failed_breakdown_buy_5d",
-                "failed_move_liquidity_trap",
-                "BUY",
-                5,
-                ordinary_scopes,
-                ("trend_structure", "candle_geometry", "volatility_range"),
-                "Failed breakdown and reclaim buy lens.",
-            ),
-            _hypothesis(
-                "failed_breakout_sell_5d",
-                "failed_move_liquidity_trap",
-                "SELL_SHORT",
-                5,
-                ordinary_scopes,
-                ("trend_structure", "candle_geometry", "volatility_range"),
-                "Failed breakout and rejection sell/short lens.",
-            ),
+                "Experimental Sector Rotation BUY ORDINARY target/stop policy candidate.",
+                outcome_labels=_sector_rotation_candidate_outcome_labels(candidate_policy),
+                target_stop_policy=candidate_policy,
+            )
         )
-    }
+    return {spec.hypothesis_id: spec for spec in specs}
 
 
 def load_signal_discovery_config(path: str | Path | None = None) -> SignalDiscoveryConfig:
@@ -921,6 +1022,11 @@ def load_signal_discovery_frames(
         "probability_buckets",
         "diagnostic_thresholds",
         "row_level_calibration_audit",
+        "target_stop_policy_registry",
+        "calibration_selection",
+        "sector_rotation_buy_ordinary_policy_comparison",
+        "derived_policy_outcomes",
+        "signal_discovery_policy_comparison",
         "summary",
     ):
         path = generation_dir / f"{name}.csv"
@@ -975,6 +1081,12 @@ def run_signal_discovery(
     universe = load_universe_config(universe_path or project_root / "configs/universe/core.yaml")
     model_frame, modeling_path = _latest_modeling_frame(paths)
     feature_frame, feature_path = _latest_feature_frame(paths)
+    policy_selection = select_sector_rotation_buy_ordinary_policy_candidate()
+    policies = target_stop_policy_registry()
+    model_frame, derived_policy_outcomes = augment_model_frame_with_policy_outcomes(
+        model_frame,
+        policies,
+    )
     feature_manifest_hash = _feature_hash_from_path(feature_path)
     feature_family_by_column = feature_family_map_for_columns(
         numeric_feature_columns(feature_frame)
@@ -1081,6 +1193,12 @@ def run_signal_discovery(
         "no_signal_rows": len(no_signal),
         "selected_candidates": len(selected),
         "rejected_rows": len(rejected),
+        "target_stop_policy_schema_version": TARGET_STOP_POLICY_SCHEMA_VERSION,
+        "target_stop_policy_candidate_status": policy_selection.status,
+        "target_stop_policy_candidate_reason": policy_selection.reason,
+        "target_stop_policy_candidate_id": policy_selection.selected_policy.policy_id
+        if policy_selection.selected_policy is not None
+        else "",
         "artifact_hashes": {},
     }
 
@@ -1118,7 +1236,16 @@ def run_signal_discovery(
         )
         if row_level_calibration_frames
         else pd.DataFrame(columns=ROW_LEVEL_CALIBRATION_AUDIT_COLUMNS),
+        "target_stop_policy_registry": policy_registry_frame(),
+        "calibration_selection": calibration_selection_frame(),
+        "sector_rotation_buy_ordinary_policy_comparison": (
+            sector_rotation_buy_ordinary_policy_comparison_frame()
+        ),
+        "derived_policy_outcomes": derived_policy_outcomes,
     }
+    frames["signal_discovery_policy_comparison"] = _signal_discovery_policy_comparison_frame(
+        candidates_frame
+    )
     _write_generation(temp_dir, metadata, frames)
     metadata["artifact_hashes"] = {
         path.name: hash_file(path)
@@ -1168,6 +1295,7 @@ def export_signal_discovery_generation(
         "row_level_calibration_audit.parquet",
         "calibration_summary.json",
         "calibration_artifact_manifest.json",
+        "target_stop_policy_registry.json",
     ):
         source = generation_dir / name
         if source.exists():
@@ -2970,6 +3098,7 @@ def _insufficient_calibration_summary_row(
         "product_scope": PRODUCT_CLASS_SCOPE_POOLED,
         "model_family": family,
         "model_id": _audit_model_id(spec, family),
+        **_policy_context_fields(spec),
         "status": status,
         "reason": reason,
         "calibration_start_date": "",
@@ -3153,6 +3282,7 @@ def _row_level_calibration_audit_frame(
                 "horizon": spec.horizon,
                 "model_family": family,
                 "model_id": model_id,
+                **_policy_context_fields(spec),
                 "raw_probability": _as_float(raw_tbs_probability.get(index), default=math.nan),
                 "calibrated_probability": _as_float(
                     calibrated_tbs_probability.get(index),
@@ -3228,6 +3358,7 @@ def _calibration_summary_row(
         "product_scope": product_scope,
         "model_family": family,
         "model_id": _audit_model_id(spec, family),
+        **_policy_context_fields(spec),
         "status": "AVAILABLE" if len(group) else "INSUFFICIENT_CALIBRATION_EVIDENCE",
         "reason": "" if len(group) else "empty_calibration_slice",
         "calibration_start_date": _date_min(group.get("Date", pd.Series(dtype=str))),
@@ -3320,6 +3451,7 @@ def _probability_distribution_row(
         "product_scope": product_scope,
         "model_family": family,
         "model_id": _audit_model_id(spec, family),
+        **_policy_context_fields(spec),
         "probability_type": probability_type,
         "min": _safe_min(values),
         "p01": _quantile_value(quantiles, 0.01),
@@ -3520,6 +3652,7 @@ def _audit_row_context(
         "product_scope": product_scope,
         "model_family": family,
         "model_id": _audit_model_id(spec, family),
+        **_policy_context_fields(spec),
     }
 
 
@@ -3765,6 +3898,19 @@ def _latest_decisions(
             "model_id": f"{fitted.hypothesis.hypothesis_id}:{fitted.family}",
             "model_family": fitted.family,
             "family": fitted.family,
+            **_policy_context_fields(fitted.hypothesis),
+            "target_stop_policy_schema_version": fitted.hypothesis.target_stop_policy_schema_version,
+            "target_stop_policy_notice": fitted.hypothesis.target_stop_policy_notice,
+            "target_stop_policy_target_multiple": (
+                fitted.hypothesis.target_stop_policy_target_multiple
+            ),
+            "target_stop_policy_stop_multiple": (
+                fitted.hypothesis.target_stop_policy_stop_multiple
+            ),
+            "target_stop_policy_horizon": fitted.hypothesis.horizon
+            if fitted.hypothesis.target_stop_policy_id
+            else "",
+            "target_stop_policy_display": _target_stop_policy_display(fitted.hypothesis),
             "horizon": fitted.hypothesis.horizon,
             "scope": _row_scope(row),
             "product_class_scope": _row_scope(row),
@@ -3796,7 +3942,7 @@ def _latest_decisions(
             "rejection_reason": reason if decision.startswith("REJECTED") else "",
             "no_signal_reason": reason if decision == "NO_SIGNAL" else "",
             "next_required_event": _next_required_event(decision),
-            "not_live_actionable_reason": "No promoted multi-angle signal model exists.",
+            "not_live_actionable_reason": _not_live_actionable_reason(fitted.hypothesis),
             "open_url": "",
             "candidate_detail_url": "",
         }
@@ -3808,6 +3954,7 @@ def _latest_decisions(
                     "generation_id": generation_id,
                     "hypothesis_id": fitted.hypothesis.hypothesis_id,
                     "model_family": fitted.family,
+                    **_policy_context_fields(fitted.hypothesis),
                     "ticker": str(row.get("symbol")),
                     "component": component,
                     "value": value,
@@ -4083,6 +4230,15 @@ def _candidate_status_from_decision(decision: str) -> str:
     return decision
 
 
+def _not_live_actionable_reason(spec: SignalHypothesisSpec) -> str:
+    if spec.target_stop_policy_status == "EXPERIMENTAL_CANDIDATE":
+        return (
+            "Experimental target/stop policy. Development evidence only. "
+            "Not a live signal and not eligible for promotion without future validation."
+        )
+    return "No promoted multi-angle signal model exists."
+
+
 def _candidate_analogs(
     fitted: FittedSignalModel,
     candidate: dict[str, object],
@@ -4278,6 +4434,7 @@ def _sample_gate_rows(
         {
             "generation_id": generation_id,
             "hypothesis_id": spec.hypothesis_id,
+            **_policy_context_fields(spec),
             "gate_id": gate_id,
             "actual": actual,
             "threshold": threshold,
@@ -4371,6 +4528,7 @@ def _unsupported_result(
             {
                 "generation_id": generation_id,
                 "hypothesis_id": spec.hypothesis_id,
+                **_policy_context_fields(spec),
                 "gate_id": "hypothesis_supported",
                 "actual": 0,
                 "threshold": 1,
@@ -4420,6 +4578,16 @@ def _hypothesis_base_record(
         "model_tasks": json.dumps(list(spec.model_tasks)),
         "selection_policy": json.dumps(spec.selection_policy, sort_keys=True),
         "validation_policy": json.dumps(spec.validation_policy, sort_keys=True),
+        "target_stop_policy_schema_version": spec.target_stop_policy_schema_version,
+        "target_stop_policy_id": spec.target_stop_policy_id,
+        "target_stop_policy_name": spec.target_stop_policy_name,
+        "target_stop_policy_status": spec.target_stop_policy_status,
+        "target_stop_policy_hash": spec.target_stop_policy_hash,
+        "target_stop_policy_target_multiple": spec.target_stop_policy_target_multiple,
+        "target_stop_policy_stop_multiple": spec.target_stop_policy_stop_multiple,
+        "target_stop_policy_horizon": spec.horizon if spec.target_stop_policy_id else "",
+        "target_stop_policy_notice": spec.target_stop_policy_notice,
+        "target_stop_policy_display": _target_stop_policy_display(spec),
         "footprint_categories": json.dumps(list(spec.footprint_categories)),
         "explanation_template": spec.explanation_template,
         "governance_version": spec.governance_version,
@@ -4472,6 +4640,88 @@ def _summary_frame(
     )
 
 
+def _signal_discovery_policy_comparison_frame(candidates: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "target_stop_policy_id",
+        "target_stop_policy_name",
+        "target_stop_policy_status",
+        "target_stop_policy_hash",
+        "hypothesis_id",
+        "horizon",
+        "scope",
+        "row_count",
+        "selected_rows",
+        "no_signal_rows",
+        "rejected_rows",
+        "tbs_blocked_rows",
+        "average_signal_score",
+        "average_target_before_stop_probability",
+        "average_expected_return",
+        "average_expected_mfe",
+        "average_expected_mae",
+        "research_only",
+        "diagnostic_notice",
+    ]
+    if candidates.empty or "target_stop_policy_id" not in candidates.columns:
+        return pd.DataFrame(columns=columns)
+    frame = candidates.loc[candidates["target_stop_policy_id"].astype(str).str.len().gt(0)].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    rows: list[dict[str, object]] = []
+    group_columns = [
+        "target_stop_policy_id",
+        "target_stop_policy_name",
+        "target_stop_policy_status",
+        "target_stop_policy_hash",
+        "hypothesis_id",
+        "horizon",
+        "scope",
+    ]
+    for keys, group in frame.groupby(group_columns, dropna=False, sort=True):
+        key_map = dict(zip(group_columns, keys, strict=True))
+        decision = group.get("decision", pd.Series(dtype=str)).astype(str)
+        reason = (
+            group.get("no_signal_reason", pd.Series(dtype=str)).astype(str)
+            + " "
+            + group.get("rejection_reason", pd.Series(dtype=str)).astype(str)
+        )
+        rows.append(
+            {
+                **key_map,
+                "row_count": len(group),
+                "selected_rows": int(
+                    decision.isin(["BUY_CANDIDATE", "SELL_SHORT_CANDIDATE"]).sum()
+                ),
+                "no_signal_rows": int(decision.eq("NO_SIGNAL").sum()),
+                "rejected_rows": int(decision.str.startswith("REJECTED").sum()),
+                "tbs_blocked_rows": int(
+                    reason.str.contains(
+                        "target_before_stop_probability_below_threshold",
+                        regex=False,
+                    ).sum()
+                ),
+                "average_signal_score": _safe_mean(
+                    group.get("signal_score", pd.Series(dtype=float))
+                ),
+                "average_target_before_stop_probability": _safe_mean(
+                    group.get("target_before_stop_probability", pd.Series(dtype=float))
+                ),
+                "average_expected_return": _safe_mean(
+                    group.get("expected_return", pd.Series(dtype=float))
+                ),
+                "average_expected_mfe": _safe_mean(
+                    group.get("expected_mfe", pd.Series(dtype=float))
+                ),
+                "average_expected_mae": _safe_mean(
+                    group.get("expected_mae", pd.Series(dtype=float))
+                ),
+                "research_only": True,
+                "diagnostic_notice": TARGET_STOP_POLICY_DIAGNOSTIC_NOTICE,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
 def _write_generation(
     directory: Path,
     metadata: dict[str, object],
@@ -4486,6 +4736,32 @@ def _write_generation(
         encoding="utf-8",
     )
     _write_calibration_audit_json_artifacts(directory, metadata, frames)
+    _write_target_stop_policy_json_artifacts(directory, metadata, frames)
+
+
+def _write_target_stop_policy_json_artifacts(
+    directory: Path,
+    metadata: dict[str, object],
+    frames: dict[str, pd.DataFrame],
+) -> None:
+    registry = frames.get("target_stop_policy_registry", pd.DataFrame())
+    if registry.empty:
+        return
+    (directory / "target_stop_policy_registry.json").write_text(
+        json.dumps(
+            {
+                "schema_version": TARGET_STOP_POLICY_SCHEMA_VERSION,
+                "generation_id": metadata.get("generation_id", ""),
+                "diagnostic_only": True,
+                "notice": TARGET_STOP_POLICY_DIAGNOSTIC_NOTICE,
+                "records": registry.to_dict(orient="records"),
+            },
+            indent=2,
+            sort_keys=True,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _write_calibration_audit_json_artifacts(
