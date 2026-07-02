@@ -453,6 +453,16 @@ def _write_signal_discovery_generation(root: Path) -> str:
         "model_id": "reversal_buy_5d:extra_trees",
         "model_family": "extra_trees",
         "family": "extra_trees",
+        "target_stop_policy_id": "fixture_policy_candidate",
+        "target_stop_policy_name": "Fixture Policy Candidate",
+        "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+        "target_stop_policy_hash": "fixture-policy-hash",
+        "target_stop_policy_target_multiple": 2.0,
+        "target_stop_policy_stop_multiple": 1.25,
+        "target_stop_policy_notice": (
+            "Experimental target/stop policy. Development evidence only. Not a live signal."
+        ),
+        "target_stop_policy_display": "Fixture Policy Candidate · T2/S1.25/5D",
         "horizon": 5,
         "scope": "POOLED",
         "product_class_scope": "POOLED",
@@ -635,6 +645,10 @@ def _write_signal_discovery_generation(root: Path) -> str:
                 {
                     "generation_id": generation_id,
                     "hypothesis_id": "reversal_buy_5d",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_name": "Fixture Policy Candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "target_stop_policy_hash": "fixture-policy-hash",
                     "gate_id": "minimum_training_samples",
                     "actual": 100,
                     "threshold": 20,
@@ -644,9 +658,316 @@ def _write_signal_discovery_generation(root: Path) -> str:
                 }
             ]
         ),
+        "target_stop_policy_registry": pd.DataFrame(
+            [
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "policy_id": "fixture_policy_candidate",
+                    "policy_name": "Fixture Policy Candidate",
+                    "archetype": "reversal_exhaustion",
+                    "action": "BUY",
+                    "product_scope": "POOLED",
+                    "horizon": 5,
+                    "target_multiple": 2.0,
+                    "stop_multiple": 1.25,
+                    "governance_status": "EXPERIMENTAL_CANDIDATE",
+                    "policy_hash": "fixture-policy-hash",
+                }
+            ]
+        ),
+        "calibration_selection": pd.DataFrame(
+            [
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "selection_status": "CALIBRATION_SUPPORTED_POLICY_CANDIDATE",
+                    "selected": True,
+                    "horizon": 5,
+                    "target_multiple": 2.0,
+                    "stop_multiple": 1.25,
+                    "target_before_stop_hit_rate": 0.55,
+                    "stop_before_target_rate": 0.35,
+                    "cost_adjusted_utility": 0.004,
+                }
+            ]
+        ),
+        "sector_rotation_buy_ordinary_policy_comparison": pd.DataFrame(
+            [
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "policy_role": "baseline",
+                    "target_stop_policy_id": "fixture_policy_baseline",
+                    "target_stop_policy_status": "DEFAULT_BASELINE",
+                    "target_multiple": 2.0,
+                    "stop_multiple": 1.0,
+                    "target_before_stop_hit_rate": 0.45,
+                },
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "policy_role": "experimental_candidate",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "target_multiple": 2.0,
+                    "stop_multiple": 1.25,
+                    "target_before_stop_hit_rate": 0.55,
+                },
+            ]
+        ),
+        "derived_policy_outcomes": pd.DataFrame(
+            [
+                {
+                    "schema_version": "target_stop_policy_candidate_v1",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_name": "Fixture Policy Candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "Date": "2026-05-26",
+                    "symbol": "DEMO3",
+                    "entry_price": 100.0,
+                    "target_price": 104.0,
+                    "stop_price": 97.5,
+                    "target_before_stop": 1.0,
+                    "stop_before_target": 0.0,
+                    "forward_return": 0.024,
+                    "MFE": 0.052,
+                    "MAE": -0.018,
+                }
+            ]
+        ),
+        "signal_discovery_policy_comparison": pd.DataFrame(
+            [
+                {
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_name": "Fixture Policy Candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "hypothesis_id": "reversal_buy_5d",
+                    "row_count": 2,
+                    "selected_rows": 1,
+                    "no_signal_rows": 1,
+                    "tbs_blocked_rows": 0,
+                }
+            ]
+        ),
     }
     for name, frame in frames.items():
         frame.to_csv(generation_dir / f"{name}.csv", index=False)
+    calibration_summary = pd.DataFrame(
+        [
+            {
+                "schema_version": "multi_angle_calibration_audit_v1",
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "archetype_id": "reversal_exhaustion",
+                "archetype": "Reversal / Exhaustion",
+                "action": "BUY",
+                "direction": "BUY",
+                "horizon": 5,
+                "product_scope": "POOLED",
+                "model_family": "extra_trees",
+                "model_id": "reversal_buy_5d:extra_trees",
+                "status": "AVAILABLE",
+                "reason": "",
+                "calibration_start_date": "2026-04-01",
+                "calibration_end_date": "2026-05-01",
+                "calibration_row_count": 30,
+                "positive_tbs_count": 14,
+                "negative_tbs_count": 16,
+                "tbs_base_rate": 0.4667,
+                "target_hit_probability": 0.4667,
+                "stop_hit_probability": 0.5333,
+                "unresolved_probability": 0.0,
+                "average_forward_return": 0.006,
+                "average_mfe": 0.032,
+                "average_mae": -0.021,
+                "naive_base_rate_brier": 0.2489,
+                "model_brier": 0.2210,
+                "brier_skill": 0.0279,
+                "roc_auc": 0.61,
+                "pr_auc": 0.58,
+                "ece": 0.04,
+                "calibration_slope": 0.85,
+                "calibration_intercept": 0.04,
+                "raw_versus_calibrated_rank_correlation": 0.92,
+                "unique_calibrated_probability_count": 12,
+                "largest_calibrated_plateau_percentage": 0.20,
+                "realized_tbs_rate_by_decile_json": '{"0.4-0.5": 0.5}',
+                "selected_calibrator": "IsotonicRegression",
+                "calibration_method": "isotonic_regression",
+                "selected_feature_manifest_hash": "selectedfeaturehash",
+                "calibration_diagnostic_threshold_table_hash": "thresholdhash",
+                "row_level_calibration_audit_hash": "rowhash",
+                "artifact_hash": "artifacthash",
+            }
+        ]
+    )
+    diagnostic_thresholds = pd.DataFrame(
+        [
+            {
+                "schema_version": "multi_angle_calibration_audit_v1",
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "archetype_id": "reversal_exhaustion",
+                "archetype": "Reversal / Exhaustion",
+                "action": "BUY",
+                "direction": "BUY",
+                "horizon": 5,
+                "product_scope": "POOLED",
+                "model_family": "extra_trees",
+                "model_id": "reversal_buy_5d:extra_trees",
+                "threshold": threshold,
+                "qualifying_row_count": 10,
+                "qualifying_row_rate": 0.3333,
+                "observed_tbs_hit_rate": 0.50,
+                "precision": 0.50,
+                "recall": 0.35,
+                "average_forward_return": 0.006,
+                "median_forward_return": 0.004,
+                "average_mfe": 0.032,
+                "average_mae": -0.021,
+                "worst_mae": -0.055,
+                "target_hit_probability": 0.50,
+                "stop_hit_probability": 0.50,
+                "unresolved_probability": 0.0,
+                "transaction_cost_adjusted_utility": 0.001,
+                "symbol_concentration": 0.20,
+                "year_concentration": 1.0,
+                "regime_concentration": 1.0,
+                "diagnostic_only": True,
+                "production_target_before_stop_threshold": 0.50,
+            }
+            for threshold in (0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60)
+        ]
+    )
+    probability_buckets = pd.DataFrame(
+        [
+            {
+                "schema_version": "multi_angle_calibration_audit_v1",
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "archetype_id": "reversal_exhaustion",
+                "archetype": "Reversal / Exhaustion",
+                "action": "BUY",
+                "direction": "BUY",
+                "horizon": 5,
+                "product_scope": "POOLED",
+                "model_family": "extra_trees",
+                "model_id": "reversal_buy_5d:extra_trees",
+                "bucket_id": 4,
+                "bucket_lower_bound": 0.4,
+                "bucket_upper_bound": 0.5,
+                "row_count": 8,
+                "average_raw_probability": 0.44,
+                "average_calibrated_probability": 0.46,
+                "observed_tbs_hit_rate": 0.50,
+                "average_forward_return": 0.005,
+                "average_mfe": 0.030,
+                "average_mae": -0.020,
+                "target_hit_probability": 0.50,
+                "stop_hit_probability": 0.50,
+                "unresolved_probability": 0.0,
+                "average_time_to_target": 3.0,
+                "average_time_to_stop": 4.0,
+                "transaction_cost_adjusted_utility": 0.0005,
+            }
+        ]
+    )
+    probability_distributions = pd.DataFrame(
+        [
+            {
+                "schema_version": "multi_angle_calibration_audit_v1",
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "archetype_id": "reversal_exhaustion",
+                "archetype": "Reversal / Exhaustion",
+                "action": "BUY",
+                "direction": "BUY",
+                "horizon": 5,
+                "product_scope": "POOLED",
+                "model_family": "extra_trees",
+                "model_id": "reversal_buy_5d:extra_trees",
+                "probability_type": probability_type,
+                "min": 0.10,
+                "p01": 0.11,
+                "p05": 0.14,
+                "p10": 0.18,
+                "p25": 0.30,
+                "median": 0.44,
+                "p75": 0.58,
+                "p90": 0.68,
+                "p95": 0.72,
+                "p99": 0.78,
+                "max": 0.80,
+                "mean": 0.45,
+                "standard_deviation": 0.18,
+                "count_ge_030": 21,
+                "count_ge_035": 18,
+                "count_ge_040": 15,
+                "count_ge_045": 12,
+                "count_ge_050": 10,
+                "count_ge_055": 8,
+                "count_ge_060": 6,
+            }
+            for probability_type in ("raw_tbs", "calibrated_tbs")
+        ]
+    )
+    row_level = pd.DataFrame(
+        [
+            {
+                "schema_version": "multi_angle_calibration_audit_v1",
+                "generation_id": generation_id,
+                "hypothesis_id": "reversal_buy_5d",
+                "Date": "2026-04-15",
+                "symbol": "DEMO4",
+                "product_scope": "POOLED",
+                "archetype": "Reversal / Exhaustion",
+                "archetype_id": "reversal_exhaustion",
+                "action": "BUY",
+                "direction": "BUY",
+                "horizon": 5,
+                "model_family": "extra_trees",
+                "model_id": "reversal_buy_5d:extra_trees",
+                "raw_probability": 0.44,
+                "calibrated_probability": 0.46,
+                "TBS_label": 1,
+                "forward_return": 0.025,
+                "MFE": 0.050,
+                "MAE": -0.010,
+                "target_hit": True,
+                "stop_hit": False,
+                "unresolved": False,
+                "time_to_target": 2,
+                "time_to_stop": 5,
+                "regime": "fixture",
+                "sector": "test",
+                "selected_feature_manifest_hash": "selectedfeaturehash",
+                "calibration_artifact_hash": "rowhash",
+            }
+        ]
+    )
+    calibration_summary.to_csv(generation_dir / "calibration_summary.csv", index=False)
+    probability_distributions.to_csv(generation_dir / "probability_distributions.csv", index=False)
+    probability_buckets.to_csv(generation_dir / "probability_buckets.csv", index=False)
+    diagnostic_thresholds.to_csv(generation_dir / "diagnostic_thresholds.csv", index=False)
+    row_level.to_csv(generation_dir / "row_level_calibration_audit.csv", index=False)
+    row_level.to_parquet(generation_dir / "row_level_calibration_audit.parquet", index=False)
+    (generation_dir / "calibration_summary.json").write_text(
+        json.dumps({"records": calibration_summary.to_dict(orient="records")}, sort_keys=True),
+        encoding="utf-8",
+    )
+    (generation_dir / "calibration_artifact_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "multi_angle_calibration_audit_v1",
+                "generation_id": generation_id,
+                "diagnostic_only": True,
+                "files": [
+                    {"path": "calibration_summary.csv", "sha256": "fixture"},
+                    {"path": "diagnostic_thresholds.csv", "sha256": "fixture"},
+                    {"path": "row_level_calibration_audit.parquet", "sha256": "fixture"},
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     (generation_dir / "metadata.json").write_text(
         json.dumps(metadata, sort_keys=True), encoding="utf-8"
     )
@@ -1072,6 +1393,12 @@ def test_candidate_detail_displays_signal_discovery_score_breakdown(
     subheaders = {subheader.value for subheader in app.subheader}
     assert "Signal Score Breakdown" in subheaders
     assert "Footprint Evidence Table" in subheaders
+    assert "Target/Stop Policy" in subheaders
+    assert any(
+        "Experimental target/stop policy. Development evidence only. Not a live signal."
+        in warning.value
+        for warning in app.warning
+    )
     assert "Conflicting Evidence" in subheaders
     assert "Residual / Unexplained" in subheaders
     assert "Historical Analogs" in subheaders
@@ -1100,10 +1427,16 @@ def test_candidate_detail_displays_blocked_row_analogs(
     assert db.read_bytes() == before_db
     assert artifact.read_bytes() == before_artifact
     subheaders = {subheader.value for subheader in app.subheader}
+    assert "Calibration Diagnostics" in subheaders
     assert "Historical Analogs for Blocked Row" in subheaders
     assert "Historical Analog Robustness" in subheaders
     assert any(
         "Historical analogs are explanatory only and do not override model gates." in warning.value
+        for warning in app.warning
+    )
+    assert any(
+        "Calibration diagnostic only. Not a threshold change and not proof of edge."
+        in warning.value
         for warning in app.warning
     )
     metrics = {metric.label: metric.value for metric in app.metric}
@@ -1441,6 +1774,11 @@ def test_reports_and_exports_displays_signal_discovery_generation(
     assert metrics["Generation ID"] == generation_id
     assert any("Read-only blocker review" in caption.value for caption in app.caption)
     assert not frames["candidates"].empty
+    assert not frames["target_stop_policy_registry"].empty
+    assert not frames["calibration_selection"].empty
+    assert not frames["sector_rotation_buy_ordinary_policy_comparison"].empty
+    assert not frames["derived_policy_outcomes"].empty
+    assert not frames["signal_discovery_policy_comparison"].empty
     assert not blocker_frames["blocker_rows"].empty
     assert not blocker_frames["by_reason"].empty
     top_blockers = _top_blocker_rows(blocker_frames["blocker_rows"])
@@ -1471,6 +1809,12 @@ def test_reports_and_exports_displays_signal_discovery_generation(
                     "analog_caution_flags": frames["analog_caution_flags"],
                     "score_components": frames["score_components"],
                     "gate_results": frames["gate_results"],
+                    "calibration_summary": frames["calibration_summary"],
+                    "probability_distributions": frames["probability_distributions"],
+                    "probability_buckets": frames["probability_buckets"],
+                    "diagnostic_thresholds": frames["diagnostic_thresholds"],
+                    "row_level_calibration_audit": frames["row_level_calibration_audit"],
+                    "calibration_artifact_manifest": frames["calibration_artifact_manifest"],
                 }
             )
         )
@@ -1493,6 +1837,12 @@ def test_reports_and_exports_displays_signal_discovery_generation(
         "analog_caution_flags",
         "score_components",
         "gate_results",
+        "calibration_summary",
+        "probability_distributions",
+        "probability_buckets",
+        "diagnostic_thresholds",
+        "row_level_calibration_audit",
+        "calibration_artifact_manifest",
     }.issubset(set(workbook.sheetnames))
 
 

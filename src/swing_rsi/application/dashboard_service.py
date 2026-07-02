@@ -25,6 +25,7 @@ from swing_rsi.engine.gates import (
 )
 from swing_rsi.engine.manifest import hash_file
 from swing_rsi.engine.product_scope import (
+    PRODUCT_CLASS_SCOPE_POOLED,
     PRODUCT_CLASS_SCOPES,
     build_product_class_scope_definitions,
     product_class_scope_for_role,
@@ -984,6 +985,153 @@ def _analog_robustness_status_by_signal(robustness: pd.DataFrame) -> dict[str, s
     return output
 
 
+def _calibration_scope_for_candidate(row: pd.Series) -> str:
+    scope = _clean_text(row.get("product_class_scope")) or _clean_text(row.get("scope"))
+    return scope if scope else PRODUCT_CLASS_SCOPE_POOLED
+
+
+def _calibration_candidate_slice(frame: pd.DataFrame, row: pd.Series) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    output = frame.copy()
+    hypothesis_id = _clean_text(row.get("hypothesis_id"))
+    family = _clean_text(row.get("model_family")) or _clean_text(row.get("family"))
+    scope = _calibration_scope_for_candidate(row)
+    if "hypothesis_id" in output.columns and hypothesis_id:
+        output = output.loc[output["hypothesis_id"].astype(str).eq(hypothesis_id)]
+    if "model_family" in output.columns and family:
+        output = output.loc[output["model_family"].astype(str).eq(family)]
+    if "product_scope" not in output.columns or output.empty:
+        return output
+    scoped = output.loc[output["product_scope"].astype(str).eq(scope)]
+    if not scoped.empty:
+        return scoped
+    pooled = output.loc[output["product_scope"].astype(str).eq(PRODUCT_CLASS_SCOPE_POOLED)]
+    return pooled if not pooled.empty else output
+
+
+def _calibration_records_json(frame: pd.DataFrame, row: pd.Series) -> str:
+    sliced = _calibration_candidate_slice(frame, row)
+    if sliced.empty:
+        return ""
+    return json.dumps(sliced.to_dict(orient="records"), default=str)
+
+
+def _calibration_single_record_json(frame: pd.DataFrame, row: pd.Series) -> str:
+    sliced = _calibration_candidate_slice(frame, row)
+    if sliced.empty:
+        return ""
+    return json.dumps(sliced.iloc[0].to_dict(), default=str)
+
+
+def _policy_records_json(frame: pd.DataFrame, row: pd.Series) -> str:
+    if frame.empty:
+        return ""
+    output = frame.copy()
+    policy_id = _clean_text(row.get("target_stop_policy_id"))
+    if policy_id and "target_stop_policy_id" in output.columns:
+        scoped = output.loc[output["target_stop_policy_id"].astype(str).eq(policy_id)]
+        if not scoped.empty:
+            output = scoped
+    return json.dumps(output.to_dict(orient="records"), default=str)
+
+
+def _policy_exact_row_json(frame: pd.DataFrame, row: pd.Series) -> str:
+    if frame.empty:
+        return ""
+    output = frame.copy()
+    for candidate_column, frame_column in (
+        ("target_stop_policy_id", "target_stop_policy_id"),
+        ("ticker", "symbol"),
+        ("as_of_date", "Date"),
+    ):
+        value = _clean_text(row.get(candidate_column))
+        if value and frame_column in output.columns:
+            output = output.loc[output[frame_column].astype(str).eq(value)]
+    if output.empty:
+        return ""
+    return json.dumps(output.head(25).to_dict(orient="records"), default=str)
+
+
+def _weighted_calibration_base_rate(frame: pd.DataFrame) -> float | None:
+    if frame.empty or not {"tbs_base_rate", "calibration_row_count"}.issubset(frame.columns):
+        return None
+    rates = pd.to_numeric(frame["tbs_base_rate"], errors="coerce")
+    counts = pd.to_numeric(frame["calibration_row_count"], errors="coerce").fillna(0.0)
+    valid = rates.notna() & counts.gt(0.0)
+    if not valid.any():
+        return None
+    return float((rates.loc[valid] * counts.loc[valid]).sum() / counts.loc[valid].sum())
+
+
+def _same_archetype_calibration_base_rate(summary: pd.DataFrame, row: pd.Series) -> float | None:
+    if summary.empty:
+        return None
+    frame = summary.copy()
+    archetype_id = _clean_text(row.get("archetype_id"))
+    horizon = _clean_text(row.get("horizon"))
+    direction = _clean_text(row.get("direction"))
+    action = "BUY" if direction == "Bullish" else "SELL_SHORT" if direction == "Bearish" else ""
+    if "product_scope" in frame.columns:
+        pooled = frame.loc[frame["product_scope"].astype(str).eq(PRODUCT_CLASS_SCOPE_POOLED)]
+        frame = pooled if not pooled.empty else frame
+    if "archetype_id" in frame.columns and archetype_id:
+        frame = frame.loc[frame["archetype_id"].astype(str).eq(archetype_id)]
+    if "horizon" in frame.columns and horizon:
+        frame = frame.loc[frame["horizon"].astype(str).eq(horizon)]
+    if "action" in frame.columns and action:
+        frame = frame.loc[frame["action"].astype(str).eq(action)]
+    return _weighted_calibration_base_rate(frame)
+
+
+def _same_scope_calibration_base_rate(summary: pd.DataFrame, row: pd.Series) -> float | None:
+    if summary.empty:
+        return None
+    frame = summary.copy()
+    scope = _calibration_scope_for_candidate(row)
+    horizon = _clean_text(row.get("horizon"))
+    direction = _clean_text(row.get("direction"))
+    action = "BUY" if direction == "Bullish" else "SELL_SHORT" if direction == "Bearish" else ""
+    if "product_scope" in frame.columns:
+        scoped = frame.loc[frame["product_scope"].astype(str).eq(scope)]
+        frame = (
+            scoped
+            if not scoped.empty
+            else frame.loc[frame["product_scope"].astype(str).eq(PRODUCT_CLASS_SCOPE_POOLED)]
+        )
+    if "horizon" in frame.columns and horizon:
+        frame = frame.loc[frame["horizon"].astype(str).eq(horizon)]
+    if "action" in frame.columns and action:
+        frame = frame.loc[frame["action"].astype(str).eq(action)]
+    return _weighted_calibration_base_rate(frame)
+
+
+def _calibration_status(summary: pd.DataFrame, row: pd.Series) -> str:
+    sliced = _calibration_candidate_slice(summary, row)
+    if sliced.empty:
+        return "Not available"
+    return str(_display_value(sliced.iloc[0].get("status", "Not available")))
+
+
+def _calibration_blocker_assessment(summary: pd.DataFrame, row: pd.Series) -> str:
+    reason = (
+        _clean_text(row.get("no_signal_reason")) or _clean_text(row.get("rejection_reason"))
+    ).lower()
+    if "target_before_stop" not in reason:
+        return "Not a TBS blocker; calibration diagnostic shown for context."
+    sliced = _calibration_candidate_slice(summary, row)
+    if sliced.empty:
+        return "INSUFFICIENT_EVIDENCE_DIAGNOSTIC_ONLY"
+    status = str(sliced.iloc[0].get("status", ""))
+    if status != "AVAILABLE":
+        return "INSUFFICIENT_EVIDENCE_DIAGNOSTIC_ONLY"
+    probability = _safe_float(row.get("target_before_stop_probability"))
+    base_rate = _safe_float(sliced.iloc[0].get("tbs_base_rate"))
+    if probability is not None and probability < 0.50 and (base_rate is None or base_rate < 0.50):
+        return "VALID_BLOCKER_DIAGNOSTIC_ONLY"
+    return "REVIEW_REQUIRED_DIAGNOSTIC_ONLY"
+
+
 def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
     frames = signal_discovery_generation_frames(root)
     candidates = frames.get("candidates", pd.DataFrame())
@@ -1000,6 +1148,20 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
     robustness = robustness_frames.get("analog_robustness", pd.DataFrame())
     depth_comparison = robustness_frames.get("analog_depth_comparison", pd.DataFrame())
     caution_flags = robustness_frames.get("analog_caution_flags", pd.DataFrame())
+    calibration_summary = frames.get("calibration_summary", pd.DataFrame())
+    diagnostic_thresholds = frames.get("diagnostic_thresholds", pd.DataFrame())
+    probability_buckets = frames.get("probability_buckets", pd.DataFrame())
+    policy_registry = frames.get("target_stop_policy_registry", pd.DataFrame())
+    policy_selection = frames.get("calibration_selection", pd.DataFrame())
+    policy_comparison = frames.get(
+        "sector_rotation_buy_ordinary_policy_comparison",
+        pd.DataFrame(),
+    )
+    derived_outcomes = frames.get("derived_policy_outcomes", pd.DataFrame())
+    signal_policy_comparison = frames.get(
+        "signal_discovery_policy_comparison",
+        pd.DataFrame(),
+    )
     blocked_summary_by_signal = _single_record_json_by_signal(blocked_summary)
     blocked_support_by_signal = _blocked_analog_support_by_signal(blocked_summary)
     robustness_by_signal = _single_record_json_by_signal(robustness)
@@ -1055,6 +1217,43 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
                 "model": _display_value(row.get("model_id")),
                 "model_id": _display_value(row.get("model_id")),
                 "family": _display_value(row.get("model_family")),
+                "target_stop_policy": _display_value(row.get("target_stop_policy_display")),
+                "target_stop_policy_display": _display_value(row.get("target_stop_policy_display")),
+                "target_stop_policy_id": _display_value(row.get("target_stop_policy_id")),
+                "target_stop_policy_name": _display_value(row.get("target_stop_policy_name")),
+                "target_stop_policy_status": _display_value(row.get("target_stop_policy_status")),
+                "target_stop_policy_hash": _display_value(row.get("target_stop_policy_hash")),
+                "target_stop_policy_target_multiple": _display_value(
+                    row.get("target_stop_policy_target_multiple")
+                ),
+                "target_stop_policy_stop_multiple": _display_value(
+                    row.get("target_stop_policy_stop_multiple")
+                ),
+                "target_stop_policy_notice": _display_value(row.get("target_stop_policy_notice")),
+                "target_stop_policy_registry_json": _policy_records_json(
+                    policy_registry,
+                    row,
+                ),
+                "target_stop_policy_selection_evidence": json.dumps(
+                    policy_selection.to_dict(orient="records"),
+                    default=str,
+                )
+                if not policy_selection.empty
+                else "",
+                "target_stop_policy_comparison_json": json.dumps(
+                    policy_comparison.to_dict(orient="records"),
+                    default=str,
+                )
+                if not policy_comparison.empty
+                else "",
+                "derived_policy_outcome_json": _policy_exact_row_json(
+                    derived_outcomes,
+                    row,
+                ),
+                "signal_discovery_policy_comparison_json": _policy_records_json(
+                    signal_policy_comparison,
+                    row,
+                ),
                 "generation": _display_value(row.get("generation_id")),
                 "feature_snapshot_hash": _display_value(row.get("feature_snapshot_hash")),
                 "row_product_class_role": _display_value(row.get("row_product_class_role")),
@@ -1085,6 +1284,32 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
                 "analog_caution_flags": flags_by_signal.get(signal_id, ""),
                 "analog_robustness_explanation": robust_support,
                 "blocked_row_analog_summary": blocked_summary_by_signal.get(signal_id, ""),
+                "calibration_diagnostic_notice": (
+                    "Calibration diagnostic only. Not a threshold change and not proof of edge."
+                ),
+                "calibration_evidence_status": _calibration_status(calibration_summary, row),
+                "same_archetype_calibration_base_rate": _display_value(
+                    _same_archetype_calibration_base_rate(calibration_summary, row)
+                ),
+                "same_scope_calibration_base_rate": _display_value(
+                    _same_scope_calibration_base_rate(calibration_summary, row)
+                ),
+                "calibration_summary_json": _calibration_single_record_json(
+                    calibration_summary,
+                    row,
+                ),
+                "calibration_diagnostic_threshold_table": _calibration_records_json(
+                    diagnostic_thresholds,
+                    row,
+                ),
+                "calibration_probability_bucket_evidence": _calibration_records_json(
+                    probability_buckets,
+                    row,
+                ),
+                "tbs_blocker_calibration_assessment": _calibration_blocker_assessment(
+                    calibration_summary,
+                    row,
+                ),
                 "footprint_evidence_json": evidence_by_signal.get(signal_id, ""),
                 "footprint_summary": footprint_summary,
                 "rejection_reason": _display_value(
@@ -1139,6 +1364,15 @@ def _signal_discovery_board_rows(root: str | Path) -> pd.DataFrame:
                 "model_display": str(model_id),
                 "scope": _display_value(row.get("scope")),
                 "family": _display_value(row.get("model_family")),
+                "target_stop_policy": _display_value(row.get("target_stop_policy_display")),
+                "target_stop_policy_display": _display_value(row.get("target_stop_policy_display")),
+                "target_stop_policy_status": _display_value(row.get("target_stop_policy_status")),
+                "target_stop_policy_target_multiple": _display_value(
+                    row.get("target_stop_policy_target_multiple")
+                ),
+                "target_stop_policy_stop_multiple": _display_value(
+                    row.get("target_stop_policy_stop_multiple")
+                ),
                 "horizon": _display_value(row.get("horizon")),
                 "generation": generation,
                 "generation_display": _generation_display(generation),
@@ -2945,7 +3179,18 @@ def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]
         "reports_index": reports_inventory_frame(root),
     }
     discovery = signal_discovery_generation_frames(root)
-    for name in ("summary", "hypotheses", "candidates", "no_signal", "rejected"):
+    for name in (
+        "summary",
+        "hypotheses",
+        "candidates",
+        "no_signal",
+        "rejected",
+        "target_stop_policy_registry",
+        "calibration_selection",
+        "sector_rotation_buy_ordinary_policy_comparison",
+        "derived_policy_outcomes",
+        "signal_discovery_policy_comparison",
+    ):
         frame = discovery.get(name)
         if frame is not None and not frame.empty:
             frames[f"signal_discovery_{name}"] = frame

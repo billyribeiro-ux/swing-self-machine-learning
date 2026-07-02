@@ -38,6 +38,7 @@ SIGNAL_COLUMNS: tuple[str, ...] = (
     "historical_analog_support",
     "analog_status",
     "model_display",
+    "target_stop_policy_display",
     "generation_display",
     "run_display",
     "event_display",

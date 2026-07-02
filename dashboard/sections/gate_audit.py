@@ -10,6 +10,7 @@ from swing_rsi.application.dashboard_service import (
     gate_audit_frame,
     gate_contradiction_audit,
     live_signal_blockers_frame,
+    signal_discovery_generation_frames,
 )
 
 
@@ -101,6 +102,37 @@ def render_page() -> None:
     visible = filtered[[column for column in display_columns if column in filtered.columns]]
     streamlit.dataframe(display_frame(visible), width="stretch", hide_index=True)
     render_table_downloads(visible, basename="filtered_gate_audit", label="filtered_gates")
+
+    discovery_gates = signal_discovery_generation_frames(root).get("gate_results", pd.DataFrame())
+    if not discovery_gates.empty:
+        streamlit.subheader("Signal Discovery Policy Gates")
+        discovery_columns = [
+            "generation_id",
+            "hypothesis_id",
+            "target_stop_policy_id",
+            "target_stop_policy_name",
+            "target_stop_policy_status",
+            "target_stop_policy_hash",
+            "gate_id",
+            "actual",
+            "threshold",
+            "status",
+            "mandatory",
+            "evidence_source",
+        ]
+        discovery_visible = discovery_gates[
+            [column for column in discovery_columns if column in discovery_gates.columns]
+        ]
+        streamlit.dataframe(
+            display_frame(discovery_visible),
+            width="stretch",
+            hide_index=True,
+        )
+        render_table_downloads(
+            discovery_visible,
+            basename="signal_discovery_policy_gates",
+            label="signal_discovery_policy_gates",
+        )
 
     columns = streamlit.columns(2)
     columns[0].download_button(
