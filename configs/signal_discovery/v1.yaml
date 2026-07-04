@@ -11,6 +11,7 @@ enabled_hypotheses:
   - risk_off_buy_inverse_10d
   - sector_rotation_buy_20d
   - sector_rotation_buy_ordinary_20d_target_stop_candidate_v1
+  - sector_rotation_buy_ordinary_20d_time_exit_utility_v1
   - volatility_expansion_sell_5d
   - volatility_compression_release_buy_10d
   - breadth_deterioration_sell_10d

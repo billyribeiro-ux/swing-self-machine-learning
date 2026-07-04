@@ -52,6 +52,8 @@ SIGNAL_COLUMNS: tuple[str, ...] = (
     "expected_mfe",
     "expected_mae",
     "target_before_stop_probability",
+    "time_exit_positive_probability",
+    "expected_time_exit_utility",
     "ood_warning",
     "why_shadow_only",
     "next_required_event",

@@ -538,6 +538,16 @@ def render_page() -> None:
         candidate,
         "signal_discovery_policy_comparison_json",
     )
+    time_exit_labels = _records_json_frame(candidate, "time_exit_utility_labels_json")
+    time_exit_summary = _records_json_frame(
+        candidate,
+        "time_exit_utility_calibration_summary_json",
+    )
+    time_exit_signal_rows = _records_json_frame(candidate, "time_exit_utility_signal_row_json")
+    time_exit_policy_comparison = _records_json_frame(
+        candidate,
+        "time_exit_utility_policy_comparison_json",
+    )
     feature_snapshot = pd.DataFrame([candidate.to_dict()])
     risk = _risk_frame(candidate)
 
@@ -657,6 +667,84 @@ def render_page() -> None:
             derived_policy_outcome,
             basename="candidate_detail_derived_policy_outcome",
             label="derived_policy_outcome",
+        )
+
+    if (
+        _clean_identifier_value(candidate.get("time_exit_label_schema_version", ""))
+        or not time_exit_labels.empty
+        or not time_exit_summary.empty
+    ):
+        streamlit.subheader("Time-Exit Utility Diagnostic")
+        streamlit.warning(
+            "Time-exit utility is diagnostic. It does not override gates or create a live signal."
+        )
+        overview = pd.DataFrame(
+            [
+                {
+                    "Metric": "TBS probability",
+                    "Value": candidate.get("target_before_stop_probability", ""),
+                },
+                {
+                    "Metric": "Time-exit positive probability",
+                    "Value": candidate.get("time_exit_positive_probability", ""),
+                },
+                {
+                    "Metric": "Expected time-exit return",
+                    "Value": candidate.get("expected_time_exit_return", ""),
+                },
+                {
+                    "Metric": "Expected time-exit utility",
+                    "Value": candidate.get("expected_time_exit_utility", ""),
+                },
+                {
+                    "Metric": "Profitable despite failed TBS probability",
+                    "Value": candidate.get("profitable_despite_failed_tbs_probability", ""),
+                },
+                {
+                    "Metric": "Early adverse recovery probability",
+                    "Value": candidate.get("early_adverse_recovery_probability", ""),
+                },
+                {
+                    "Metric": "Why not live actionable",
+                    "Value": candidate.get("not_live_actionable_reason", ""),
+                },
+            ]
+        )
+        streamlit.dataframe(display_frame(overview), width="stretch", hide_index=True)
+        if not time_exit_labels.empty:
+            streamlit.caption("Baseline and experimental policy label-side outcomes")
+            streamlit.dataframe(display_frame(time_exit_labels), width="stretch", hide_index=True)
+        if not time_exit_summary.empty:
+            streamlit.caption("Calibration-only and development-holdout diagnostic summary")
+            streamlit.dataframe(display_frame(time_exit_summary), width="stretch", hide_index=True)
+        if not time_exit_policy_comparison.empty:
+            streamlit.caption("Policy comparison")
+            streamlit.dataframe(
+                display_frame(time_exit_policy_comparison),
+                width="stretch",
+                hide_index=True,
+            )
+        if not time_exit_signal_rows.empty:
+            streamlit.caption("Time-exit signal row")
+            streamlit.dataframe(
+                display_frame(time_exit_signal_rows),
+                width="stretch",
+                hide_index=True,
+            )
+        render_table_downloads(
+            time_exit_labels,
+            basename="candidate_detail_time_exit_utility_labels",
+            label="time_exit_utility_labels",
+        )
+        render_table_downloads(
+            time_exit_summary,
+            basename="candidate_detail_time_exit_utility_calibration_summary",
+            label="time_exit_utility_calibration_summary",
+        )
+        render_table_downloads(
+            time_exit_signal_rows,
+            basename="candidate_detail_time_exit_utility_signal_rows",
+            label="time_exit_utility_signal_rows",
         )
 
     if not calibration_overview.empty:
@@ -878,6 +966,10 @@ def render_page() -> None:
                 "baseline_vs_candidate": policy_comparison,
                 "derived_outcomes": derived_policy_outcome,
                 "signal_policy_comparison": signal_policy_comparison,
+                "time_exit_labels": time_exit_labels,
+                "time_exit_calibration": time_exit_summary,
+                "time_exit_signal_rows": time_exit_signal_rows,
+                "time_exit_policy_comparison": time_exit_policy_comparison,
                 "residual_unexplained": footprint.residual_unexplained,
                 "signal_score_breakdown": signal_score,
                 "attribution": attribution,

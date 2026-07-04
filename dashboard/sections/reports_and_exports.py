@@ -272,6 +272,10 @@ def render_page() -> None:
             "sector_rotation_buy_ordinary_policy_comparison",
             "derived_policy_outcomes",
             "signal_discovery_policy_comparison",
+            "time_exit_utility_labels",
+            "time_exit_utility_calibration_summary",
+            "time_exit_utility_signal_rows",
+            "time_exit_utility_policy_comparison",
         }
         and not frame.empty
     }
@@ -291,6 +295,10 @@ def render_page() -> None:
                 "derived_policy_outcomes": "derived_outcomes",
                 "candidates": "signal_rows",
                 "gate_results": "gates",
+                "time_exit_utility_labels": "time_exit_labels",
+                "time_exit_utility_calibration_summary": "calibration_summary",
+                "time_exit_utility_signal_rows": "time_exit_signal_rows",
+                "time_exit_utility_policy_comparison": "time_exit_policy_comparison",
             }.items():
                 frame = discovery_sheets.get(source, pd.DataFrame())
                 if not frame.empty:
@@ -313,6 +321,10 @@ def render_page() -> None:
             "sector_rotation_buy_ordinary_policy_comparison",
             "derived_policy_outcomes",
             "signal_discovery_policy_comparison",
+            "time_exit_utility_labels",
+            "time_exit_utility_calibration_summary",
+            "time_exit_utility_signal_rows",
+            "time_exit_utility_policy_comparison",
         )
         for name in audit_names:
             frame = discovery_sheets.get(name, pd.DataFrame())

@@ -318,10 +318,10 @@ def augment_model_frame_with_policy_outcomes(
 def build_policy_outcomes(
     model_frame: pd.DataFrame,
     policies: tuple[TargetStopPolicyCandidate, ...],
+    *,
+    include_statuses: tuple[TargetStopPolicyStatus, ...] = ("EXPERIMENTAL_CANDIDATE",),
 ) -> pd.DataFrame:
-    active = tuple(
-        policy for policy in policies if policy.governance_status == "EXPERIMENTAL_CANDIDATE"
-    )
+    active = tuple(policy for policy in policies if policy.governance_status in include_statuses)
     if not active or model_frame.empty:
         return pd.DataFrame(columns=_derived_policy_outcome_columns(active))
     rows: list[dict[str, object]] = []

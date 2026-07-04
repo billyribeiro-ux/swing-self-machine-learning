@@ -64,6 +64,16 @@ from swing_rsi.engine.target_stop_policy import (
     select_sector_rotation_buy_ordinary_policy_candidate,
     target_stop_policy_registry,
 )
+from swing_rsi.engine.time_exit_utility import (
+    SECTOR_ROTATION_BUY_ORDINARY_TIME_EXIT_HYPOTHESIS_ID,
+    TIME_EXIT_UTILITY_DIAGNOSTIC_NOTICE,
+    TIME_EXIT_UTILITY_LABEL_SCHEMA_VERSION,
+    augment_model_frame_with_time_exit_utility_labels,
+    time_exit_utility_calibration_summary_frame,
+    time_exit_utility_outcome_labels,
+    time_exit_utility_policy_comparison_frame,
+    time_exit_utility_signal_rows_frame,
+)
 from swing_rsi.engine.universe import load_universe_config
 
 SIGNAL_DISCOVERY_SCHEMA_VERSION = "multi_angle_signal_discovery_v1"
@@ -503,6 +513,8 @@ class SignalHypothesisSpec:
     target_stop_policy_notice: str = ""
     target_stop_policy_target_multiple: float | None = None
     target_stop_policy_stop_multiple: float | None = None
+    time_exit_label_schema_version: str = ""
+    time_exit_label_notice: str = ""
 
     @property
     def label_direction(self) -> str:
@@ -566,6 +578,11 @@ class FittedSignalModel:
     return_regressor: Any
     mfe_regressor: Any
     mae_regressor: Any
+    time_exit_utility_regressor: Any | None
+    failed_tbs_classifier: Any | None
+    failed_tbs_calibrator: Any | None
+    adverse_recovery_classifier: Any | None
+    adverse_recovery_calibrator: Any | None
     train_frame: pd.DataFrame
     holdout_metrics: dict[str, object]
     calibration_audit: dict[str, pd.DataFrame]
@@ -687,6 +704,9 @@ def _hypothesis(
     *,
     outcome_labels: dict[str, str] | None = None,
     target_stop_policy: TargetStopPolicyCandidate | None = None,
+    model_tasks: tuple[str, ...] | None = None,
+    time_exit_label_schema_version: str = "",
+    time_exit_label_notice: str = "",
 ) -> SignalHypothesisSpec:
     labels = outcome_labels or _outcome_labels(direction, horizon)
     return SignalHypothesisSpec(
@@ -698,7 +718,8 @@ def _hypothesis(
         required_feature_families=required,
         candidate_feature_families=ALL_FEATURE_FAMILIES,
         outcome_labels=labels,
-        model_tasks=(
+        model_tasks=model_tasks
+        or (
             "direction_probability",
             "target_before_stop_probability",
             "expected_return",
@@ -737,6 +758,8 @@ def _hypothesis(
         target_stop_policy_stop_multiple=(
             target_stop_policy.stop_multiple if target_stop_policy else None
         ),
+        time_exit_label_schema_version=time_exit_label_schema_version,
+        time_exit_label_notice=time_exit_label_notice,
     )
 
 
@@ -768,6 +791,15 @@ def _sector_rotation_candidate_outcome_labels(
     labels["target_before_stop"] = candidate_labels["target_before_stop"]
     labels["time_to_target"] = candidate_labels["time_to_target"]
     labels["time_to_stop"] = candidate_labels["time_to_stop"]
+    return labels
+
+
+def _sector_rotation_time_exit_outcome_labels(
+    policy: TargetStopPolicyCandidate,
+) -> dict[str, str]:
+    labels = _sector_rotation_candidate_outcome_labels(policy)
+    time_exit_labels = time_exit_utility_outcome_labels(policy)
+    labels.update(time_exit_labels)
     return labels
 
 
@@ -936,6 +968,31 @@ def default_hypothesis_registry() -> dict[str, SignalHypothesisSpec]:
                 target_stop_policy=candidate_policy,
             )
         )
+        specs.append(
+            _hypothesis(
+                SECTOR_ROTATION_BUY_ORDINARY_TIME_EXIT_HYPOTHESIS_ID,
+                "sector_rotation",
+                "BUY",
+                candidate_policy.horizon,
+                ("ORDINARY",),
+                ("sector_relative", "market_relative", "returns_momentum"),
+                "Experimental Sector Rotation BUY ORDINARY time-exit utility diagnostic.",
+                outcome_labels=_sector_rotation_time_exit_outcome_labels(candidate_policy),
+                target_stop_policy=candidate_policy,
+                model_tasks=(
+                    "time_exit_positive_probability",
+                    "target_before_stop_probability",
+                    "expected_time_exit_return",
+                    "expected_time_exit_utility",
+                    "expected_mfe",
+                    "expected_mae",
+                    "profitable_despite_failed_tbs_probability",
+                    "early_adverse_recovery_probability",
+                ),
+                time_exit_label_schema_version=TIME_EXIT_UTILITY_LABEL_SCHEMA_VERSION,
+                time_exit_label_notice=TIME_EXIT_UTILITY_DIAGNOSTIC_NOTICE,
+            )
+        )
     return {spec.hypothesis_id: spec for spec in specs}
 
 
@@ -1027,6 +1084,10 @@ def load_signal_discovery_frames(
         "sector_rotation_buy_ordinary_policy_comparison",
         "derived_policy_outcomes",
         "signal_discovery_policy_comparison",
+        "time_exit_utility_labels",
+        "time_exit_utility_calibration_summary",
+        "time_exit_utility_signal_rows",
+        "time_exit_utility_policy_comparison",
         "summary",
     ):
         path = generation_dir / f"{name}.csv"
@@ -1086,6 +1147,11 @@ def run_signal_discovery(
     model_frame, derived_policy_outcomes = augment_model_frame_with_policy_outcomes(
         model_frame,
         policies,
+    )
+    model_frame, time_exit_utility_labels = augment_model_frame_with_time_exit_utility_labels(
+        model_frame,
+        policies,
+        cost_return=config.cost_return,
     )
     feature_manifest_hash = _feature_hash_from_path(feature_path)
     feature_family_by_column = feature_family_map_for_columns(
@@ -1199,6 +1265,7 @@ def run_signal_discovery(
         "target_stop_policy_candidate_id": policy_selection.selected_policy.policy_id
         if policy_selection.selected_policy is not None
         else "",
+        "time_exit_utility_label_schema_version": TIME_EXIT_UTILITY_LABEL_SCHEMA_VERSION,
         "artifact_hashes": {},
     }
 
@@ -1242,10 +1309,18 @@ def run_signal_discovery(
             sector_rotation_buy_ordinary_policy_comparison_frame()
         ),
         "derived_policy_outcomes": derived_policy_outcomes,
+        "time_exit_utility_labels": time_exit_utility_labels,
     }
     frames["signal_discovery_policy_comparison"] = _signal_discovery_policy_comparison_frame(
         candidates_frame
     )
+    frames["time_exit_utility_calibration_summary"] = time_exit_utility_calibration_summary_frame(
+        time_exit_utility_labels
+    )
+    frames["time_exit_utility_policy_comparison"] = time_exit_utility_policy_comparison_frame(
+        frames["time_exit_utility_calibration_summary"]
+    )
+    frames["time_exit_utility_signal_rows"] = time_exit_utility_signal_rows_frame(candidates_frame)
     _write_generation(temp_dir, metadata, frames)
     metadata["artifact_hashes"] = {
         path.name: hash_file(path)
@@ -2964,6 +3039,40 @@ def _fit_family_model(
         mfe_model.fit(x_train, train_targets["mfe"].astype(float))
         mae_model = _regressor(family, config.random_seed + 17)
         mae_model.fit(x_train, train_targets["mae"].astype(float))
+        time_exit_utility_model = None
+        if "time_exit_utility" in train_targets.columns:
+            time_exit_utility_model = _regressor(family, config.random_seed + 19)
+            time_exit_utility_model.fit(x_train, train_targets["time_exit_utility"].astype(float))
+        failed_tbs_model = None
+        failed_tbs_calibrator = None
+        if (
+            "profitable_despite_failed_tbs" in train_targets.columns
+            and train_targets["profitable_despite_failed_tbs"].nunique(dropna=True) >= 2
+        ):
+            failed_tbs_model = _classifier(family, config.random_seed + 23)
+            failed_tbs_model.fit(
+                x_train,
+                train_targets["profitable_despite_failed_tbs"].astype(int),
+            )
+            failed_tbs_calibrator = _fit_probability_calibrator(
+                _predict_probability(failed_tbs_model, x_cal),
+                calibration_targets["profitable_despite_failed_tbs"],
+            )
+        adverse_recovery_model = None
+        adverse_recovery_calibrator = None
+        if (
+            "early_adverse_recovery" in train_targets.columns
+            and train_targets["early_adverse_recovery"].nunique(dropna=True) >= 2
+        ):
+            adverse_recovery_model = _classifier(family, config.random_seed + 29)
+            adverse_recovery_model.fit(
+                x_train,
+                train_targets["early_adverse_recovery"].astype(int),
+            )
+            adverse_recovery_calibrator = _fit_probability_calibrator(
+                _predict_probability(adverse_recovery_model, x_cal),
+                calibration_targets["early_adverse_recovery"],
+            )
     except ValueError:
         return None
 
@@ -2990,6 +3099,11 @@ def _fit_family_model(
     holdout_return = pd.Series(return_model.predict(x_holdout), index=holdout.index)
     holdout_mfe = pd.Series(mfe_model.predict(x_holdout), index=holdout.index)
     holdout_mae = pd.Series(mae_model.predict(x_holdout), index=holdout.index)
+    holdout_time_exit_utility = (
+        pd.Series(time_exit_utility_model.predict(x_holdout), index=holdout.index)
+        if time_exit_utility_model is not None
+        else None
+    )
     metrics = _holdout_metrics(
         spec,
         holdout_fit,
@@ -2999,6 +3113,7 @@ def _fit_family_model(
         holdout_return,
         holdout_mfe,
         holdout_mae,
+        expected_time_exit_utility=holdout_time_exit_utility,
         config=config,
     )
     return FittedSignalModel(
@@ -3016,6 +3131,11 @@ def _fit_family_model(
         return_regressor=return_model,
         mfe_regressor=mfe_model,
         mae_regressor=mae_model,
+        time_exit_utility_regressor=time_exit_utility_model,
+        failed_tbs_classifier=failed_tbs_model,
+        failed_tbs_calibrator=failed_tbs_calibrator,
+        adverse_recovery_classifier=adverse_recovery_model,
+        adverse_recovery_calibrator=adverse_recovery_calibrator,
         train_frame=train_fit.copy(),
         holdout_metrics=metrics,
         calibration_audit=calibration_audit,
@@ -3848,6 +3968,27 @@ def _latest_decisions(
     expected_return = pd.Series(fitted.return_regressor.predict(x_latest), index=latest_rows.index)
     expected_mfe = pd.Series(fitted.mfe_regressor.predict(x_latest), index=latest_rows.index)
     expected_mae = pd.Series(fitted.mae_regressor.predict(x_latest), index=latest_rows.index)
+    expected_time_exit_utility = (
+        pd.Series(fitted.time_exit_utility_regressor.predict(x_latest), index=latest_rows.index)
+        if fitted.time_exit_utility_regressor is not None
+        else pd.Series(math.nan, index=latest_rows.index, dtype=float)
+    )
+    profitable_failed_tbs_probability = (
+        _apply_probability_calibrator(
+            fitted.failed_tbs_calibrator,
+            _predict_probability(fitted.failed_tbs_classifier, x_latest),
+        )
+        if fitted.failed_tbs_classifier is not None
+        else pd.Series(math.nan, index=latest_rows.index, dtype=float)
+    )
+    adverse_recovery_probability = (
+        _apply_probability_calibrator(
+            fitted.adverse_recovery_calibrator,
+            _predict_probability(fitted.adverse_recovery_classifier, x_latest),
+        )
+        if fitted.adverse_recovery_classifier is not None
+        else pd.Series(math.nan, index=latest_rows.index, dtype=float)
+    )
     ood_rate = _ood_rate(x_latest, fitted.train_q01, fitted.train_q99)
     liquidity = _liquidity_score(latest_rows)
 
@@ -3863,6 +4004,17 @@ def _latest_decisions(
             ood_rate=float(ood_rate.iloc[position]),
             liquidity_score=float(liquidity.iloc[position]),
             cost_return=config.cost_return,
+            time_exit_positive_probability=float(direction_probability.iloc[position])
+            if fitted.hypothesis.time_exit_label_schema_version
+            else math.nan,
+            expected_time_exit_return=float(expected_return.iloc[position])
+            if fitted.hypothesis.time_exit_label_schema_version
+            else math.nan,
+            expected_time_exit_utility=float(expected_time_exit_utility.iloc[position]),
+            profitable_despite_failed_tbs_probability=float(
+                profitable_failed_tbs_probability.iloc[position]
+            ),
+            early_adverse_recovery_probability=float(adverse_recovery_probability.iloc[position]),
         )
         decision, reason = _decision_from_components(components, config, fitted.hypothesis)
         action = fitted.hypothesis.action_label if decision != "NO_SIGNAL" else "NO SIGNAL"
@@ -3923,6 +4075,39 @@ def _latest_decisions(
             "expected_return": components["expected_return"],
             "expected_mfe": components["expected_mfe"],
             "expected_mae": components["expected_mae"],
+            "time_exit_label_schema_version": fitted.hypothesis.time_exit_label_schema_version,
+            "time_exit_label_notice": fitted.hypothesis.time_exit_label_notice,
+            "time_exit_positive_probability": components.get(
+                "time_exit_positive_probability",
+                math.nan,
+            ),
+            "expected_time_exit_return": components.get("expected_time_exit_return", math.nan),
+            "expected_time_exit_utility": components.get("expected_time_exit_utility", math.nan),
+            "profitable_despite_failed_tbs_probability": components.get(
+                "profitable_despite_failed_tbs_probability",
+                math.nan,
+            ),
+            "early_adverse_recovery_probability": components.get(
+                "early_adverse_recovery_probability",
+                math.nan,
+            ),
+            "time_exit_positive_probability_component": components.get(
+                "time_exit_positive_probability_component",
+                math.nan,
+            ),
+            "expected_time_exit_return_component": components.get(
+                "expected_time_exit_return_component",
+                math.nan,
+            ),
+            "time_exit_utility_component": components.get(
+                "time_exit_utility_component",
+                math.nan,
+            ),
+            "failed_tbs_but_profitable_component": components.get(
+                "failed_tbs_but_profitable_component",
+                math.nan,
+            ),
+            "adverse_recovery_penalty": components.get("adverse_recovery_penalty", math.nan),
             "signal_score": components["signal_score"],
             "composite_signal_score": components["signal_score"],
             "risk_adjusted_utility": components["risk_adjusted_utility"],
@@ -4000,6 +4185,7 @@ def _holdout_metrics(
     expected_mfe: pd.Series,
     expected_mae: pd.Series,
     *,
+    expected_time_exit_utility: pd.Series | None = None,
     config: SignalDiscoveryConfig,
 ) -> dict[str, object]:
     actual = pd.to_numeric(targets["directional_return"], errors="coerce")
@@ -4015,7 +4201,7 @@ def _holdout_metrics(
     naive_tbs_brier = float(brier_score_loss(tbs.astype(int), np.full(len(tbs), naive_tbs)))
     net_actual = actual - config.cost_return
     benchmark = _benchmark_returns(holdout, spec)
-    return {
+    metrics: dict[str, object] = {
         "holdout_rows": len(holdout),
         "holdout_brier": brier,
         "holdout_naive_brier": naive_brier,
@@ -4044,6 +4230,34 @@ def _holdout_metrics(
         "holdout_status": "DEVELOPMENT_HOLDOUT",
         "final_holdout_status": "NOT_ENROLLED",
     }
+    if spec.time_exit_label_schema_version:
+        metrics.update(
+            {
+                "holdout_status": "DEVELOPMENT_HOLDOUT_DIAGNOSTIC_ONLY",
+                "holdout_time_exit_label_schema_version": spec.time_exit_label_schema_version,
+                "holdout_time_exit_positive_rate": float(positive.mean()),
+                "holdout_mean_time_exit_net_return": float(actual.mean()),
+                "holdout_median_time_exit_net_return": float(actual.median()),
+                "holdout_profitable_despite_failed_tbs_rate": _mean_label(
+                    targets.get("profitable_despite_failed_tbs", pd.Series(dtype=float))
+                ),
+                "holdout_early_adverse_recovery_rate": _mean_label(
+                    targets.get("early_adverse_recovery", pd.Series(dtype=float))
+                ),
+                "holdout_mean_time_exit_utility": _mean_label(
+                    targets.get("time_exit_utility", pd.Series(dtype=float))
+                ),
+                "holdout_mae_time_exit_utility_model": float(
+                    mean_absolute_error(
+                        pd.to_numeric(targets["time_exit_utility"], errors="coerce"),
+                        expected_time_exit_utility,
+                    )
+                )
+                if expected_time_exit_utility is not None and "time_exit_utility" in targets.columns
+                else math.nan,
+            }
+        )
+    return metrics
 
 
 def _target_frame(frame: pd.DataFrame, spec: SignalHypothesisSpec) -> pd.DataFrame:
@@ -4152,6 +4366,11 @@ def _signal_score_components(
     ood_rate: float,
     liquidity_score: float,
     cost_return: float,
+    time_exit_positive_probability: float = math.nan,
+    expected_time_exit_return: float = math.nan,
+    expected_time_exit_utility: float = math.nan,
+    profitable_despite_failed_tbs_probability: float = math.nan,
+    early_adverse_recovery_probability: float = math.nan,
 ) -> dict[str, float]:
     expected_return_after_cost = expected_return - cost_return
     expected_return_score = _clip01((expected_return_after_cost + 0.02) / 0.07)
@@ -4181,7 +4400,7 @@ def _signal_score_components(
         - 0.05 * conflict_penalty
         - 0.03 * concentration_penalty
     )
-    return {
+    components = {
         "direction_probability": direction_probability,
         "target_before_stop_probability": target_before_stop_probability,
         "expected_return": expected_return,
@@ -4200,6 +4419,48 @@ def _signal_score_components(
         "concentration_penalty": concentration_penalty,
         "signal_score": signal_score,
     }
+    if math.isfinite(time_exit_positive_probability):
+        time_exit_return_score = _clip01((expected_time_exit_return + 0.02) / 0.07)
+        time_exit_utility_score = _clip01((expected_time_exit_utility + 0.50) / 1.50)
+        failed_tbs_component = (
+            _clip01(profitable_despite_failed_tbs_probability)
+            if math.isfinite(profitable_despite_failed_tbs_probability)
+            else 0.0
+        )
+        adverse_penalty = (
+            _clip01(early_adverse_recovery_probability)
+            if math.isfinite(early_adverse_recovery_probability)
+            else 0.0
+        )
+        time_exit_score = _clip01(
+            0.25 * direction_probability
+            + 0.20 * target_before_stop_probability
+            + 0.15 * expected_return_score
+            + 0.15 * time_exit_positive_probability
+            + 0.10 * time_exit_return_score
+            + 0.10 * time_exit_utility_score
+            + 0.05 * liquidity_score
+            - 0.10 * ood_penalty
+            - 0.05 * adverse_penalty
+        )
+        components.update(
+            {
+                "time_exit_positive_probability": time_exit_positive_probability,
+                "expected_time_exit_return": expected_time_exit_return,
+                "expected_time_exit_utility": expected_time_exit_utility,
+                "profitable_despite_failed_tbs_probability": (
+                    profitable_despite_failed_tbs_probability
+                ),
+                "early_adverse_recovery_probability": early_adverse_recovery_probability,
+                "time_exit_positive_probability_component": (time_exit_positive_probability),
+                "expected_time_exit_return_component": time_exit_return_score,
+                "time_exit_utility_component": time_exit_utility_score,
+                "failed_tbs_but_profitable_component": failed_tbs_component,
+                "adverse_recovery_penalty": adverse_penalty,
+                "signal_score": time_exit_score,
+            }
+        )
+    return components
 
 
 def _decision_from_components(
@@ -4231,6 +4492,11 @@ def _candidate_status_from_decision(decision: str) -> str:
 
 
 def _not_live_actionable_reason(spec: SignalHypothesisSpec) -> str:
+    if spec.time_exit_label_schema_version:
+        return (
+            "Time-exit utility is diagnostic. It does not override gates, create a live "
+            "signal, or make the hypothesis eligible for promotion without future validation."
+        )
     if spec.target_stop_policy_status == "EXPERIMENTAL_CANDIDATE":
         return (
             "Experimental target/stop policy. Development evidence only. "
@@ -4588,6 +4854,8 @@ def _hypothesis_base_record(
         "target_stop_policy_horizon": spec.horizon if spec.target_stop_policy_id else "",
         "target_stop_policy_notice": spec.target_stop_policy_notice,
         "target_stop_policy_display": _target_stop_policy_display(spec),
+        "time_exit_label_schema_version": spec.time_exit_label_schema_version,
+        "time_exit_label_notice": spec.time_exit_label_notice,
         "footprint_categories": json.dumps(list(spec.footprint_categories)),
         "explanation_template": spec.explanation_template,
         "governance_version": spec.governance_version,

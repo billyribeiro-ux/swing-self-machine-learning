@@ -1162,6 +1162,13 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
         "signal_discovery_policy_comparison",
         pd.DataFrame(),
     )
+    time_exit_labels = frames.get("time_exit_utility_labels", pd.DataFrame())
+    time_exit_summary = frames.get("time_exit_utility_calibration_summary", pd.DataFrame())
+    time_exit_signal_rows = frames.get("time_exit_utility_signal_rows", pd.DataFrame())
+    time_exit_policy_comparison = frames.get(
+        "time_exit_utility_policy_comparison",
+        pd.DataFrame(),
+    )
     blocked_summary_by_signal = _single_record_json_by_signal(blocked_summary)
     blocked_support_by_signal = _blocked_analog_support_by_signal(blocked_summary)
     robustness_by_signal = _single_record_json_by_signal(robustness)
@@ -1269,6 +1276,50 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
                 "expected_mae": _display_value(row.get("expected_mae")),
                 "target_before_stop_probability": _display_value(
                     row.get("target_before_stop_probability")
+                ),
+                "time_exit_label_schema_version": _display_value(
+                    row.get("time_exit_label_schema_version")
+                ),
+                "time_exit_label_notice": _display_value(row.get("time_exit_label_notice")),
+                "time_exit_positive_probability": _display_value(
+                    row.get("time_exit_positive_probability")
+                ),
+                "expected_time_exit_return": _display_value(row.get("expected_time_exit_return")),
+                "expected_time_exit_utility": _display_value(row.get("expected_time_exit_utility")),
+                "profitable_despite_failed_tbs_probability": _display_value(
+                    row.get("profitable_despite_failed_tbs_probability")
+                ),
+                "early_adverse_recovery_probability": _display_value(
+                    row.get("early_adverse_recovery_probability")
+                ),
+                "time_exit_positive_probability_component": _display_value(
+                    row.get("time_exit_positive_probability_component")
+                ),
+                "expected_time_exit_return_component": _display_value(
+                    row.get("expected_time_exit_return_component")
+                ),
+                "time_exit_utility_component": _display_value(
+                    row.get("time_exit_utility_component")
+                ),
+                "failed_tbs_but_profitable_component": _display_value(
+                    row.get("failed_tbs_but_profitable_component")
+                ),
+                "adverse_recovery_penalty": _display_value(row.get("adverse_recovery_penalty")),
+                "time_exit_utility_labels_json": _policy_exact_row_json(
+                    time_exit_labels,
+                    row,
+                ),
+                "time_exit_utility_calibration_summary_json": _policy_records_json(
+                    time_exit_summary,
+                    row,
+                ),
+                "time_exit_utility_signal_row_json": _policy_exact_row_json(
+                    time_exit_signal_rows,
+                    row,
+                ),
+                "time_exit_utility_policy_comparison_json": _policy_records_json(
+                    time_exit_policy_comparison,
+                    row,
                 ),
                 "top_attribution_category": _display_value(row.get("top_support")),
                 "top_confirming_relationships": _display_value(row.get("top_support")),
@@ -3190,6 +3241,10 @@ def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]
         "sector_rotation_buy_ordinary_policy_comparison",
         "derived_policy_outcomes",
         "signal_discovery_policy_comparison",
+        "time_exit_utility_labels",
+        "time_exit_utility_calibration_summary",
+        "time_exit_utility_signal_rows",
+        "time_exit_utility_policy_comparison",
     ):
         frame = discovery.get(name)
         if frame is not None and not frame.empty:
