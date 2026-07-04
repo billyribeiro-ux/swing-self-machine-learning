@@ -148,6 +148,26 @@ These diagnostics do not change row status, thresholds, gates, OOD governance,
 model promotion, scanner actionability, paper-forward state, or final-holdout
 state.
 
+For Sector Rotation BUY `ORDINARY` time-exit utility research rows, the
+dashboard also surfaces prospective diagnostic ledger evidence when available.
+Signal Board shows a separate `Time-Exit Diagnostic Observations` section with
+diagnostic pending, open, matured, rejected, and backfill-blocked statuses.
+These rows are visually separate from live actionable signals and shadow
+final-holdout rows.
+
+Candidate Detail shows `Prospective Time-Exit Diagnostic` for rows that have a
+matching ledger observation or matured outcome. The section includes diagnostic
+run status, observation state, entry/fill details when available, time-exit
+result when matured, utility score, profitable-despite-failed-TBS flags, early
+adverse recovery flags, and baseline-versus-experimental policy touch outcomes.
+It is labeled:
+
+```text
+Prospective time-exit diagnostic is DIAGNOSTIC_ONLY / RESEARCH_OBSERVATION. It is not a live signal and not final-holdout evidence.
+```
+
+The dashboard reads these ledger tables without mutating SQLite on page load.
+
 ## Signal Board Regime Cache Status
 
 Signal Board shows compact Regime KMeans Cache cards near the top status-card
@@ -217,6 +237,15 @@ Workbook sheets:
 - `candidate_attribution`
 - `data_universe`
 - `reports_index`
+- `time_exit_diagnostic_status`
+- `time_exit_diagnostic_events`
+- `time_exit_diagnostic_observations`
+- `time_exit_diagnostic_matured_outcomes`
+
+Reports and Exports also includes a dedicated Prospective Time-Exit Diagnostic
+section with CSV downloads and an XLSX workbook for the ledger status, events,
+observations, and matured outcomes. XLSX sheet names may be truncated to
+Excel's 31-character sheet-name limit.
 
 The export helpers redact API-key-like content and do not include `.env`
 contents or authenticated URLs.

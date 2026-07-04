@@ -1,5 +1,25 @@
 # Decision Log
 
+## 2026-07-04 — Time-exit utility evidence gets a prospective diagnostic ledger
+
+Decision: Add `prospective_time_exit_diagnostic_v1` as an append-only
+diagnostic ledger for the Sector Rotation BUY `ORDINARY`
+`sector_rotation_buy_ordinary_20d_time_exit_utility_v1` hypothesis. The ledger
+freezes a baseline market date at initialization, blocks rows at or before that
+baseline as `DIAGNOSTIC_BACKFILL_BLOCKED`, observes only future matching
+research rows, tracks diagnostic next-open entries, matures outcomes at the
+20-session close, and stores baseline-versus-experimental target/stop touch
+evidence. Ledger rows remain `DIAGNOSTIC_ONLY` or `RESEARCH_OBSERVATION`.
+
+The ledger cannot create live actionable signals, satisfy final-holdout gates,
+promote models, lower TBS thresholds, change OOD governance, change target/stop
+policy, or rewrite labels/model artifacts.
+
+Reason: The time-exit utility generation produced research-only rows with mean
+time-exit positive probability above mean TBS probability, but the main blocker
+remained target-before-stop probability below threshold. The correct next step
+is prospective evidence collection, not gate weakening or policy promotion.
+
 ## 2026-06-30 — Sector Rotation BUY ORDINARY gets time-exit utility diagnostics
 
 Decision: Add `sector_rotation_buy_ordinary_time_exit_utility_v1` as a

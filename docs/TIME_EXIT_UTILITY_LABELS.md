@@ -91,3 +91,16 @@ blocked from feature matrices, even when they do not start with `label_`.
 Candidate label columns remain physically separate from existing baseline
 labels and are merged only into the in-memory discovery modeling frame. Existing
 label parquet files are not overwritten.
+
+## Prospective Evidence
+
+`sector_rotation_buy_ordinary_20d_time_exit_utility_v1` research rows can be
+tracked prospectively by the append-only
+`prospective_time_exit_diagnostic_v1` ledger. The ledger observes only rows
+generated after its frozen baseline market date and labels every row
+`DIAGNOSTIC_ONLY` or `RESEARCH_OBSERVATION`.
+
+Prospective ledger evidence is separate from label generation, model training,
+scanner actionability, and final-holdout evidence. It cannot change the TBS
+gate, target/stop policy, OOD governance, promotion status, or live signal
+status.
