@@ -123,6 +123,40 @@ CREATE TABLE IF NOT EXISTS daily_cycles (
     status TEXT NOT NULL,
     summary_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS prospective_time_exit_diagnostic_runs (
+    diagnostic_run_id TEXT PRIMARY KEY,
+    schema_version TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    baseline_market_date TEXT NOT NULL,
+    first_eligible_future_as_of_date TEXT,
+    hypothesis_id TEXT NOT NULL,
+    archetype TEXT NOT NULL,
+    action TEXT NOT NULL,
+    product_scope TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    target_stop_policy_ids_json TEXT NOT NULL,
+    label_schema TEXT NOT NULL,
+    code_commit TEXT,
+    feature_manifest_hash TEXT NOT NULL,
+    signal_discovery_generation_id TEXT,
+    status TEXT NOT NULL,
+    latest_processed_market_date TEXT,
+    notes TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prospective_time_exit_diagnostic_events (
+    event_id TEXT PRIMARY KEY,
+    unique_key TEXT NOT NULL UNIQUE,
+    diagnostic_run_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_time_utc TEXT NOT NULL,
+    market_as_of_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    signal_id TEXT,
+    payload_json TEXT NOT NULL
+);
 """
 
 

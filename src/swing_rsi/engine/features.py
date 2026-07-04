@@ -1400,12 +1400,27 @@ def build_feature_panel(
     )
 
 
+LABEL_SIDE_COLUMN_FRAGMENTS = (
+    "time_exit",
+    "utility",
+    "profitable_despite_failed_tbs",
+    "early_adverse_recovery",
+)
+
+
+def _is_label_side_column(name: str) -> bool:
+    lowered = name.lower()
+    return name.startswith("label_") or any(
+        fragment in lowered for fragment in LABEL_SIDE_COLUMN_FRAGMENTS
+    )
+
+
 def numeric_feature_columns(frame: pd.DataFrame) -> list[str]:
     blocked = {"Date", "symbol", "role", "sector", "sector_proxy", "market_regime_label"}
     columns: list[str] = []
     for column in frame.columns:
         name = str(column)
-        if name in blocked or name.startswith("label_"):
+        if name in blocked or _is_label_side_column(name):
             continue
         if pd.api.types.is_numeric_dtype(frame[column]):
             columns.append(name)
@@ -1413,6 +1428,9 @@ def numeric_feature_columns(frame: pd.DataFrame) -> list[str]:
 
 
 def reject_label_columns(columns: list[str]) -> None:
-    labels = [column for column in columns if str(column).startswith("label_")]
+    labels = [column for column in columns if _is_label_side_column(str(column))]
     if labels:
-        raise ValueError(f"Label columns cannot enter the feature matrix: {labels[:5]}")
+        raise ValueError(
+            "Label columns cannot enter the feature matrix; "
+            f"Label-side columns cannot enter the feature matrix: {labels[:5]}"
+        )

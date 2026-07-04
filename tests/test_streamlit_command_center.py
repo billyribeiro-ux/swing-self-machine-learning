@@ -42,6 +42,9 @@ from swing_rsi.application.dashboard_service import (
     signal_board_metrics,
     signal_discovery_blocker_frames,
     signal_discovery_generation_frames,
+    time_exit_diagnostic_events_frame,
+    time_exit_diagnostic_observations_frame,
+    time_exit_diagnostic_status_frame,
 )
 from swing_rsi.application.footprint_attribution import (
     EVIDENCE_UNAVAILABLE,
@@ -472,6 +475,20 @@ def _write_signal_discovery_generation(root: Path) -> str:
         "calibrated_probability": 0.68,
         "probability": 0.68,
         "target_before_stop_probability": 0.61,
+        "time_exit_label_schema_version": "sector_rotation_buy_ordinary_time_exit_utility_v1",
+        "time_exit_label_notice": (
+            "Time-exit utility is diagnostic. It does not override gates or create a live signal."
+        ),
+        "time_exit_positive_probability": 0.64,
+        "expected_time_exit_return": 0.019,
+        "expected_time_exit_utility": 0.72,
+        "profitable_despite_failed_tbs_probability": 0.31,
+        "early_adverse_recovery_probability": 0.22,
+        "time_exit_positive_probability_component": 0.64,
+        "expected_time_exit_return_component": 0.56,
+        "time_exit_utility_component": 0.81,
+        "failed_tbs_but_profitable_component": 0.31,
+        "adverse_recovery_penalty": 0.22,
         "expected_return": 0.024,
         "expected_mfe": 0.052,
         "expected_mae": -0.018,
@@ -743,6 +760,83 @@ def _write_signal_discovery_generation(root: Path) -> str:
                     "selected_rows": 1,
                     "no_signal_rows": 1,
                     "tbs_blocked_rows": 0,
+                }
+            ]
+        ),
+        "time_exit_utility_labels": pd.DataFrame(
+            [
+                {
+                    "schema_version": "sector_rotation_buy_ordinary_time_exit_utility_v1",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_alias": "fixture_policy_candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "archetype": "sector_rotation_buy",
+                    "action": "BUY",
+                    "scope": "ORDINARY",
+                    "horizon": 20,
+                    "Date": "2026-05-26",
+                    "symbol": "DEMO3",
+                    "time_exit_net_return_20d": 0.019,
+                    "time_exit_positive_after_cost_20d": 1.0,
+                    "time_exit_utility_20d": 0.72,
+                    "profitable_despite_failed_tbs_20d": 0.0,
+                    "early_adverse_recovery_20d": 0.0,
+                    "time_exit_quality_bucket_20d": "MODEST_POSITIVE_TIME_EXIT",
+                    "MFE_20d": 0.052,
+                    "MAE_20d": -0.018,
+                    "time_to_max_favorable_excursion_20d": 4.0,
+                    "time_to_max_adverse_excursion_20d": 2.0,
+                    "label_end_date_20": "2026-06-23",
+                }
+            ]
+        ),
+        "time_exit_utility_calibration_summary": pd.DataFrame(
+            [
+                {
+                    "schema_version": "sector_rotation_buy_ordinary_time_exit_utility_v1",
+                    "evidence_split": "calibration_only",
+                    "development_holdout_diagnostic_only": False,
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_alias": "fixture_policy_candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "archetype": "sector_rotation_buy",
+                    "action": "BUY",
+                    "scope": "ORDINARY",
+                    "horizon": 20,
+                    "sample_count": 50,
+                    "time_exit_positive_rate": 0.58,
+                    "average_time_exit_net_return": 0.012,
+                    "average_time_exit_utility": 0.42,
+                    "profitable_despite_failed_tbs_rate": 0.22,
+                    "early_adverse_recovery_rate": 0.18,
+                }
+            ]
+        ),
+        "time_exit_utility_signal_rows": pd.DataFrame(
+            [
+                {
+                    "signal_id": signal_id,
+                    "generation_id": generation_id,
+                    "as_of_date": "2026-05-26",
+                    "ticker": "DEMO3",
+                    "hypothesis_id": "reversal_buy_5d",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "decision": "BUY_CANDIDATE",
+                    "candidate_status": "SHADOW_ONLY",
+                    "time_exit_positive_probability": 0.64,
+                    "expected_time_exit_return": 0.019,
+                    "expected_time_exit_utility": 0.72,
+                }
+            ]
+        ),
+        "time_exit_utility_policy_comparison": pd.DataFrame(
+            [
+                {
+                    "schema_version": "sector_rotation_buy_ordinary_time_exit_utility_v1",
+                    "evidence_split": "calibration_only",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "sample_count": 50,
+                    "time_exit_positive_rate": 0.58,
                 }
             ]
         ),
@@ -1032,6 +1126,81 @@ def _write_signal_discovery_generation(root: Path) -> str:
     return generation_id
 
 
+def _write_time_exit_diagnostic_ledger(root: Path, generation_id: str) -> str:
+    run_id = "time-exit-run-fixture"
+    db = root / "state" / "engine.sqlite3"
+    payload = {
+        "label": "RESEARCH_OBSERVATION",
+        "diagnostic_run_id": run_id,
+        "signal_id": "signal-fixture-1",
+        "as_of_date": "2026-05-26",
+        "ticker": "DEMO3",
+        "hypothesis_id": "reversal_buy_5d",
+        "model_id": "reversal_buy_5d:extra_trees",
+        "target_before_stop_probability": 0.61,
+        "time_exit_positive_probability": 0.64,
+        "expected_time_exit_return": 0.019,
+        "expected_time_exit_utility": 0.72,
+        "blocker_reason": "diagnostic_fixture",
+        "diagnostic_notice": (
+            "Time-exit utility is diagnostic. It does not override gates or create a live signal."
+        ),
+    }
+    with engine_connection(db) as connection:
+        connection.execute(
+            """
+            INSERT INTO prospective_time_exit_diagnostic_runs (
+                diagnostic_run_id, schema_version, created_at_utc, baseline_market_date,
+                first_eligible_future_as_of_date, hypothesis_id, archetype, action,
+                product_scope, horizon, target_stop_policy_ids_json, label_schema,
+                code_commit, feature_manifest_hash, signal_discovery_generation_id,
+                status, latest_processed_market_date, notes, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                "prospective_time_exit_diagnostic_v1",
+                "2026-06-27T15:00:00+00:00",
+                "2026-05-25",
+                "2026-05-26",
+                "reversal_buy_5d",
+                "sector_rotation_buy",
+                "BUY",
+                "ORDINARY",
+                20,
+                json.dumps(["fixture_policy_candidate"]),
+                "sector_rotation_buy_ordinary_time_exit_utility_v1",
+                "abcdef",
+                "featurehash",
+                generation_id,
+                "COLLECTING",
+                "2026-05-26",
+                "Diagnostic-only fixture.",
+                json.dumps({"diagnostic_only": True}),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO prospective_time_exit_diagnostic_events (
+                event_id, unique_key, diagnostic_run_id, event_type, event_time_utc,
+                market_as_of_date, ticker, signal_id, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "time-exit-event-fixture",
+                "time-exit-run-fixture|DIAGNOSTIC_OBSERVATION_CREATED|signal-fixture-1",
+                run_id,
+                "DIAGNOSTIC_OBSERVATION_CREATED",
+                "2026-06-27T15:01:00+00:00",
+                "2026-05-26",
+                "DEMO3",
+                "signal-fixture-1",
+                json.dumps(payload),
+            ),
+        )
+    return run_id
+
+
 def test_dashboard_blocks_startup_from_operational_repo(monkeypatch: pytest.MonkeyPatch) -> None:
     from swing_rsi.application import dashboard_service as service
 
@@ -1291,6 +1460,34 @@ def test_signal_board_displays_multi_angle_action_and_archetype(
     assert visible_blocked["Analog Status"] == "Insufficient Analogs"
 
 
+def test_signal_board_displays_time_exit_diagnostic_observations(
+    command_center_root: Path,
+) -> None:
+    generation_id = _write_signal_discovery_generation(command_center_root)
+    _write_time_exit_diagnostic_ledger(command_center_root, generation_id)
+
+    metrics = signal_board_metrics(command_center_root)
+    observations = time_exit_diagnostic_observations_frame(command_center_root)
+    status = time_exit_diagnostic_status_frame(command_center_root)
+    events = time_exit_diagnostic_events_frame(command_center_root)
+
+    assert metrics["time_exit_diagnostic_observations"] == 1
+    assert not observations.empty
+    assert observations.iloc[0]["observation_status"] == "Diagnostic Pending Entry"
+    assert bool(status.iloc[0]["promotion_eligible"]) is False
+    assert events.iloc[0]["event_type"] == "DIAGNOSTIC_OBSERVATION_CREATED"
+
+    app = AppTest.from_file("dashboard/sections/signal_board.py").run(timeout=30)
+
+    _assert_no_streamlit_exceptions(app)
+    subheaders = {subheader.value for subheader in app.subheader}
+    assert "Time-Exit Diagnostic Observations: 1 row" in subheaders
+    assert any(
+        "Prospective time-exit diagnostic rows are DIAGNOSTIC_ONLY" in caption.value
+        for caption in app.caption
+    )
+
+
 def test_signal_board_default_sections_keep_shadow_and_pending_visible(
     command_center_root: Path,
 ) -> None:
@@ -1375,6 +1572,7 @@ def test_candidate_detail_displays_signal_discovery_score_breakdown(
     command_center_root: Path,
 ) -> None:
     generation_id = _write_signal_discovery_generation(command_center_root)
+    _write_time_exit_diagnostic_ledger(command_center_root, generation_id)
     db = command_center_root / "state" / "engine.sqlite3"
     artifact = command_center_root / "artifacts" / "models" / "model.joblib"
     before_db = db.read_bytes()
@@ -1394,8 +1592,20 @@ def test_candidate_detail_displays_signal_discovery_score_breakdown(
     assert "Signal Score Breakdown" in subheaders
     assert "Footprint Evidence Table" in subheaders
     assert "Target/Stop Policy" in subheaders
+    assert "Time-Exit Utility Diagnostic" in subheaders
+    assert "Prospective Time-Exit Diagnostic" in subheaders
     assert any(
         "Experimental target/stop policy. Development evidence only. Not a live signal."
+        in warning.value
+        for warning in app.warning
+    )
+    assert any(
+        "Time-exit utility is diagnostic. It does not override gates or create a live signal."
+        in warning.value
+        for warning in app.warning
+    )
+    assert any(
+        "Prospective time-exit diagnostic is DIAGNOSTIC_ONLY / RESEARCH_OBSERVATION."
         in warning.value
         for warning in app.warning
     )
@@ -1746,6 +1956,10 @@ def test_complete_engine_snapshot_export_contains_required_sheets(
         "candidate_attribution",
         "data_universe",
         "reports_index",
+        "time_exit_diagnostic_status",
+        "time_exit_diagnostic_events",
+        "time_exit_diagnostic_observatio",
+        "time_exit_diagnostic_matured_ou",
     }
     assert workbook["signal_board"]["A1"].value == "ticker"
     assert "secret" not in workbook_path.read_bytes().decode("latin1", errors="ignore")
@@ -1755,14 +1969,18 @@ def test_reports_and_exports_displays_signal_discovery_generation(
     command_center_root: Path,
 ) -> None:
     generation_id = _write_signal_discovery_generation(command_center_root)
+    _write_time_exit_diagnostic_ledger(command_center_root, generation_id)
 
     frames = signal_discovery_generation_frames(command_center_root, include_blocked_analogs=True)
     blocker_frames = signal_discovery_blocker_frames(command_center_root)
+    diagnostic_status = time_exit_diagnostic_status_frame(command_center_root)
+    diagnostic_observations = time_exit_diagnostic_observations_frame(command_center_root)
     app = AppTest.from_file("dashboard/sections/reports_and_exports.py").run(timeout=30)
 
     _assert_no_streamlit_exceptions(app)
     assert "Signal Discovery Generation" in {subheader.value for subheader in app.subheader}
     assert "Signal Discovery Blockers" in {subheader.value for subheader in app.subheader}
+    assert "Prospective Time-Exit Diagnostic" in {subheader.value for subheader in app.subheader}
     metrics = {metric.label: metric.value for metric in app.metric}
     assert metrics["Blocker rows"] == "1"
     assert metrics["NO_SIGNAL rows"] == "1"
@@ -1779,6 +1997,12 @@ def test_reports_and_exports_displays_signal_discovery_generation(
     assert not frames["sector_rotation_buy_ordinary_policy_comparison"].empty
     assert not frames["derived_policy_outcomes"].empty
     assert not frames["signal_discovery_policy_comparison"].empty
+    assert not frames["time_exit_utility_labels"].empty
+    assert not frames["time_exit_utility_calibration_summary"].empty
+    assert not frames["time_exit_utility_signal_rows"].empty
+    assert not frames["time_exit_utility_policy_comparison"].empty
+    assert not diagnostic_status.empty
+    assert not diagnostic_observations.empty
     assert not blocker_frames["blocker_rows"].empty
     assert not blocker_frames["by_reason"].empty
     top_blockers = _top_blocker_rows(blocker_frames["blocker_rows"])

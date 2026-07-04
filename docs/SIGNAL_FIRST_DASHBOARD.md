@@ -148,6 +148,26 @@ These diagnostics do not change row status, thresholds, gates, OOD governance,
 model promotion, scanner actionability, paper-forward state, or final-holdout
 state.
 
+For Sector Rotation BUY `ORDINARY` time-exit utility research rows, the
+dashboard also surfaces prospective diagnostic ledger evidence when available.
+Signal Board shows a separate `Time-Exit Diagnostic Observations` section with
+diagnostic pending, open, matured, rejected, and backfill-blocked statuses.
+These rows are visually separate from live actionable signals and shadow
+final-holdout rows.
+
+Candidate Detail shows `Prospective Time-Exit Diagnostic` for rows that have a
+matching ledger observation or matured outcome. The section includes diagnostic
+run status, observation state, entry/fill details when available, time-exit
+result when matured, utility score, profitable-despite-failed-TBS flags, early
+adverse recovery flags, and baseline-versus-experimental policy touch outcomes.
+It is labeled:
+
+```text
+Prospective time-exit diagnostic is DIAGNOSTIC_ONLY / RESEARCH_OBSERVATION. It is not a live signal and not final-holdout evidence.
+```
+
+The dashboard reads these ledger tables without mutating SQLite on page load.
+
 ## Signal Board Regime Cache Status
 
 Signal Board shows compact Regime KMeans Cache cards near the top status-card
@@ -217,6 +237,15 @@ Workbook sheets:
 - `candidate_attribution`
 - `data_universe`
 - `reports_index`
+- `time_exit_diagnostic_status`
+- `time_exit_diagnostic_events`
+- `time_exit_diagnostic_observations`
+- `time_exit_diagnostic_matured_outcomes`
+
+Reports and Exports also includes a dedicated Prospective Time-Exit Diagnostic
+section with CSV downloads and an XLSX workbook for the ledger status, events,
+observations, and matured outcomes. XLSX sheet names may be truncated to
+Excel's 31-character sheet-name limit.
 
 The export helpers redact API-key-like content and do not include `.env`
 contents or authenticated URLs.
@@ -242,6 +271,10 @@ Candidate Detail workbook exports include measured footprint sheets:
 - `baseline_vs_candidate`
 - `derived_outcomes`
 - `signal_policy_comparison`
+- `time_exit_labels`
+- `time_exit_calibration`
+- `time_exit_signal_rows`
+- `time_exit_policy_comparison`
 - `residual_unexplained`
 
 Reports and Exports includes Signal Discovery calibration audit sheets when
@@ -258,6 +291,10 @@ available:
 - `sector_rotation_buy_ordinary_policy_comparison`
 - `derived_policy_outcomes`
 - `signal_discovery_policy_comparison`
+- `time_exit_utility_labels`
+- `time_exit_utility_calibration_summary`
+- `time_exit_utility_signal_rows`
+- `time_exit_utility_policy_comparison`
 
 Signal Board keeps target/stop policy display compact. Candidate Detail shows
 baseline-versus-experimental policy metrics, calibration-only selection
@@ -265,6 +302,17 @@ evidence, exact derived policy outcomes when available, and the warning:
 
 ```text
 Experimental target/stop policy. Development evidence only. Not a live signal.
+```
+
+When time-exit utility diagnostics are available, Signal Board shows compact
+time-exit positive probability and utility fields. Candidate Detail shows a
+Time-Exit Utility Diagnostic section with TBS probability, time-exit positive
+probability, expected time-exit return, expected time-exit utility,
+profitable-despite-failed-TBS evidence, early-adverse-recovery evidence,
+label-side rows, calibration summaries, and the warning:
+
+```text
+Time-exit utility is diagnostic. It does not override gates or create a live signal.
 ```
 
 Gate Audit keeps canonical model gates unchanged and adds a separate Signal

@@ -66,3 +66,14 @@ Derived candidate-policy outcomes are versioned and separate from baseline
 labels. They are added to the discovery modeling frame in memory and persisted
 as generated diagnostic artifacts, while existing label parquet and model
 artifacts are left unchanged.
+
+Time-exit utility diagnostics use the same policy association but persist an
+additional baseline compatibility alias:
+
+- baseline registry ID: `sector_rotation_buy_ordinary_20d_default_t2p0_s1p0`
+- baseline time-exit alias: `default_t2p0_s1p0_20d`
+- experimental candidate ID:
+  `sector_rotation_buy_ordinary_20d_experimental_t2p0_s1p25`
+
+The alias is recorded only in time-exit utility artifacts. It does not replace
+the registry ID.

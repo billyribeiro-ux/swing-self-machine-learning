@@ -38,6 +38,16 @@ from swing_rsi.engine.signal_discovery import (
     signal_discovery_blocked_analog_frames,
     signal_discovery_blocker_report_frames,
 )
+from swing_rsi.engine.time_exit_diagnostic import (
+    DIAGNOSTIC_EVENT_BACKFILL_BLOCKED,
+    DIAGNOSTIC_EVENT_ENTRY_FILLED,
+    DIAGNOSTIC_EVENT_OBSERVATION_CREATED,
+    DIAGNOSTIC_EVENT_OBSERVATION_REJECTED,
+    DIAGNOSTIC_EVENT_TIME_EXIT_MATURED,
+)
+from swing_rsi.engine.time_exit_utility import (
+    TIME_EXIT_UTILITY_DIAGNOSTIC_NOTICE,
+)
 from swing_rsi.engine.universe import UniverseConfig, load_universe_config, universe_to_frame_rows
 from swing_rsi.settings import get_fmp_api_key
 
@@ -302,6 +312,17 @@ def _read_rows(db_path: Path, query: str, params: tuple[object, ...] = ()) -> li
         return list(connection.execute(query, params).fetchall())
     finally:
         connection.close()
+
+
+def _read_rows_optional(
+    db_path: Path,
+    query: str,
+    params: tuple[object, ...] = (),
+) -> list[sqlite3.Row]:
+    try:
+        return _read_rows(db_path, query, params)
+    except sqlite3.OperationalError:
+        return []
 
 
 def _json_loads(value: object, fallback: object) -> object:
@@ -939,11 +960,14 @@ def _records_json_by_signal(frame: pd.DataFrame) -> dict[str, str]:
 
 
 def _single_record_json_by_signal(frame: pd.DataFrame) -> dict[str, str]:
-    if frame.empty or "target_signal_id" not in frame.columns:
+    if frame.empty:
+        return {}
+    signal_column = "signal_id" if "signal_id" in frame.columns else "target_signal_id"
+    if signal_column not in frame.columns:
         return {}
     records: dict[str, str] = {}
     for _, row in frame.iterrows():
-        records[str(row.get("target_signal_id", ""))] = json.dumps(row.to_dict(), default=str)
+        records[str(row.get(signal_column, ""))] = json.dumps(row.to_dict(), default=str)
     return records
 
 
@@ -1162,6 +1186,17 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
         "signal_discovery_policy_comparison",
         pd.DataFrame(),
     )
+    time_exit_labels = frames.get("time_exit_utility_labels", pd.DataFrame())
+    time_exit_summary = frames.get("time_exit_utility_calibration_summary", pd.DataFrame())
+    time_exit_signal_rows = frames.get("time_exit_utility_signal_rows", pd.DataFrame())
+    time_exit_policy_comparison = frames.get(
+        "time_exit_utility_policy_comparison",
+        pd.DataFrame(),
+    )
+    diagnostic_observations = time_exit_diagnostic_observations_frame(root)
+    diagnostic_matured = time_exit_diagnostic_matured_outcomes_frame(root)
+    diagnostic_observation_by_signal = _single_record_json_by_signal(diagnostic_observations)
+    diagnostic_matured_by_signal = _single_record_json_by_signal(diagnostic_matured)
     blocked_summary_by_signal = _single_record_json_by_signal(blocked_summary)
     blocked_support_by_signal = _blocked_analog_support_by_signal(blocked_summary)
     robustness_by_signal = _single_record_json_by_signal(robustness)
@@ -1269,6 +1304,58 @@ def _signal_discovery_scanner_rows(root: str | Path) -> pd.DataFrame:
                 "expected_mae": _display_value(row.get("expected_mae")),
                 "target_before_stop_probability": _display_value(
                     row.get("target_before_stop_probability")
+                ),
+                "time_exit_label_schema_version": _display_value(
+                    row.get("time_exit_label_schema_version")
+                ),
+                "time_exit_label_notice": _display_value(row.get("time_exit_label_notice")),
+                "time_exit_positive_probability": _display_value(
+                    row.get("time_exit_positive_probability")
+                ),
+                "expected_time_exit_return": _display_value(row.get("expected_time_exit_return")),
+                "expected_time_exit_utility": _display_value(row.get("expected_time_exit_utility")),
+                "profitable_despite_failed_tbs_probability": _display_value(
+                    row.get("profitable_despite_failed_tbs_probability")
+                ),
+                "early_adverse_recovery_probability": _display_value(
+                    row.get("early_adverse_recovery_probability")
+                ),
+                "time_exit_positive_probability_component": _display_value(
+                    row.get("time_exit_positive_probability_component")
+                ),
+                "expected_time_exit_return_component": _display_value(
+                    row.get("expected_time_exit_return_component")
+                ),
+                "time_exit_utility_component": _display_value(
+                    row.get("time_exit_utility_component")
+                ),
+                "failed_tbs_but_profitable_component": _display_value(
+                    row.get("failed_tbs_but_profitable_component")
+                ),
+                "adverse_recovery_penalty": _display_value(row.get("adverse_recovery_penalty")),
+                "time_exit_utility_labels_json": _policy_exact_row_json(
+                    time_exit_labels,
+                    row,
+                ),
+                "time_exit_utility_calibration_summary_json": _policy_records_json(
+                    time_exit_summary,
+                    row,
+                ),
+                "time_exit_utility_signal_row_json": _policy_exact_row_json(
+                    time_exit_signal_rows,
+                    row,
+                ),
+                "time_exit_utility_policy_comparison_json": _policy_records_json(
+                    time_exit_policy_comparison,
+                    row,
+                ),
+                "time_exit_diagnostic_observation_json": diagnostic_observation_by_signal.get(
+                    signal_id,
+                    "",
+                ),
+                "time_exit_diagnostic_matured_outcome_json": diagnostic_matured_by_signal.get(
+                    signal_id,
+                    "",
                 ),
                 "top_attribution_category": _display_value(row.get("top_support")),
                 "top_confirming_relationships": _display_value(row.get("top_support")),
@@ -1386,6 +1473,10 @@ def _signal_discovery_board_rows(root: str | Path) -> pd.DataFrame:
                 "target_before_stop_probability": _display_value(
                     row.get("target_before_stop_probability")
                 ),
+                "time_exit_positive_probability": _display_value(
+                    row.get("time_exit_positive_probability")
+                ),
+                "expected_time_exit_utility": _display_value(row.get("expected_time_exit_utility")),
                 "ood_warning": _display_value(row.get("ood_feature_rate")),
                 "gate_status": "BLOCKED",
                 "rejection_reason": _display_value(
@@ -1637,6 +1728,7 @@ def signal_board_metrics(root: str | Path) -> dict[str, object]:
     board = signal_board_frame(root)
     models = registered_models_readonly(root)
     final_runs = final_holdout_runs_frame(root)
+    time_exit_status = time_exit_diagnostic_status_frame(root)
     operational = operational_status_frame()
     latest_generation = latest_generation_id(models)
     status = (
@@ -1680,6 +1772,16 @@ def signal_board_metrics(root: str | Path) -> dict[str, object]:
             final_runs.get("matured_outcomes", pd.Series(dtype=int)).map(_safe_int).sum()
         )
         if not final_runs.empty
+        else 0,
+        "time_exit_diagnostic_observations": int(
+            time_exit_status.get("observations_created", pd.Series(dtype=int)).map(_safe_int).sum()
+        )
+        if not time_exit_status.empty
+        else 0,
+        "time_exit_diagnostic_matured": int(
+            time_exit_status.get("matured_outcomes", pd.Series(dtype=int)).map(_safe_int).sum()
+        )
+        if not time_exit_status.empty
         else 0,
         "promoted_models": sum(1 for model in models if model.promoted_at_utc),
         "models_collecting_final_holdout_evidence": int(
@@ -2355,6 +2457,314 @@ def forward_events_frame(
                 "run_id": payload.get("run_id", ""),
                 "source_pending_event_id": payload.get("source_pending_event_id", ""),
                 "exit_reason": payload.get("exit_reason", ""),
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def time_exit_diagnostic_events_frame(root: str | Path) -> pd.DataFrame:
+    rows = _read_rows_optional(
+        _db_path(root),
+        """
+        SELECT * FROM prospective_time_exit_diagnostic_events
+        ORDER BY event_time_utc, event_id
+        """,
+    )
+    records: list[dict[str, object]] = []
+    for row in rows:
+        payload = cast(dict[str, object], _json_loads(row["payload_json"], {}))
+        records.append(
+            {
+                "event_id": row["event_id"],
+                "unique_key": row["unique_key"],
+                "diagnostic_run_id": row["diagnostic_run_id"],
+                "event_type": row["event_type"],
+                "event_time_utc": row["event_time_utc"],
+                "market_as_of_date": row["market_as_of_date"],
+                "ticker": row["ticker"],
+                "signal_id": row["signal_id"],
+                "payload": payload,
+                "label": payload.get("label", ""),
+                "reason": payload.get("reason", ""),
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _time_exit_runs_rows(root: str | Path) -> list[sqlite3.Row]:
+    return _read_rows_optional(
+        _db_path(root),
+        """
+        SELECT * FROM prospective_time_exit_diagnostic_runs
+        ORDER BY created_at_utc, diagnostic_run_id
+        """,
+    )
+
+
+def _time_exit_event_ids(events: pd.DataFrame, event_type: str) -> set[str]:
+    if events.empty:
+        return set()
+    return {
+        _clean_text(value)
+        for value in events.loc[events["event_type"].astype(str) == event_type, "signal_id"]
+        if _clean_text(value)
+    }
+
+
+def time_exit_diagnostic_observations_frame(root: str | Path) -> pd.DataFrame:
+    events = time_exit_diagnostic_events_frame(root)
+    if events.empty:
+        return pd.DataFrame()
+    filled_ids = _time_exit_event_ids(events, DIAGNOSTIC_EVENT_ENTRY_FILLED)
+    matured_ids = _time_exit_event_ids(events, DIAGNOSTIC_EVENT_TIME_EXIT_MATURED)
+    rejected_ids = _time_exit_event_ids(events, DIAGNOSTIC_EVENT_OBSERVATION_REJECTED)
+    backfill_ids = _time_exit_event_ids(events, DIAGNOSTIC_EVENT_BACKFILL_BLOCKED)
+    rows: list[dict[str, object]] = []
+    source = events.loc[
+        events["event_type"]
+        .astype(str)
+        .isin(
+            [
+                DIAGNOSTIC_EVENT_OBSERVATION_CREATED,
+                DIAGNOSTIC_EVENT_OBSERVATION_REJECTED,
+                DIAGNOSTIC_EVENT_BACKFILL_BLOCKED,
+            ]
+        )
+    ]
+    for _, event in source.iterrows():
+        signal_id = _clean_text(event.get("signal_id"))
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        status = "Diagnostic Pending Entry"
+        if signal_id in matured_ids:
+            status = "Diagnostic Matured"
+        elif signal_id in filled_ids:
+            status = "Diagnostic Open"
+        if signal_id in rejected_ids:
+            status = "Diagnostic Rejected"
+        if signal_id in backfill_ids:
+            status = "Diagnostic Backfill Blocked"
+        rows.append(
+            {
+                "diagnostic_run_id": event.get("diagnostic_run_id"),
+                "signal_id": signal_id,
+                "observation_status": status,
+                "as_of_date": payload.get("as_of_date", event.get("market_as_of_date")),
+                "ticker": event.get("ticker"),
+                "hypothesis_id": payload.get("hypothesis_id", ""),
+                "model_id": payload.get("model_id", ""),
+                "label": payload.get("label", ""),
+                "target_before_stop_probability": payload.get("target_before_stop_probability", ""),
+                "time_exit_positive_probability": payload.get("time_exit_positive_probability", ""),
+                "expected_time_exit_return": payload.get("expected_time_exit_return", ""),
+                "expected_time_exit_utility": payload.get("expected_time_exit_utility", ""),
+                "blocker_reason": payload.get("blocker_reason", ""),
+                "reason": payload.get("reason", ""),
+                "diagnostic_notice": payload.get(
+                    "diagnostic_notice",
+                    TIME_EXIT_UTILITY_DIAGNOSTIC_NOTICE,
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def time_exit_diagnostic_matured_outcomes_frame(root: str | Path) -> pd.DataFrame:
+    events = time_exit_diagnostic_events_frame(root)
+    if events.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, object]] = []
+    matured = events.loc[events["event_type"].astype(str) == DIAGNOSTIC_EVENT_TIME_EXIT_MATURED]
+    for _, event in matured.iterrows():
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        rows.append(
+            {
+                "diagnostic_run_id": event.get("diagnostic_run_id"),
+                "signal_id": event.get("signal_id"),
+                "ticker": event.get("ticker"),
+                "as_of_date": payload.get("as_of_date", ""),
+                "entry_date": payload.get("entry_date", ""),
+                "entry_price": payload.get("entry_price", ""),
+                "exit_date": payload.get("exit_date", ""),
+                "exit_price": payload.get("exit_price", ""),
+                "time_exit_net_return": payload.get("time_exit_net_return", ""),
+                "time_exit_positive": payload.get("time_exit_positive", ""),
+                "time_exit_utility": payload.get("time_exit_utility", ""),
+                "MFE": payload.get("MFE", ""),
+                "MAE": payload.get("MAE", ""),
+                "baseline_target_touched": payload.get("baseline_target_touched", ""),
+                "baseline_stop_touched": payload.get("baseline_stop_touched", ""),
+                "baseline_profitable_despite_failed_tbs": payload.get(
+                    "baseline_profitable_despite_failed_tbs", ""
+                ),
+                "baseline_early_adverse_recovery": payload.get(
+                    "baseline_early_adverse_recovery", ""
+                ),
+                "experimental_target_touched": payload.get("experimental_target_touched", ""),
+                "experimental_stop_touched": payload.get("experimental_stop_touched", ""),
+                "experimental_profitable_despite_failed_tbs": payload.get(
+                    "experimental_profitable_despite_failed_tbs", ""
+                ),
+                "experimental_early_adverse_recovery": payload.get(
+                    "experimental_early_adverse_recovery", ""
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def time_exit_diagnostic_status_frame(root: str | Path) -> pd.DataFrame:
+    run_rows = _time_exit_runs_rows(root)
+    events = time_exit_diagnostic_events_frame(root)
+    observations = time_exit_diagnostic_observations_frame(root)
+    matured = time_exit_diagnostic_matured_outcomes_frame(root)
+    records: list[dict[str, object]] = []
+    for run in run_rows:
+        run_id = str(run["diagnostic_run_id"])
+        run_events = (
+            events.loc[events["diagnostic_run_id"].astype(str) == run_id]
+            if not events.empty
+            else events
+        )
+        run_obs = (
+            observations.loc[observations["diagnostic_run_id"].astype(str) == run_id]
+            if not observations.empty
+            else observations
+        )
+        run_matured = (
+            matured.loc[matured["diagnostic_run_id"].astype(str) == run_id]
+            if not matured.empty
+            else matured
+        )
+        status = str(run["status"])
+        if not run_matured.empty:
+            signal_dates = (
+                run_matured.get("as_of_date", pd.Series(dtype=str)).dropna().astype(str).unique()
+            )
+            if len(run_matured) >= 100 and len(signal_dates) >= 60:
+                status = "READY_FOR_REVIEW"
+            elif len(run_matured) >= 30 and len(signal_dates) >= 20:
+                status = "EARLY_DIAGNOSTIC_AVAILABLE"
+            else:
+                status = "COLLECTING"
+        latest_processed = (
+            max(run_events["market_as_of_date"].astype(str).tolist())
+            if not run_events.empty
+            else run["latest_processed_market_date"]
+        )
+        records.append(
+            {
+                "diagnostic_run_id": run_id,
+                "schema_version": run["schema_version"],
+                "status": status,
+                "baseline_market_date": run["baseline_market_date"],
+                "first_eligible_future_as_of_date": run["first_eligible_future_as_of_date"],
+                "latest_processed_market_date": latest_processed,
+                "hypothesis_id": run["hypothesis_id"],
+                "archetype": run["archetype"],
+                "action": run["action"],
+                "product_scope": run["product_scope"],
+                "horizon": run["horizon"],
+                "label_schema": run["label_schema"],
+                "feature_manifest_hash": run["feature_manifest_hash"],
+                "signal_discovery_generation_id": run["signal_discovery_generation_id"],
+                "observations_created": int(
+                    (
+                        run_events.get("event_type", pd.Series(dtype=str))
+                        == DIAGNOSTIC_EVENT_OBSERVATION_CREATED
+                    ).sum()
+                )
+                if not run_events.empty
+                else 0,
+                "rejected_observations": int(
+                    (
+                        run_events.get("event_type", pd.Series(dtype=str))
+                        == DIAGNOSTIC_EVENT_OBSERVATION_REJECTED
+                    ).sum()
+                )
+                if not run_events.empty
+                else 0,
+                "pending_entries": int(
+                    (
+                        run_obs.get("observation_status", pd.Series(dtype=str))
+                        == "Diagnostic Pending Entry"
+                    ).sum()
+                )
+                if not run_obs.empty
+                else 0,
+                "filled_entries": int(
+                    (
+                        run_events.get("event_type", pd.Series(dtype=str))
+                        == DIAGNOSTIC_EVENT_ENTRY_FILLED
+                    ).sum()
+                )
+                if not run_events.empty
+                else 0,
+                "open_diagnostic_positions": int(
+                    (
+                        run_obs.get("observation_status", pd.Series(dtype=str)) == "Diagnostic Open"
+                    ).sum()
+                )
+                if not run_obs.empty
+                else 0,
+                "matured_outcomes": len(run_matured),
+                "positive_time_exit_outcomes": int(
+                    run_matured.get("time_exit_positive", pd.Series(dtype=bool)).fillna(False).sum()
+                )
+                if not run_matured.empty
+                else 0,
+                "negative_time_exit_outcomes": int(
+                    len(run_matured)
+                    - run_matured.get("time_exit_positive", pd.Series(dtype=bool))
+                    .fillna(False)
+                    .sum()
+                )
+                if not run_matured.empty
+                else 0,
+                "average_realized_time_exit_return": run_matured.get(
+                    "time_exit_net_return", pd.Series(dtype=float)
+                ).mean()
+                if not run_matured.empty
+                else None,
+                "average_utility": run_matured.get(
+                    "time_exit_utility", pd.Series(dtype=float)
+                ).mean()
+                if not run_matured.empty
+                else None,
+                "early_adverse_recovery_count": int(
+                    run_matured.get(
+                        "experimental_early_adverse_recovery",
+                        pd.Series(dtype=bool),
+                    )
+                    .fillna(False)
+                    .sum()
+                )
+                if not run_matured.empty
+                else 0,
+                "profitable_despite_failed_tbs_count": int(
+                    run_matured.get(
+                        "experimental_profitable_despite_failed_tbs",
+                        pd.Series(dtype=bool),
+                    )
+                    .fillna(False)
+                    .sum()
+                )
+                if not run_matured.empty
+                else 0,
+                "backfill_blocked_count": int(
+                    (
+                        run_events.get("event_type", pd.Series(dtype=str))
+                        == DIAGNOSTIC_EVENT_BACKFILL_BLOCKED
+                    ).sum()
+                )
+                if not run_events.empty
+                else 0,
+                "diagnostic_only": True,
+                "promotion_eligible": False,
+                "final_holdout_evidence": False,
             }
         )
     return pd.DataFrame(records)
@@ -3177,6 +3587,10 @@ def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]
         else pd.DataFrame(),
         "data_universe": universe_health_frame(root),
         "reports_index": reports_inventory_frame(root),
+        "time_exit_diagnostic_status": time_exit_diagnostic_status_frame(root),
+        "time_exit_diagnostic_events": time_exit_diagnostic_events_frame(root),
+        "time_exit_diagnostic_observations": time_exit_diagnostic_observations_frame(root),
+        "time_exit_diagnostic_matured_outcomes": time_exit_diagnostic_matured_outcomes_frame(root),
     }
     discovery = signal_discovery_generation_frames(root)
     for name in (
@@ -3190,6 +3604,10 @@ def complete_engine_snapshot_frames(root: str | Path) -> dict[str, pd.DataFrame]
         "sector_rotation_buy_ordinary_policy_comparison",
         "derived_policy_outcomes",
         "signal_discovery_policy_comparison",
+        "time_exit_utility_labels",
+        "time_exit_utility_calibration_summary",
+        "time_exit_utility_signal_rows",
+        "time_exit_utility_policy_comparison",
     ):
         frame = discovery.get(name)
         if frame is not None and not frame.empty:
