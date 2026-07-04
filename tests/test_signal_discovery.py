@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from swing_rsi.application.dashboard_exports import to_xlsx_bytes
+from swing_rsi.engine.features import numeric_feature_columns, reject_label_columns
 from swing_rsi.engine.labels import LabelConfig, build_symbol_labels
 from swing_rsi.engine.signal_discovery import (
     CALIBRATION_DIAGNOSTIC_THRESHOLDS,
@@ -36,6 +37,16 @@ from swing_rsi.engine.target_stop_policy import (
     candidate_policy_outcome_labels,
     select_sector_rotation_buy_ordinary_policy_candidate,
     target_stop_policy_registry,
+)
+from swing_rsi.engine.time_exit_utility import (
+    SECTOR_ROTATION_BUY_ORDINARY_TIME_EXIT_HYPOTHESIS_ID,
+    TIME_EXIT_BASELINE_POLICY_ALIAS,
+    TIME_EXIT_UTILITY_LABEL_SCHEMA_VERSION,
+    augment_model_frame_with_time_exit_utility_labels,
+    build_time_exit_utility_labels,
+    time_exit_quality_bucket,
+    time_exit_utility_calibration_summary_frame,
+    time_exit_utility_outcome_labels,
 )
 
 
@@ -316,6 +327,7 @@ schema_version: multi_angle_signal_discovery_v1
 enabled_hypotheses:
   - sector_rotation_buy_20d
   - {SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_HYPOTHESIS_ID}
+  - {SECTOR_ROTATION_BUY_ORDINARY_TIME_EXIT_HYPOTHESIS_ID}
 horizons: [20]
 product_scopes: [POOLED, ORDINARY, LEVERAGED_INVERSE]
 model_families:
@@ -686,6 +698,13 @@ def test_hypothesis_registry_loads_required_archetypes_without_privileged_rsi() 
     assert baseline.target_stop_policy_status == "DEFAULT_BASELINE"
     assert baseline.target_stop_policy_target_multiple == 2.0
     assert baseline.target_stop_policy_stop_multiple == 1.0
+    time_exit = hypotheses[SECTOR_ROTATION_BUY_ORDINARY_TIME_EXIT_HYPOTHESIS_ID]
+    assert time_exit.eligible_product_scopes == ("ORDINARY",)
+    assert time_exit.direction == "BUY"
+    assert time_exit.archetype_id == "sector_rotation"
+    assert time_exit.time_exit_label_schema_version == TIME_EXIT_UTILITY_LABEL_SCHEMA_VERSION
+    assert "time_exit_utility" in time_exit.outcome_labels
+    assert "expected_time_exit_utility" in time_exit.model_tasks
 
 
 def test_target_stop_policy_candidate_selection_uses_calibration_only_rule() -> None:
@@ -761,6 +780,159 @@ def test_candidate_policy_derived_labels_are_separate_from_baseline_labels(tmp_p
     assert augmented[label_columns["target_before_stop"]].dropna().isin([0.0, 1.0]).all()
 
 
+def test_time_exit_utility_labels_are_policy_separate_and_label_side(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "time-exit-labels"
+    _write_universe(root)
+    _write_policy_candidate_feature_data(root)
+    modeling_path = next((root / "data" / "features").glob("*_modeling.parquet"))
+    modeling = pd.read_parquet(modeling_path)
+    before_modeling = modeling_path.read_bytes()
+    policies = target_stop_policy_registry()
+
+    augmented, labels = augment_model_frame_with_time_exit_utility_labels(
+        modeling,
+        policies,
+        cost_return=0.0005,
+    )
+
+    assert not labels.empty
+    assert set(labels["scope"].astype(str)) == {"ORDINARY"}
+    assert "TZA" not in set(labels["symbol"].astype(str))
+    assert TIME_EXIT_BASELINE_POLICY_ALIAS in set(labels["target_stop_policy_alias"].astype(str))
+    assert SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID in set(
+        labels["target_stop_policy_id"].astype(str)
+    )
+    assert set(labels["schema_version"].astype(str)) == {TIME_EXIT_UTILITY_LABEL_SCHEMA_VERSION}
+    assert labels["time_exit_positive_after_cost_20d"].dropna().isin([0.0, 1.0]).all()
+    assert labels["profitable_despite_failed_tbs_20d"].dropna().isin([0.0, 1.0]).all()
+    assert labels["early_adverse_recovery_20d"].dropna().isin([0.0, 1.0]).all()
+
+    candidate_policy = next(
+        policy
+        for policy in policies
+        if policy.policy_id == SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+    )
+    label_map = time_exit_utility_outcome_labels(candidate_policy)
+    for key in (
+        "positive_return",
+        "directional_return",
+        "time_exit_utility",
+        "profitable_despite_failed_tbs",
+        "early_adverse_recovery",
+    ):
+        assert label_map[key] in augmented.columns
+
+    sample = (
+        labels.loc[
+            labels["symbol"].astype(str).eq("AAA")
+            & labels["target_stop_policy_id"].astype(str).eq(candidate_policy.policy_id)
+            & labels["entry_price"].notna()
+        ]
+        .sort_values("Date")
+        .iloc[0]
+    )
+    symbol_frame = (
+        modeling.loc[modeling["symbol"].astype(str).eq("AAA")]
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+    position = int(
+        symbol_frame.index[pd.to_datetime(symbol_frame["Date"]).eq(pd.Timestamp(sample["Date"]))][0]
+    )
+    assert sample["entry_price"] == pytest.approx(symbol_frame.iloc[position + 1]["Open"])
+    assert sample["exit_price"] == pytest.approx(symbol_frame.iloc[position + 20]["Close"])
+    assert sample["time_exit_net_return_20d"] == pytest.approx(
+        sample["time_exit_gross_return_20d"] - 0.0005
+    )
+    assert bool(sample["profitable_despite_failed_tbs_20d"]) == (
+        bool(sample["target_before_stop"] < 0.5) and bool(sample["time_exit_net_return_20d"] > 0.0)
+    )
+    assert modeling_path.read_bytes() == before_modeling
+
+
+def test_time_exit_utility_guard_blocks_label_side_columns() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": pd.date_range("2026-01-01", periods=2),
+            "symbol": ["AAA", "AAA"],
+            "return_20": [0.01, 0.02],
+            "time_exit_net_return_20d": [0.01, -0.01],
+            "time_exit_utility_20d": [0.5, -0.2],
+            "profitable_despite_failed_tbs_20d": [1.0, 0.0],
+            "early_adverse_recovery_20d": [0.0, 1.0],
+            "label_custom_time_exit": [1.0, 0.0],
+        }
+    )
+
+    assert numeric_feature_columns(frame) == ["return_20"]
+    with pytest.raises(ValueError, match="Label-side columns"):
+        reject_label_columns(["return_20", "time_exit_utility_20d"])
+
+
+def test_time_exit_utility_handles_near_zero_mae_safely() -> None:
+    dates = pd.bdate_range("2026-01-02", periods=26)
+    frame = pd.DataFrame(
+        {
+            "Date": dates,
+            "symbol": "AAA",
+            "role": "stock",
+            "sector": "test",
+            "Open": 100.0,
+            "High": 100.0,
+            "Low": 100.0,
+            "Close": 100.0,
+            "Volume": 1_000_000,
+            "atr_pct_14": 0.0,
+            "label_end_date_20": dates.to_series(index=range(len(dates))).shift(-20),
+        }
+    )
+
+    labels = build_time_exit_utility_labels(
+        frame,
+        target_stop_policy_registry(),
+        cost_return=0.0005,
+    )
+    finite = pd.to_numeric(labels["time_exit_utility_20d"], errors="coerce").dropna()
+    assert not finite.empty
+    assert finite.map(math.isfinite).all()
+    assert time_exit_quality_bucket(0.025) == "STRONG_POSITIVE_TIME_EXIT"
+    assert time_exit_quality_bucket(0.001) == "MODEST_POSITIVE_TIME_EXIT"
+    assert time_exit_quality_bucket(-0.001) == "FLAT_TIME_EXIT"
+    assert time_exit_quality_bucket(-0.01) == "NEGATIVE_TIME_EXIT"
+    assert time_exit_quality_bucket(-0.06) == "SEVERE_NEGATIVE_TIME_EXIT"
+
+
+def test_time_exit_calibration_summary_separates_calibration_and_holdout(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "time-exit-summary"
+    _write_universe(root)
+    _write_policy_candidate_feature_data(root)
+    modeling = pd.read_parquet(next((root / "data" / "features").glob("*_modeling.parquet")))
+    labels = build_time_exit_utility_labels(
+        modeling,
+        target_stop_policy_registry(),
+        cost_return=0.0005,
+    )
+
+    summary = time_exit_utility_calibration_summary_frame(labels)
+
+    assert not summary.empty
+    assert {"calibration_only", "DEVELOPMENT_HOLDOUT_DIAGNOSTIC_ONLY"}.issubset(
+        set(summary["evidence_split"].astype(str))
+    )
+    calibration = summary.loc[summary["evidence_split"].astype(str).eq("calibration_only")]
+    holdout = summary.loc[
+        summary["evidence_split"].astype(str).eq("DEVELOPMENT_HOLDOUT_DIAGNOSTIC_ONLY")
+    ]
+    assert not calibration["development_holdout_diagnostic_only"].astype(bool).any()
+    assert holdout["development_holdout_diagnostic_only"].astype(bool).all()
+    assert calibration["sample_count"].min() > 0
+    assert holdout["sample_count"].min() > 0
+
+
 def test_signal_discovery_persists_target_stop_policy_candidate_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -788,6 +960,10 @@ def test_signal_discovery_persists_target_stop_policy_candidate_artifacts(
     assert not frames["sector_rotation_buy_ordinary_policy_comparison"].empty
     assert not frames["derived_policy_outcomes"].empty
     assert not frames["signal_discovery_policy_comparison"].empty
+    assert not frames["time_exit_utility_labels"].empty
+    assert not frames["time_exit_utility_calibration_summary"].empty
+    assert not frames["time_exit_utility_signal_rows"].empty
+    assert not frames["time_exit_utility_policy_comparison"].empty
     assert (root / "artifacts" / "signal_discovery" / "latest.json").exists()
     registry_ids = set(frames["target_stop_policy_registry"]["policy_id"].astype(str))
     assert SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID in registry_ids
@@ -828,11 +1004,70 @@ def test_signal_discovery_persists_target_stop_policy_candidate_artifacts(
     assert SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID in set(
         comparison["target_stop_policy_id"].astype(str)
     )
+    time_exit_hypothesis = hypotheses.loc[
+        hypotheses["hypothesis_id"]
+        .astype(str)
+        .eq(SECTOR_ROTATION_BUY_ORDINARY_TIME_EXIT_HYPOTHESIS_ID)
+    ]
+    assert not time_exit_hypothesis.empty
+    assert set(time_exit_hypothesis["target_stop_policy_id"].astype(str)) == {
+        SECTOR_ROTATION_BUY_ORDINARY_CANDIDATE_POLICY_ID
+    }
+    assert set(time_exit_hypothesis["time_exit_label_schema_version"].astype(str)) == {
+        TIME_EXIT_UTILITY_LABEL_SCHEMA_VERSION
+    }
+    time_exit_rows = frames["candidates"].loc[
+        frames["candidates"]["hypothesis_id"]
+        .astype(str)
+        .eq(SECTOR_ROTATION_BUY_ORDINARY_TIME_EXIT_HYPOTHESIS_ID)
+    ]
+    assert not time_exit_rows.empty
+    assert set(time_exit_rows["product_class_scope"].astype(str)) == {"ORDINARY"}
+    assert "LIVE_ACTIONABLE" not in set(time_exit_rows["candidate_status"].astype(str))
+    assert (
+        time_exit_rows["not_live_actionable_reason"]
+        .astype(str)
+        .str.contains(
+            "Time-exit utility is diagnostic",
+            regex=False,
+        )
+        .all()
+    )
+    for column in (
+        "time_exit_positive_probability",
+        "expected_time_exit_return",
+        "expected_time_exit_utility",
+        "profitable_despite_failed_tbs_probability",
+        "early_adverse_recovery_probability",
+    ):
+        assert column in time_exit_rows.columns
+    components = frames["score_components"].loc[
+        frames["score_components"]["hypothesis_id"]
+        .astype(str)
+        .eq(SECTOR_ROTATION_BUY_ORDINARY_TIME_EXIT_HYPOTHESIS_ID)
+    ]
+    assert {
+        "time_exit_positive_probability_component",
+        "expected_time_exit_return_component",
+        "time_exit_utility_component",
+        "failed_tbs_but_profitable_component",
+        "adverse_recovery_penalty",
+    }.issubset(set(components["component"].astype(str)))
     selected_feature_payloads = candidate_hypothesis["selected_features"].dropna()
     assert not selected_feature_payloads.empty
-    for payload in selected_feature_payloads:
+    for payload in pd.concat(
+        [
+            candidate_hypothesis["selected_features"].dropna(),
+            time_exit_hypothesis["selected_features"].dropna(),
+        ],
+        ignore_index=True,
+    ):
         selected = json.loads(payload)
         assert not any(str(feature).startswith("label_") for feature in selected)
+        assert not any("time_exit" in str(feature) for feature in selected)
+        assert not any("utility" in str(feature) for feature in selected)
+        assert not any("profitable_despite_failed_tbs" in str(feature) for feature in selected)
+        assert not any("early_adverse_recovery" in str(feature) for feature in selected)
     assert model_artifact.read_text(encoding="utf-8") == before_model_artifact
     assert modeling_path.read_bytes() == before_modeling
 
@@ -1079,6 +1314,10 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
                     ],
                     "derived_outcomes": frames["derived_policy_outcomes"],
                     "signal_policy_comparison": frames["signal_discovery_policy_comparison"],
+                    "time_exit_labels": frames["time_exit_utility_labels"],
+                    "time_exit_calibration": frames["time_exit_utility_calibration_summary"],
+                    "time_exit_signal_rows": frames["time_exit_utility_signal_rows"],
+                    "time_exit_policy_comparison": frames["time_exit_utility_policy_comparison"],
                 }
             )
         )
@@ -1105,6 +1344,10 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
     assert "sector_rotation_buy_ordinary_policy_comparison.csv" in written_names
     assert "derived_policy_outcomes.csv" in written_names
     assert "signal_discovery_policy_comparison.csv" in written_names
+    assert "time_exit_utility_labels.csv" in written_names
+    assert "time_exit_utility_calibration_summary.csv" in written_names
+    assert "time_exit_utility_signal_rows.csv" in written_names
+    assert "time_exit_utility_policy_comparison.csv" in written_names
     assert "metadata.json" in written_names
     assert {
         "signal_discovery_summary",
@@ -1131,6 +1374,10 @@ def test_signal_discovery_export_and_dashboard_workbook_sheets(
         "baseline_vs_candidate",
         "derived_outcomes",
         "signal_policy_comparison",
+        "time_exit_labels",
+        "time_exit_calibration",
+        "time_exit_signal_rows",
+        "time_exit_policy_comparison",
     }.issubset(set(workbook.sheetnames))
 
 

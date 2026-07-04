@@ -472,6 +472,20 @@ def _write_signal_discovery_generation(root: Path) -> str:
         "calibrated_probability": 0.68,
         "probability": 0.68,
         "target_before_stop_probability": 0.61,
+        "time_exit_label_schema_version": "sector_rotation_buy_ordinary_time_exit_utility_v1",
+        "time_exit_label_notice": (
+            "Time-exit utility is diagnostic. It does not override gates or create a live signal."
+        ),
+        "time_exit_positive_probability": 0.64,
+        "expected_time_exit_return": 0.019,
+        "expected_time_exit_utility": 0.72,
+        "profitable_despite_failed_tbs_probability": 0.31,
+        "early_adverse_recovery_probability": 0.22,
+        "time_exit_positive_probability_component": 0.64,
+        "expected_time_exit_return_component": 0.56,
+        "time_exit_utility_component": 0.81,
+        "failed_tbs_but_profitable_component": 0.31,
+        "adverse_recovery_penalty": 0.22,
         "expected_return": 0.024,
         "expected_mfe": 0.052,
         "expected_mae": -0.018,
@@ -743,6 +757,83 @@ def _write_signal_discovery_generation(root: Path) -> str:
                     "selected_rows": 1,
                     "no_signal_rows": 1,
                     "tbs_blocked_rows": 0,
+                }
+            ]
+        ),
+        "time_exit_utility_labels": pd.DataFrame(
+            [
+                {
+                    "schema_version": "sector_rotation_buy_ordinary_time_exit_utility_v1",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_alias": "fixture_policy_candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "archetype": "sector_rotation_buy",
+                    "action": "BUY",
+                    "scope": "ORDINARY",
+                    "horizon": 20,
+                    "Date": "2026-05-26",
+                    "symbol": "DEMO3",
+                    "time_exit_net_return_20d": 0.019,
+                    "time_exit_positive_after_cost_20d": 1.0,
+                    "time_exit_utility_20d": 0.72,
+                    "profitable_despite_failed_tbs_20d": 0.0,
+                    "early_adverse_recovery_20d": 0.0,
+                    "time_exit_quality_bucket_20d": "MODEST_POSITIVE_TIME_EXIT",
+                    "MFE_20d": 0.052,
+                    "MAE_20d": -0.018,
+                    "time_to_max_favorable_excursion_20d": 4.0,
+                    "time_to_max_adverse_excursion_20d": 2.0,
+                    "label_end_date_20": "2026-06-23",
+                }
+            ]
+        ),
+        "time_exit_utility_calibration_summary": pd.DataFrame(
+            [
+                {
+                    "schema_version": "sector_rotation_buy_ordinary_time_exit_utility_v1",
+                    "evidence_split": "calibration_only",
+                    "development_holdout_diagnostic_only": False,
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "target_stop_policy_alias": "fixture_policy_candidate",
+                    "target_stop_policy_status": "EXPERIMENTAL_CANDIDATE",
+                    "archetype": "sector_rotation_buy",
+                    "action": "BUY",
+                    "scope": "ORDINARY",
+                    "horizon": 20,
+                    "sample_count": 50,
+                    "time_exit_positive_rate": 0.58,
+                    "average_time_exit_net_return": 0.012,
+                    "average_time_exit_utility": 0.42,
+                    "profitable_despite_failed_tbs_rate": 0.22,
+                    "early_adverse_recovery_rate": 0.18,
+                }
+            ]
+        ),
+        "time_exit_utility_signal_rows": pd.DataFrame(
+            [
+                {
+                    "signal_id": signal_id,
+                    "generation_id": generation_id,
+                    "as_of_date": "2026-05-26",
+                    "ticker": "DEMO3",
+                    "hypothesis_id": "reversal_buy_5d",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "decision": "BUY_CANDIDATE",
+                    "candidate_status": "SHADOW_ONLY",
+                    "time_exit_positive_probability": 0.64,
+                    "expected_time_exit_return": 0.019,
+                    "expected_time_exit_utility": 0.72,
+                }
+            ]
+        ),
+        "time_exit_utility_policy_comparison": pd.DataFrame(
+            [
+                {
+                    "schema_version": "sector_rotation_buy_ordinary_time_exit_utility_v1",
+                    "evidence_split": "calibration_only",
+                    "target_stop_policy_id": "fixture_policy_candidate",
+                    "sample_count": 50,
+                    "time_exit_positive_rate": 0.58,
                 }
             ]
         ),
@@ -1394,8 +1485,14 @@ def test_candidate_detail_displays_signal_discovery_score_breakdown(
     assert "Signal Score Breakdown" in subheaders
     assert "Footprint Evidence Table" in subheaders
     assert "Target/Stop Policy" in subheaders
+    assert "Time-Exit Utility Diagnostic" in subheaders
     assert any(
         "Experimental target/stop policy. Development evidence only. Not a live signal."
+        in warning.value
+        for warning in app.warning
+    )
+    assert any(
+        "Time-exit utility is diagnostic. It does not override gates or create a live signal."
         in warning.value
         for warning in app.warning
     )
@@ -1779,6 +1876,10 @@ def test_reports_and_exports_displays_signal_discovery_generation(
     assert not frames["sector_rotation_buy_ordinary_policy_comparison"].empty
     assert not frames["derived_policy_outcomes"].empty
     assert not frames["signal_discovery_policy_comparison"].empty
+    assert not frames["time_exit_utility_labels"].empty
+    assert not frames["time_exit_utility_calibration_summary"].empty
+    assert not frames["time_exit_utility_signal_rows"].empty
+    assert not frames["time_exit_utility_policy_comparison"].empty
     assert not blocker_frames["blocker_rows"].empty
     assert not blocker_frames["by_reason"].empty
     top_blockers = _top_blocker_rows(blocker_frames["blocker_rows"])
