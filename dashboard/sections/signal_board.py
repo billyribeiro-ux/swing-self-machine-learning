@@ -24,6 +24,7 @@ from swing_rsi.application.dashboard_service import (
     regime_cache_status_frame,
     signal_board_frame,
     signal_board_metrics,
+    time_exit_diagnostic_observations_frame,
 )
 
 SIGNAL_COLUMNS: tuple[str, ...] = (
@@ -242,6 +243,8 @@ def render_page() -> None:
             "Open shadow positions": metrics["open_shadow_positions"],
             "Closed shadow positions": metrics["closed_shadow_positions"],
             "Matured outcomes": metrics["matured_outcomes"],
+            "Time-exit diagnostic observations": metrics["time_exit_diagnostic_observations"],
+            "Time-exit diagnostic matured": metrics["time_exit_diagnostic_matured"],
             "Promoted models": metrics["promoted_models"],
             "Models collecting final-holdout evidence": metrics[
                 "models_collecting_final_holdout_evidence"
@@ -253,6 +256,44 @@ def render_page() -> None:
         columns=4,
     )
     _render_regime_cache_cards(root)
+    diagnostic_observations = time_exit_diagnostic_observations_frame(root)
+    streamlit.subheader(
+        f"Time-Exit Diagnostic Observations: {_row_count_label(len(diagnostic_observations))}"
+    )
+    streamlit.caption(
+        "Prospective time-exit diagnostic rows are DIAGNOSTIC_ONLY / "
+        "RESEARCH_OBSERVATION. They are separate from live actionable signals and "
+        "shadow final-holdout signals."
+    )
+    if diagnostic_observations.empty:
+        streamlit.info("No prospective time-exit diagnostic observations are recorded.")
+    else:
+        diagnostic_columns = [
+            column
+            for column in (
+                "observation_status",
+                "ticker",
+                "as_of_date",
+                "hypothesis_id",
+                "target_before_stop_probability",
+                "time_exit_positive_probability",
+                "expected_time_exit_return",
+                "expected_time_exit_utility",
+                "blocker_reason",
+                "reason",
+            )
+            if column in diagnostic_observations.columns
+        ]
+        streamlit.dataframe(
+            display_frame(diagnostic_observations[diagnostic_columns]),
+            width="stretch",
+            hide_index=True,
+        )
+        render_table_downloads(
+            diagnostic_observations,
+            basename="time_exit_diagnostic_observations",
+            label="time_exit_diagnostic_observations",
+        )
     if int(metrics["promoted_models"]) == 0:
         streamlit.warning(
             "No promoted live scanner model exists yet.\n\n"

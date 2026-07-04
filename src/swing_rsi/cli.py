@@ -13,9 +13,11 @@ from swing_rsi.application.engine_service import (
     evaluate_final_holdout,
     export_multi_angle_signal_discovery,
     export_multi_angle_signal_discovery_blockers,
+    export_prospective_time_exit_diagnostic,
     final_holdout_status,
     forward_events,
     initialize_final_holdout,
+    initialize_time_exit_diagnostic,
     list_registered_models,
     promote_registered_model,
     run_daily_cycle,
@@ -25,7 +27,9 @@ from swing_rsi.application.engine_service import (
     run_multi_angle_signal_discovery,
     signal_discovery_blocker_report,
     signal_discovery_status,
+    time_exit_diagnostic_status,
     update_final_holdout,
+    update_time_exit_diagnostic,
     update_universe_data,
 )
 from swing_rsi.application.research_service import run_research
@@ -512,6 +516,66 @@ def command_final_holdout_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_time_exit_diagnostic_init(args: argparse.Namespace) -> int:
+    result = initialize_time_exit_diagnostic(
+        Path.cwd(),
+        hypothesis=args.hypothesis,
+        generation=args.generation,
+        baseline_date=args.baseline_date,
+    )
+    run = result.run
+    print(result.message)
+    print(f"Diagnostic run ID: {run.diagnostic_run_id}")
+    print(f"Schema version: {run.schema_version}")
+    print(f"Status: {run.status}")
+    print(f"Baseline market date: {run.baseline_market_date}")
+    print(f"First eligible future as-of date: {run.first_eligible_future_as_of_date}")
+    print(f"Hypothesis ID: {run.hypothesis_id}")
+    print(f"Product scope: {run.product_scope}")
+    print(f"Target/stop policy IDs: {', '.join(run.target_stop_policy_ids)}")
+    print(f"Label schema: {run.label_schema}")
+    print(f"Feature manifest hash: {run.feature_manifest_hash}")
+    print(f"Signal-discovery generation ID: {run.signal_discovery_generation_id}")
+    print("No historical signal-discovery rows were backfilled by initialization.")
+    print("Diagnostic observations are research-only and cannot create live signals.")
+    return 0
+
+
+def command_time_exit_diagnostic_update(_: argparse.Namespace) -> int:
+    result = update_time_exit_diagnostic(Path.cwd())
+    print(f"Diagnostic run ID: {result.diagnostic_run_id}")
+    print(f"Status: {result.status}")
+    print(f"Events inserted: {result.events_inserted}")
+    print(f"Observations created: {result.observations_created}")
+    print(f"Rejected observations: {result.rejected_observations}")
+    print(f"Pending entries created: {result.pending_entries_created}")
+    print(f"Entries filled: {result.entries_filled}")
+    print(f"Position marks created: {result.position_marks_created}")
+    print(f"Matured outcomes: {result.matured_outcomes}")
+    print(f"Backfill-blocked rows: {result.backfill_blocked}")
+    print(
+        "No live signal, promotion, final-holdout, forward-update, scanner, or FMP action was run."
+    )
+    return 0
+
+
+def command_time_exit_diagnostic_status(_: argparse.Namespace) -> int:
+    frame = time_exit_diagnostic_status(Path.cwd())
+    if frame.empty:
+        print("No prospective time-exit diagnostic run is initialized.")
+        return 0
+    print(frame.to_string(index=False))
+    return 0
+
+
+def command_time_exit_diagnostic_export(args: argparse.Namespace) -> int:
+    written = export_prospective_time_exit_diagnostic(Path.cwd(), output=args.output)
+    print(f"Exported {len(written):,} prospective time-exit diagnostic files to {args.output}")
+    for path in written:
+        print(f"- {path}")
+    return 0
+
+
 def command_daily_cycle(args: argparse.Namespace) -> int:
     result = run_daily_cycle(
         Path.cwd(),
@@ -700,6 +764,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow non-promotable early diagnostics before sample sufficiency is complete",
     )
     final_evaluate.set_defaults(handler=command_final_holdout_evaluate)
+
+    time_exit_init = subparsers.add_parser(
+        "time-exit-diagnostic-init",
+        help="Initialize the prospective Sector Rotation BUY ORDINARY time-exit diagnostic ledger",
+    )
+    time_exit_init.add_argument(
+        "--hypothesis",
+        default="sector_rotation_buy_ordinary_20d_time_exit_utility_v1",
+    )
+    time_exit_init.add_argument("--generation", default="latest")
+    time_exit_init.add_argument("--baseline-date", default=None)
+    time_exit_init.set_defaults(handler=command_time_exit_diagnostic_init)
+
+    time_exit_update = subparsers.add_parser(
+        "time-exit-diagnostic-update",
+        help="Process future diagnostic observations and mature time-exit outcomes",
+    )
+    time_exit_update.set_defaults(handler=command_time_exit_diagnostic_update)
+
+    time_exit_status = subparsers.add_parser(
+        "time-exit-diagnostic-status",
+        help="Show prospective time-exit diagnostic ledger status",
+    )
+    time_exit_status.set_defaults(handler=command_time_exit_diagnostic_status)
+
+    time_exit_export = subparsers.add_parser(
+        "time-exit-diagnostic-export",
+        help="Export prospective time-exit diagnostic ledger CSV files",
+    )
+    time_exit_export.add_argument("--output", required=True)
+    time_exit_export.set_defaults(handler=command_time_exit_diagnostic_export)
 
     daily = subparsers.add_parser("daily-cycle", help="Run the local daily scanner cycle")
     daily.add_argument("--universe", default=None)

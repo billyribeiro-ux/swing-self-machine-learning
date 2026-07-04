@@ -66,6 +66,14 @@ from swing_rsi.engine.signal_discovery import (
     signal_discovery_blocker_report_frames,
 )
 from swing_rsi.engine.storage import dumps, engine_connection, initialize_engine_db
+from swing_rsi.engine.time_exit_diagnostic import (
+    TimeExitDiagnosticInitResult,
+    TimeExitDiagnosticUpdateResult,
+    export_time_exit_diagnostic,
+    initialize_time_exit_diagnostic_run,
+    process_time_exit_diagnostic_update,
+    time_exit_diagnostic_status_frame,
+)
 from swing_rsi.engine.universe import UniverseConfig, load_universe_config, universe_to_frame_rows
 
 
@@ -565,6 +573,37 @@ def update_final_holdout(root: str | Path) -> FinalHoldoutUpdateResult:
 
 def final_holdout_status(root: str | Path) -> pd.DataFrame:
     return final_holdout_status_frame(root)
+
+
+def initialize_time_exit_diagnostic(
+    root: str | Path,
+    *,
+    hypothesis: str,
+    generation: str = "latest",
+    baseline_date: str | None = None,
+) -> TimeExitDiagnosticInitResult:
+    return initialize_time_exit_diagnostic_run(
+        root,
+        hypothesis=hypothesis,
+        generation=generation,
+        baseline_date=baseline_date,
+    )
+
+
+def update_time_exit_diagnostic(root: str | Path) -> TimeExitDiagnosticUpdateResult:
+    return process_time_exit_diagnostic_update(root)
+
+
+def time_exit_diagnostic_status(root: str | Path) -> pd.DataFrame:
+    return time_exit_diagnostic_status_frame(root)
+
+
+def export_prospective_time_exit_diagnostic(
+    root: str | Path,
+    *,
+    output: str | Path,
+) -> tuple[Path, ...]:
+    return export_time_exit_diagnostic(root, output=output)
 
 
 def final_holdout_event_history(root: str | Path, run_id: str | None = None) -> pd.DataFrame:

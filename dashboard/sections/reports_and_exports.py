@@ -21,6 +21,10 @@ from swing_rsi.application.dashboard_service import (
     scanner_snapshot_list_frame,
     signal_discovery_blocker_frames,
     signal_discovery_generation_frames,
+    time_exit_diagnostic_events_frame,
+    time_exit_diagnostic_matured_outcomes_frame,
+    time_exit_diagnostic_observations_frame,
+    time_exit_diagnostic_status_frame,
 )
 
 BLOCKER_TOP_ROW_COLUMNS: tuple[str, ...] = (
@@ -232,11 +236,43 @@ def render_page() -> None:
                 "gates": gate_audit_frame(root),
                 "scanner": scanner_rows_frame(root),
                 "final_holdout": final_holdout_runs_frame(root),
+                "time_exit_diagnostic_status": time_exit_diagnostic_status_frame(root),
+                "time_exit_diagnostic_observations": time_exit_diagnostic_observations_frame(root),
                 "product_class": product_class_comparison_frame(root),
                 "feature_families": _feature_families_from_models(),
             },
         )
         streamlit.success(f"Saved {output.relative_to(root)}")
+
+    streamlit.subheader("Prospective Time-Exit Diagnostic")
+    diagnostic_sheets = {
+        "time_exit_diagnostic_status": time_exit_diagnostic_status_frame(root),
+        "time_exit_diagnostic_events": time_exit_diagnostic_events_frame(root),
+        "time_exit_diagnostic_observations": time_exit_diagnostic_observations_frame(root),
+        "time_exit_diagnostic_matured_outcomes": time_exit_diagnostic_matured_outcomes_frame(root),
+    }
+    if any(not frame.empty for frame in diagnostic_sheets.values()):
+        streamlit.caption(
+            "Diagnostic-only prospective time-exit evidence. These rows are not live "
+            "signals and not final-holdout evidence."
+        )
+        streamlit.dataframe(
+            display_frame(diagnostic_sheets["time_exit_diagnostic_status"]),
+            width="stretch",
+            hide_index=True,
+        )
+        for name, frame in diagnostic_sheets.items():
+            if not frame.empty:
+                render_table_downloads(frame, basename=name, label=name)
+        if streamlit.button("Create time-exit diagnostic workbook"):
+            output = save_xlsx_report(
+                root,
+                "time_exit_diagnostic.xlsx",
+                diagnostic_sheets,
+            )
+            streamlit.success(f"Saved {output.relative_to(root)}")
+    else:
+        streamlit.info("No prospective time-exit diagnostic ledger is initialized.")
 
     discovery_frames = signal_discovery_generation_frames(root, include_blocked_analogs=True)
     discovery_sheets = {

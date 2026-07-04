@@ -8,7 +8,11 @@ from dashboard.ui.components import render_page_guidance, render_page_header, re
 from dashboard.ui.downloads import render_table_downloads
 from dashboard.ui.formatting import display_frame
 from swing_rsi.application.dashboard_exports import to_xlsx_bytes
-from swing_rsi.application.dashboard_service import candidate_detail_url, scanner_results_frame
+from swing_rsi.application.dashboard_service import (
+    candidate_detail_url,
+    scanner_results_frame,
+    time_exit_diagnostic_status_frame,
+)
 from swing_rsi.application.footprint_attribution import (
     FOOTPRINT_DISPLAY_COLUMNS,
     footprint_evidence_frames,
@@ -548,6 +552,15 @@ def render_page() -> None:
         candidate,
         "time_exit_utility_policy_comparison_json",
     )
+    prospective_time_exit_observation = _single_json_frame(
+        candidate,
+        "time_exit_diagnostic_observation_json",
+    )
+    prospective_time_exit_matured = _single_json_frame(
+        candidate,
+        "time_exit_diagnostic_matured_outcome_json",
+    )
+    prospective_time_exit_status = time_exit_diagnostic_status_frame(root)
     feature_snapshot = pd.DataFrame([candidate.to_dict()])
     risk = _risk_frame(candidate)
 
@@ -745,6 +758,44 @@ def render_page() -> None:
             time_exit_signal_rows,
             basename="candidate_detail_time_exit_utility_signal_rows",
             label="time_exit_utility_signal_rows",
+        )
+
+    if not prospective_time_exit_observation.empty or not prospective_time_exit_matured.empty:
+        streamlit.subheader("Prospective Time-Exit Diagnostic")
+        streamlit.warning(
+            "Prospective time-exit diagnostic is DIAGNOSTIC_ONLY / RESEARCH_OBSERVATION. "
+            "It is not a live signal and not final-holdout evidence."
+        )
+        if not prospective_time_exit_status.empty:
+            streamlit.caption("Diagnostic run status")
+            streamlit.dataframe(
+                display_frame(prospective_time_exit_status),
+                width="stretch",
+                hide_index=True,
+            )
+        if not prospective_time_exit_observation.empty:
+            streamlit.caption("Observation state")
+            streamlit.dataframe(
+                display_frame(prospective_time_exit_observation),
+                width="stretch",
+                hide_index=True,
+            )
+        if not prospective_time_exit_matured.empty:
+            streamlit.caption("Matured time-exit result")
+            streamlit.dataframe(
+                display_frame(prospective_time_exit_matured),
+                width="stretch",
+                hide_index=True,
+            )
+        render_table_downloads(
+            prospective_time_exit_observation,
+            basename="candidate_detail_prospective_time_exit_observation",
+            label="prospective_time_exit_observation",
+        )
+        render_table_downloads(
+            prospective_time_exit_matured,
+            basename="candidate_detail_prospective_time_exit_matured",
+            label="prospective_time_exit_matured",
         )
 
     if not calibration_overview.empty:
@@ -970,6 +1021,9 @@ def render_page() -> None:
                 "time_exit_calibration": time_exit_summary,
                 "time_exit_signal_rows": time_exit_signal_rows,
                 "time_exit_policy_comparison": time_exit_policy_comparison,
+                "prospective_time_exit_status": prospective_time_exit_status,
+                "prospective_time_exit_observation": prospective_time_exit_observation,
+                "prospective_time_exit_matured": prospective_time_exit_matured,
                 "residual_unexplained": footprint.residual_unexplained,
                 "signal_score_breakdown": signal_score,
                 "attribution": attribution,
