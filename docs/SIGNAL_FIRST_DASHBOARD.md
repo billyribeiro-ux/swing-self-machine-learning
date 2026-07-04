@@ -242,6 +242,10 @@ Candidate Detail workbook exports include measured footprint sheets:
 - `baseline_vs_candidate`
 - `derived_outcomes`
 - `signal_policy_comparison`
+- `time_exit_labels`
+- `time_exit_calibration`
+- `time_exit_signal_rows`
+- `time_exit_policy_comparison`
 - `residual_unexplained`
 
 Reports and Exports includes Signal Discovery calibration audit sheets when
@@ -258,6 +262,10 @@ available:
 - `sector_rotation_buy_ordinary_policy_comparison`
 - `derived_policy_outcomes`
 - `signal_discovery_policy_comparison`
+- `time_exit_utility_labels`
+- `time_exit_utility_calibration_summary`
+- `time_exit_utility_signal_rows`
+- `time_exit_utility_policy_comparison`
 
 Signal Board keeps target/stop policy display compact. Candidate Detail shows
 baseline-versus-experimental policy metrics, calibration-only selection
@@ -265,6 +273,17 @@ evidence, exact derived policy outcomes when available, and the warning:
 
 ```text
 Experimental target/stop policy. Development evidence only. Not a live signal.
+```
+
+When time-exit utility diagnostics are available, Signal Board shows compact
+time-exit positive probability and utility fields. Candidate Detail shows a
+Time-Exit Utility Diagnostic section with TBS probability, time-exit positive
+probability, expected time-exit return, expected time-exit utility,
+profitable-despite-failed-TBS evidence, early-adverse-recovery evidence,
+label-side rows, calibration summaries, and the warning:
+
+```text
+Time-exit utility is diagnostic. It does not override gates or create a live signal.
 ```
 
 Gate Audit keeps canonical model gates unchanged and adds a separate Signal

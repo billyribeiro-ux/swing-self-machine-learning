@@ -1,5 +1,29 @@
 # Decision Log
 
+## 2026-06-30 — Sector Rotation BUY ORDINARY gets time-exit utility diagnostics
+
+Decision: Add `sector_rotation_buy_ordinary_time_exit_utility_v1` as a
+label-side diagnostic schema and add the experimental hypothesis
+`sector_rotation_buy_ordinary_20d_time_exit_utility_v1`. The hypothesis is
+`ORDINARY`-only, BUY-only, 20 sessions, and Sector Rotation only. It keeps the
+existing target-before-stop probability evidence and gates while adding
+diagnostic heads for time-exit positive probability, expected time-exit net
+return, expected time-exit utility, profitable-despite-failed-TBS probability,
+and early-adverse-recovery probability.
+
+Time-exit utility labels are derived in memory and persisted as generated
+artifacts keyed by target/stop policy, date, and symbol. Existing baseline
+labels and prior model artifacts are not rewritten. Columns containing
+`time_exit`, `utility`, `profitable_despite_failed_tbs`, or
+`early_adverse_recovery` are blocked from feature matrices. The hypothesis
+cannot produce live actionable rows or promote a model without future
+governance.
+
+Reason: The Sector Rotation BUY `ORDINARY` diagnostic found a
+`STOP_TOO_TIGHT` pattern and measured that 44.51% of failed-TBS rows were still
+profitable at the 20-session time exit. That requires a separate diagnostic
+view rather than weakening TBS gates.
+
 ## 2026-06-30 — Sector Rotation BUY ORDINARY gets an experimental target/stop policy candidate
 
 Decision: Add `target_stop_policy_candidate_v1` and register an experimental

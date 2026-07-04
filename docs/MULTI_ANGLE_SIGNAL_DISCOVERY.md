@@ -88,6 +88,35 @@ or utility, and does not worsen concentration.
 The candidate does not replace the default policy, lower thresholds, weaken
 OOD governance, bypass gates, create live actionable rows, or promote models.
 
+## Time-Exit Utility Diagnostics
+
+Signal Discovery also supports
+`sector_rotation_buy_ordinary_time_exit_utility_v1` as a label-side diagnostic
+schema for Sector Rotation BUY `ORDINARY` rows at the 20-session horizon.
+
+The experimental hypothesis is:
+
+- `sector_rotation_buy_ordinary_20d_time_exit_utility_v1`
+- `ORDINARY` scope only
+- BUY action only
+- Sector Rotation archetype only
+- 20-session horizon
+- associated with
+  `sector_rotation_buy_ordinary_20d_experimental_t2p0_s1p25`
+
+The hypothesis persists both target-before-stop evidence and time-exit evidence:
+
+- TBS probability remains present and gated.
+- Time-exit positive probability is modeled as an additional diagnostic target.
+- Expected time-exit net return is modeled as a diagnostic return target.
+- Expected time-exit utility is modeled as a diagnostic utility target.
+- Profitable-despite-failed-TBS and early-adverse-recovery probabilities are
+  persisted as separate components when the labels have class support.
+
+Time-exit labels do not replace TBS labels, do not lower thresholds, do not
+weaken OOD governance, do not bypass gates, and do not create live actionable
+signals.
+
 ## Chronology
 
 For each hypothesis:
@@ -108,6 +137,9 @@ Experimental policy outcomes are derived in memory for the discovery run and
 persisted as generated artifacts. Existing label parquet files are not
 overwritten. Candidate-policy label columns remain prefixed with `label_`, and
 feature selection still rejects every `label_` column before model fitting.
+Time-exit label-side columns containing `time_exit`, `utility`,
+`profitable_despite_failed_tbs`, or `early_adverse_recovery` are also blocked
+from feature matrices.
 
 ## Model Families
 
@@ -310,9 +342,18 @@ Policy-candidate exports include:
 - `derived_policy_outcomes.csv`
 - `signal_discovery_policy_comparison.csv`
 
+Time-exit utility exports include:
+
+- `time_exit_utility_labels.csv`
+- `time_exit_utility_calibration_summary.csv`
+- `time_exit_utility_signal_rows.csv`
+- `time_exit_utility_policy_comparison.csv`
+
 Dashboard workbooks expose the policy sheets as `policy_registry`,
 `calibration_selection`, `baseline_vs_candidate`, `derived_outcomes`,
-`signal_rows`, and `gates` when data is available.
+`signal_rows`, and `gates` when data is available. Time-exit utility workbook
+sheets include `time_exit_labels`, `calibration_summary`, `signal_rows`, and
+`policy_comparison`.
 
 Reports and Exports can also create a Signal Discovery Blockers workbook with:
 
